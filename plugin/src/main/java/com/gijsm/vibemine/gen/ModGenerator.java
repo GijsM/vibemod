@@ -145,8 +145,26 @@ public final class ModGenerator {
         int attempt = 0;
         while (true) {
             l.phase(attempt == 0 ? "Thinking" : "Thinking (repair " + attempt + ")");
-            String response = client.complete(PromptLibrary.systemPrompt(), messages)
-                    .get(300, TimeUnit.SECONDS);
+            String response;
+            try {
+                response = client.complete(PromptLibrary.systemPrompt(), messages)
+                        .get(300, TimeUnit.SECONDS);
+            } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException apiFail) {
+                // Truncated/empty/flaky API responses are retryable rounds, not run-killers.
+                String reason = brief(apiFail.getCause() != null ? apiFail.getCause() : apiFail);
+                plugin.getLogger().warning("LLM round failed (" + reason + "), retrying");
+                if (attempt++ >= budget) {
+                    return new Result(false, forcedName, 0, attempt - 1,
+                            "The model's response failed " + attempt + " time(s): " + reason);
+                }
+                l.detail("Model response failed (" + firstLineOf(reason) + "), retrying…");
+                // No assistant turn to append (nothing usable came back); steer the retry:
+                messages.add(new OpenRouterClient.ChatMessage("user",
+                        "Your previous response was truncated or empty (" + reason + "). "
+                        + "Respond again and BE CONCISE: keep the manual short, prefer fewer and "
+                        + "smaller files, and stay well within the token limit. Same strict JSON."));
+                continue;
+            }
 
             l.phase("Writing");
             GeneratedProject project;
@@ -333,6 +351,11 @@ public final class ModGenerator {
 
     private static String firstNonBlank(String preferred, String fallback) {
         return preferred != null && !preferred.isBlank() ? preferred : fallback;
+    }
+
+    private static String firstLineOf(String s) {
+        int nl = s.indexOf('\n');
+        return nl < 0 ? s : s.substring(0, nl);
     }
 
     private static String brief(Throwable t) {

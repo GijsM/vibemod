@@ -32,6 +32,7 @@ public final class OpenRouterClient {
     private final String apiKey;
     private volatile String model;
     private volatile Duration timeout;
+    private volatile int maxTokens = 32000;
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
         this.apiKey = apiKey;
@@ -39,11 +40,16 @@ public final class OpenRouterClient {
         this.timeout = timeout;
     }
 
+    /** Cap on completion tokens per request; big mods need headroom. */
+    public void setMaxTokens(int maxTokens) {
+        this.maxTokens = Math.max(1000, maxTokens);
+    }
+
     /** POST to the chat-completions endpoint; returns the assistant message text. */
     public CompletableFuture<String> complete(String systemPrompt, List<ChatMessage> messages) {
         JsonObject body = new JsonObject();
         body.addProperty("model", model);
-        body.addProperty("max_tokens", 16000);
+        body.addProperty("max_tokens", maxTokens);
         body.addProperty("temperature", 0.4);
 
         JsonArray msgs = new JsonArray();
@@ -95,7 +101,17 @@ public final class OpenRouterClient {
         try {
             JsonArray choices = json.getAsJsonArray("choices");
             JsonObject first = choices.get(0).getAsJsonObject();
+            String finishReason = first.has("finish_reason") && !first.get("finish_reason").isJsonNull()
+                    ? first.get("finish_reason").getAsString() : "";
             String content = first.getAsJsonObject("message").get("content").getAsString();
+            if ("length".equals(finishReason)) {
+                return CompletableFuture.failedFuture(new IOException(
+                        "response truncated: hit the max_tokens limit (" + maxTokens + ")"));
+            }
+            if (content.isBlank()) {
+                return CompletableFuture.failedFuture(new IOException(
+                        "response had empty content (finish_reason=" + finishReason + ")"));
+            }
             return CompletableFuture.completedFuture(content);
         } catch (RuntimeException e) {
             String snippet = responseBody.length() > 500 ? responseBody.substring(0, 500) : responseBody;

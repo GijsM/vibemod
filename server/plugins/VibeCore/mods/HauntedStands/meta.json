@@ -81,5 +81,7 @@
       "step": 0.05
     }
   ],
-  "configValues": {}
+  "configValues": {
+    "night-only": "false"
+  }
 }

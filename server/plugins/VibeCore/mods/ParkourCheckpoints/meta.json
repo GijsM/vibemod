@@ -1,11 +1,11 @@
 {
   "name": "ParkourCheckpoints",
-  "description": "Standing on gold blocks sets your parkour checkpoint, falling below y\u003d0 teleports you back, and /leaderboard shows the fastest climbers.",
-  "usage": "",
-  "manual": "",
-  "icon": "",
+  "description": "Build and run multiple independent named parkour courses, each with its own start pad, ordered checkpoints, finish pad, and leaderboard.",
+  "usage": "Run /parkour create sky, stand where you want the start and type /parkour setstart sky, then setend sky and try it",
+  "manual": "Operators design courses with /parkour create \u003cname\u003e, then stand on the exact block that should be the start and run /parkour setstart \u003cname\u003e, stand on the finish block and run /parkour setend \u003cname\u003e, and add as many /parkour addcheckpoint \u003cname\u003e blocks as they like along the route (use /parkour clearcheckpoints \u003cname\u003e to wipe them and /parkour delete \u003cname\u003e to remove a course entirely). Anyone can browse courses with /parkour list, see details with /parkour info \u003cname\u003e, check times with /parkour leaderboard \u003cname\u003e, and bail out of a run with /parkour leave. Walking onto a course\u0027s start block begins a timed run for that course specifically, its checkpoints save your last-good spot, and reaching its end block finishes the run, records your best time, and shows a firework burst with a completion sound. Falling too low teleports you back to your most recent checkpoint (or the world spawn if you have not started a run) - the min-y setting (default -10) controls how far you can fall before that kicks in. The require-sequential-checkpoints toggle (default on) decides whether checkpoints must be hit in order to count, and leaderboard-size (default 10) controls how many names show per /parkour leaderboard listing. Since every course tracks its own exact block locations, you can build as many overlapping or separate courses as you want without them interfering with each other.",
+  "icon": "GOLDEN_BOOTS",
   "mainClass": "vibemod.parkourcheckpoints.ParkourCheckpoints",
-  "currentVersion": 1,
+  "currentVersion": 2,
   "enabled": true,
   "creator": "player",
   "versions": [
@@ -14,8 +14,42 @@
       "prompt": "a parkour checkpoint system: standing on gold blocks sets your checkpoint, falling below y\u003d0 teleports you back, with a timer and a /leaderboard command",
       "model": "anthropic/claude-sonnet-5",
       "createdAt": 1787321542973
+    },
+    {
+      "version": 2,
+      "prompt": "make this a lot more sophisticated. I want a starting point, an ending point, and a way to make multiple named parkour courses that are each their own thing",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787326294246
     }
   ],
-  "config": [],
+  "config": [
+    {
+      "key": "min-y",
+      "type": "integer",
+      "def": "-10",
+      "description": "World Y level below which a player is considered fallen and teleported back to their last checkpoint.",
+      "min": -64.0,
+      "max": 100.0,
+      "step": 1.0
+    },
+    {
+      "key": "require-sequential-checkpoints",
+      "type": "boolean",
+      "def": "true",
+      "description": "Whether checkpoints on a course must be touched in order to count.",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 1.0
+    },
+    {
+      "key": "leaderboard-size",
+      "type": "integer",
+      "def": "10",
+      "description": "How many entries show when viewing a course\u0027s leaderboard.",
+      "min": 1.0,
+      "max": 25.0,
+      "step": 1.0
+    }
+  ],
   "configValues": {}
 }

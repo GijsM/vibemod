@@ -76,6 +76,7 @@ public final class VibeCore extends JavaPlugin {
                 getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"),
                 Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
 
+        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 32000));
         watchdog = new Watchdog(this, watchdogSingleMs(), perSecondBudgetMs());
         dynamicCommands = new DynamicCommands(this, getConfig().getBoolean("commands.allow-top-level", true));
         store = new ModStore(getDataFolder().toPath().resolve("mods"));
@@ -140,6 +141,7 @@ public final class VibeCore extends JavaPlugin {
         dynamicCommands.setAllowTopLevel(getConfig().getBoolean("commands.allow-top-level", true));
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
+        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 32000));
         getLogger().info("Config reloaded (model=" + client.model()
                 + ", watchdog=" + watchdogSingleMs() + "ms/" + perSecondBudgetMs()
                 + "ms, retries=" + getConfig().getInt("generation.max-retries", 3) + ")");
