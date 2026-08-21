@@ -1,9 +1,12 @@
 {
   "name": "BlockBurst",
   "description": "Adds a particle and sound burst when a block is broken, but only for players in creative mode.",
+  "usage": "",
+  "manual": "",
+  "icon": "",
   "mainClass": "vibemod.blockburst.BlockBurst",
-  "currentVersion": 2,
-  "enabled": false,
+  "currentVersion": 1,
+  "enabled": true,
   "creator": "player",
   "versions": [
     {
@@ -18,5 +21,7 @@
       "model": "anthropic/claude-sonnet-5",
       "createdAt": 1787320274874
     }
-  ]
+  ],
+  "config": [],
+  "configValues": {}
 }

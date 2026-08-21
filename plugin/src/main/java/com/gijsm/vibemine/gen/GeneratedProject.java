@@ -9,7 +9,8 @@ import java.util.List;
  * sources) plus the descriptive fields. An edit response — allowed on repair
  * and edit rounds only — carries {@code edits} (exact search/replace blocks
  * against the current sources) and may omit any descriptive field to mean
- * "unchanged". {@code usage}, {@code manual} and {@code config} are optional
+ * "unchanged". {@code usage}, {@code manual}, {@code icon} (a Bukkit Material
+ * item name the GUI displays the mod as) and {@code config} are optional
  * in both shapes (null/empty = absent), so v1-shaped responses still parse.
  *
  * Contract enforced by the prompt: every file lives in package
@@ -18,7 +19,7 @@ import java.util.List;
  * {@link com.gijsm.vibemine.api.VibeMod} and is named {@code mainClass}.
  */
 public record GeneratedProject(String name, String description, String usage, String manual,
-                               String mainClass, List<GeneratedFile> files,
+                               String icon, String mainClass, List<GeneratedFile> files,
                                List<ConfigKnob> config, List<EditBlock> edits) {
 
     public record GeneratedFile(String path, String content) {

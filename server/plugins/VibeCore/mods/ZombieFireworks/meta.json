@@ -3,6 +3,7 @@
   "description": "When a zombie dies it explodes into a colorful firework burst.",
   "usage": "",
   "manual": "",
+  "icon": "",
   "mainClass": "vibemod.zombiefireworks.ZombieFireworks",
   "currentVersion": 1,
   "enabled": true,

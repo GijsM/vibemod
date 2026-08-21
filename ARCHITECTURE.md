@@ -473,3 +473,17 @@ its finish() dedupe.
   back to description + verified footer only.
 - No new dependencies. Books: plain-string pages only. All Bukkit calls main-thread.
 - Existing self-tests must keep passing; update them where records grew (they construct positionally).
+
+## v2.1: model-chosen GUI icons (frozen)
+- `GeneratedProject` gained `String icon` (after `manual`) — a Bukkit `Material` ITEM name in
+  UPPER_SNAKE (e.g. "CHICKEN", "SUGAR"); optional (null/"" = absent).
+- `StoredMod` gains `String icon` (after `manual`); normalize null -> ""; threaded through all
+  rebuild sites; `saveNewVersion` takes it from the project with carry-forward semantics handled
+  upstream by ModGenerator.
+- Prompt contract: `"icon"`: pick ONE thematic, obtainable ITEM Material name from vanilla 1.21
+  (never a block-only/technical material, never AIR); both few-shot examples set one
+  (ChickenCreepers -> "CHICKEN", SpeedPulse -> "SUGAR"). parse() maps it (optional).
+- GUI: mod items render as `Material.matchMaterial(icon)` when it resolves AND `Material#isItem()`,
+  else fallback `PAPER`. Enabled state = `ItemMeta#setEnchantmentGlintOverride(true)` (Paper 1.21
+  API) instead of dye swapping; disabled = no glint + name in gray + "(off)" in the state lore.
+  Applies to the main list item AND the detail-panel header item.

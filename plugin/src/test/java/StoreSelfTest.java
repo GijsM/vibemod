@@ -36,6 +36,7 @@ public class StoreSelfTest {
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
         testNullFieldMetaJsonNormalized();
+        testIconRoundTripAndNormalization();
         testSetConfigValueValidationMatrix();
         testResolvedConfigValuesOverlay();
         testSaveNewVersionPreservesSurvivingConfigValues();
@@ -56,7 +57,7 @@ public class StoreSelfTest {
         ModStore store = new ModStore(modsDir);
 
         GeneratedProject project1 = new GeneratedProject("TestMod", "does a thing", "try /vibe do TestMod poke",
-                "Punch things to see what happens.", "TestMod", List.of(
+                "Punch things to see what happens.", "TORCH", "TestMod", List.of(
                 new GeneratedProject.GeneratedFile("TestMod.java",
                         "package vibemod.testmod;\n\npublic class TestMod {}\n"),
                 new GeneratedProject.GeneratedFile("Helper.java",
@@ -74,6 +75,7 @@ public class StoreSelfTest {
         check("saveNewVersion carries usage from project", "try /vibe do TestMod poke".equals(saved.usage()));
         check("saveNewVersion carries manual from project",
                 "Punch things to see what happens.".equals(saved.manual()));
+        check("saveNewVersion carries icon from project", "TORCH".equals(saved.icon()));
         check("saveNewVersion normalizes null config to empty list", saved.config().isEmpty());
         check("saveNewVersion normalizes absent config values to empty map", saved.configValues().isEmpty());
 
@@ -96,7 +98,7 @@ public class StoreSelfTest {
                 srcs.get("vibemod.testmod.TestMod").contains("public class TestMod"));
 
         GeneratedProject project2 = new GeneratedProject("TestMod", "does a thing v2", "usage v2", "manual v2",
-                "TestMod", List.of(
+                "TORCH", "TestMod", List.of(
                 new GeneratedProject.GeneratedFile("TestMod.java",
                         "package vibemod.testmod;\n\npublic class TestMod { void v2() {} }\n")),
                 List.of(), null);
@@ -157,7 +159,7 @@ public class StoreSelfTest {
     }
 
     private static boolean rejectsFile(ModStore store, String name, String path) {
-        GeneratedProject bad = new GeneratedProject(name, "desc", null, null, name,
+        GeneratedProject bad = new GeneratedProject(name, "desc", null, null, null, name,
                 List.of(new GeneratedProject.GeneratedFile(path, "package vibemod." + name.toLowerCase() + ";\n"
                         + "public class " + name + " {}\n")),
                 List.of(), null);
@@ -208,9 +210,35 @@ public class StoreSelfTest {
         System.out.println("PASS: v1-shaped meta.json degrades to normalized empty fields");
     }
 
+    /** A stored icon round-trips verbatim; a project with no icon normalizes to "". */
+    private static void testIconRoundTripAndNormalization() throws Exception {
+        Path modsDir = tempDir("modstore-icon");
+        ModStore store = new ModStore(modsDir);
+
+        GeneratedProject withIcon = new GeneratedProject("IconMod", "has an icon", null, null, "CHICKEN", "IconMod",
+                List.of(new GeneratedProject.GeneratedFile("IconMod.java",
+                        "package vibemod.iconmod;\n\npublic class IconMod {}\n")),
+                List.of(), null);
+        ModStore.StoredMod saved = store.saveNewVersion("IconMod", "has an icon", "IconMod", "gijs",
+                "make icon mod", "model-x", withIcon);
+        check("saveNewVersion carries icon from project", "CHICKEN".equals(saved.icon()));
+        check("get() round-trips icon from disk", "CHICKEN".equals(store.get("IconMod").icon()));
+
+        GeneratedProject noIcon = new GeneratedProject("NoIconMod", "no icon here", null, null, null, "NoIconMod",
+                List.of(new GeneratedProject.GeneratedFile("NoIconMod.java",
+                        "package vibemod.noiconmod;\n\npublic class NoIconMod {}\n")),
+                List.of(), null);
+        ModStore.StoredMod savedNoIcon = store.saveNewVersion("NoIconMod", "no icon here", "NoIconMod", "gijs",
+                "make no-icon mod", "model-x", noIcon);
+        check("saveNewVersion normalizes a missing icon to \"\"", "".equals(savedNoIcon.icon()));
+        check("get() round-trips normalized empty icon", "".equals(store.get("NoIconMod").icon()));
+
+        System.out.println("PASS: ModStore round-trips icon and normalizes a missing icon to \"\"");
+    }
+
     private static ModStore.StoredMod saveModWithConfig(ModStore store, String name, List<ConfigKnob> config)
             throws Exception {
-        GeneratedProject project = new GeneratedProject(name, "a configurable mod", "usage", "manual", name,
+        GeneratedProject project = new GeneratedProject(name, "a configurable mod", "usage", "manual", null, name,
                 List.of(new GeneratedProject.GeneratedFile(name + ".java",
                         "package vibemod." + name.toLowerCase() + ";\n\npublic class " + name + " {}\n")),
                 config, null);
@@ -368,8 +396,8 @@ public class StoreSelfTest {
                 + "}\n";
         Map<String, String> sources = Map.of("vibemod.trivial.TrivialMod", modSource);
 
-        ModStore.StoredMod mod = new ModStore.StoredMod("Trivial", "A trivial export test mod", "", "", "TrivialMod",
-                1, true, "gijs", List.of(new ModStore.StoredVersion(1, "make a trivial mod", "model-x",
+        ModStore.StoredMod mod = new ModStore.StoredMod("Trivial", "A trivial export test mod", "", "", "",
+                "TrivialMod", 1, true, "gijs", List.of(new ModStore.StoredVersion(1, "make a trivial mod", "model-x",
                         System.currentTimeMillis())), List.of(), Map.of());
 
         Path outDir = tempDir("jarexport-out");
@@ -444,7 +472,7 @@ public class StoreSelfTest {
         Map<String, String> configValues = new LinkedHashMap<>();
         configValues.put("count", "9"); // override the schema default of 5
 
-        ModStore.StoredMod mod = new ModStore.StoredMod("Knobby", "A configurable export test mod", "", "",
+        ModStore.StoredMod mod = new ModStore.StoredMod("Knobby", "A configurable export test mod", "", "", "",
                 "KnobbyMod", 1, true, "gijs",
                 List.of(new ModStore.StoredVersion(1, "make a knobby mod", "model-x", System.currentTimeMillis())),
                 config, configValues);

@@ -247,6 +247,7 @@ public final class ModGenerator {
                 firstNonBlank(editResponse.description(), current.description()),
                 firstNonBlank(editResponse.usage(), current.usage()),
                 firstNonBlank(editResponse.manual(), current.manual()),
+                firstNonBlank(editResponse.icon(), current.icon()),
                 current.mainClass(), files,
                 editResponse.config() != null && !editResponse.config().isEmpty()
                         ? editResponse.config() : current.config(),
@@ -262,6 +263,7 @@ public final class ModGenerator {
                 firstNonBlank(full.description(), previous.description()),
                 firstNonBlank(full.usage(), previous.usage()),
                 firstNonBlank(full.manual(), previous.manual()),
+                firstNonBlank(full.icon(), previous.icon()),
                 full.mainClass(), full.files(),
                 full.config() != null && !full.config().isEmpty() ? full.config() : previous.config(),
                 List.of());
@@ -273,7 +275,7 @@ public final class ModGenerator {
                 .map(e -> new GeneratedProject.GeneratedFile(simpleName(e.getKey()) + ".java", e.getValue()))
                 .toList();
         return new GeneratedProject(mod.name(), mod.description(), mod.usage(), mod.manual(),
-                simpleName(mod.mainClass()), files, mod.config(), List.of());
+                mod.icon(), simpleName(mod.mainClass()), files, mod.config(), List.of());
     }
 
     /** Derive FQCN -> source, trusting each file's own package declaration. */

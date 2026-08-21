@@ -3,6 +3,7 @@
   "description": "When a creeper dies it explodes into chickens with a puff of smoke, cloud particles, and a sound.",
   "usage": "Kill a creeper and watch it burst into chickens",
   "manual": "Whenever a creeper dies anywhere on the server, it turns into a burst of chickens along with cloud particles and a poof sound at the death location. The chicken-count knob controls how many chickens spawn per creeper kill, defaulting to 3 and ranging from 1 up to 16. The particle-count knob controls how many cloud particles appear in the puff, defaulting to 15 and ranging from 0 up to 60. Both settings are read fresh every time a creeper dies, so changes from the config book or /vibe gui apply to the very next kill without needing a reload.",
+  "icon": "",
   "mainClass": "vibemod.chickencreepers.ChickenCreepers",
   "currentVersion": 3,
   "enabled": true,

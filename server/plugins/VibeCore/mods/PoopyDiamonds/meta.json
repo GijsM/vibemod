@@ -3,6 +3,7 @@
   "description": "Breaking diamond ore or diamond blocks drops a custom \u0027Poop\u0027 item instead of diamonds.",
   "usage": "",
   "manual": "",
+  "icon": "",
   "mainClass": "vibemod.poopydiamonds.PoopyDiamonds",
   "currentVersion": 1,
   "enabled": true,

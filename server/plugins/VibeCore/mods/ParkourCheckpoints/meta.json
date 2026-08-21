@@ -1,9 +1,12 @@
 {
   "name": "ParkourCheckpoints",
   "description": "Standing on gold blocks sets your parkour checkpoint, falling below y\u003d0 teleports you back, and /leaderboard shows the fastest climbers.",
+  "usage": "",
+  "manual": "",
+  "icon": "",
   "mainClass": "vibemod.parkourcheckpoints.ParkourCheckpoints",
   "currentVersion": 1,
-  "enabled": false,
+  "enabled": true,
   "creator": "player",
   "versions": [
     {
@@ -12,5 +15,7 @@
       "model": "anthropic/claude-sonnet-5",
       "createdAt": 1787321542973
     }
-  ]
+  ],
+  "config": [],
+  "configValues": {}
 }

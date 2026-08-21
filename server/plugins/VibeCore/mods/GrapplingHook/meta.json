@@ -3,6 +3,7 @@
   "description": "Sneak and cast a fishing rod to fire a grapple; when the hook lands (or after a timeout) you get yanked toward it.",
   "usage": "Sneak, right-click with a fishing rod aimed at a wall, and watch yourself fly toward the hook",
   "manual": "Hold a fishing rod, crouch/sneak, and right-click to cast it like normal - but this time the hook doubles as a grapple. Once the hook lands on solid ground you get yanked toward its landing spot with a burst of cloud particles and a whoosh sound. If the hook never lands (it flew into water, lava, or off into the void), the grapple still fires toward wherever the hook currently is once max-wait-ticks elapses, so you\u0027re never left waiting forever. Three settings tune the feel: pull-strength controls how hard you get yanked (default 1.6, from 0.3 up to 5), vertical-lift adds a bit of extra upward boost to the pull so you don\u0027t just faceplant into the wall (default 0.3, from -1 to 2), and max-wait-ticks caps how long the mod waits for the hook to settle before pulling anyway (default 100 ticks, from 20 to 400). Only one grapple can be active per player at a time - casting again cancels the previous one.",
+  "icon": "",
   "mainClass": "vibemod.grapplinghook.GrapplingHook",
   "currentVersion": 1,
   "enabled": true,
@@ -45,7 +46,7 @@
     }
   ],
   "configValues": {
-    "pull-strength": "1.6",
+    "pull-strength": "5.0",
     "vertical-lift": "2.0",
     "max-wait-ticks": "100"
   }

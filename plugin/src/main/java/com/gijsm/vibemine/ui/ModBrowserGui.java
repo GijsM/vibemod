@@ -200,15 +200,32 @@ public final class ModBrowserGui implements Listener {
     private ItemStack buildListItem(ModStore.StoredMod mod) {
         ModHandle handle = registry.get(mod.name());
         boolean enabled = handle != null ? handle.enabled() : mod.enabled();
-        ItemStack item = new ItemStack(enabled ? Material.LIME_DYE : Material.GRAY_DYE);
+        ItemStack item = new ItemStack(resolveIcon(mod.icon()));
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(mod.name(), NamedTextColor.WHITE));
+        meta.displayName(plain(mod.name(), enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY));
+        meta.setEnchantmentGlintOverride(enabled ? Boolean.TRUE : Boolean.FALSE);
 
         List<Component> lore = new ArrayList<>(Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
+        lore.add(plain(enabled ? "State: ON" : "State: OFF", enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
         lore.add(plain("v" + mod.currentVersion() + " · click for details", NamedTextColor.DARK_GRAY));
         meta.lore(lore);
         item.setItemMeta(meta);
         return item;
+    }
+
+    /**
+     * Resolves a mod's icon Material from its stored {@code icon} name, falling back to
+     * {@link Material#PAPER} when the name is blank, unrecognized, or not a real item
+     * (e.g. a block-only or technical material the model should never emit but might).
+     */
+    private static Material resolveIcon(String icon) {
+        if (icon != null && !icon.isBlank()) {
+            Material m = Material.matchMaterial(icon);
+            if (m != null && m.isItem()) {
+                return m;
+            }
+        }
+        return Material.PAPER;
     }
 
     private ItemStack buildSettingsEntryItem() {
@@ -280,9 +297,10 @@ public final class ModBrowserGui implements Listener {
     }
 
     private ItemStack buildHeaderItem(ModStore.StoredMod mod, boolean enabled) {
-        ItemStack item = new ItemStack(enabled ? Material.LIME_DYE : Material.GRAY_DYE);
+        ItemStack item = new ItemStack(resolveIcon(mod.icon()));
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(mod.name(), NamedTextColor.WHITE));
+        meta.displayName(plain(mod.name(), enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY));
+        meta.setEnchantmentGlintOverride(enabled ? Boolean.TRUE : Boolean.FALSE);
 
         List<Component> lore = new ArrayList<>(Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
         if (mod.usage() != null && !mod.usage().isBlank()) {

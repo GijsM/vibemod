@@ -50,11 +50,11 @@ public final class ModStore {
 
     /**
      * A stored mod: its identity, current pointer, full version history, and its
-     * config schema/values. {@code usage}/{@code manual}/{@code config}/
-     * {@code configValues} are optional and normalized to ""/List.of()/Map.of()
+     * config schema/values. {@code usage}/{@code manual}/{@code icon}/{@code config}/
+     * {@code configValues} are optional and normalized to ""/""/List.of()/Map.of()
      * by every accessor on this class.
      */
-    public record StoredMod(String name, String description, String usage, String manual,
+    public record StoredMod(String name, String description, String usage, String manual, String icon,
                              String mainClass, int currentVersion, boolean enabled, String creator,
                              List<StoredVersion> versions, List<ConfigKnob> config,
                              Map<String, String> configValues) {
@@ -131,6 +131,7 @@ public final class ModStore {
 
         String usage = nullToEmpty(project.usage());
         String manual = nullToEmpty(project.manual());
+        String icon = nullToEmpty(project.icon());
         List<ConfigKnob> newConfig = project.config() == null ? List.of() : project.config();
 
         Map<String, String> oldValues = existing == null ? Map.of() : existing.configValues();
@@ -147,7 +148,7 @@ public final class ModStore {
             }
         }
 
-        StoredMod updated = new StoredMod(name, description, usage, manual, mainClass, nextVersion, true,
+        StoredMod updated = new StoredMod(name, description, usage, manual, icon, mainClass, nextVersion, true,
                 effectiveCreator, versions, newConfig, preservedValues);
         writeMeta(dir, updated);
         return updated;
@@ -188,8 +189,9 @@ public final class ModStore {
         if (mod == null) {
             return;
         }
-        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.mainClass(),
-                version, mod.enabled(), mod.creator(), mod.versions(), mod.config(), mod.configValues());
+        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
+                mod.mainClass(), version, mod.enabled(), mod.creator(), mod.versions(), mod.config(),
+                mod.configValues());
         writeMeta(dir, updated);
     }
 
@@ -203,8 +205,9 @@ public final class ModStore {
         if (mod == null) {
             return;
         }
-        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.mainClass(),
-                mod.currentVersion(), enabled, mod.creator(), mod.versions(), mod.config(), mod.configValues());
+        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
+                mod.mainClass(), mod.currentVersion(), enabled, mod.creator(), mod.versions(), mod.config(),
+                mod.configValues());
         writeMeta(dir, updated);
     }
 
@@ -218,9 +221,9 @@ public final class ModStore {
         if (mod == null || mod.currentVersion() <= 1) {
             return false;
         }
-        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.mainClass(),
-                mod.currentVersion() - 1, mod.enabled(), mod.creator(), mod.versions(), mod.config(),
-                mod.configValues());
+        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
+                mod.mainClass(), mod.currentVersion() - 1, mod.enabled(), mod.creator(), mod.versions(),
+                mod.config(), mod.configValues());
         writeMeta(dir, updated);
         return true;
     }
@@ -262,8 +265,9 @@ public final class ModStore {
         Map<String, String> values = new LinkedHashMap<>(mod.configValues());
         values.put(knob.key(), normalizedValue);
 
-        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.mainClass(),
-                mod.currentVersion(), mod.enabled(), mod.creator(), mod.versions(), mod.config(), values);
+        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
+                mod.mainClass(), mod.currentVersion(), mod.enabled(), mod.creator(), mod.versions(), mod.config(),
+                values);
         writeMeta(dir, updated);
     }
 
@@ -457,10 +461,10 @@ public final class ModStore {
 
     /**
      * Normalizes a {@link StoredMod} straight off disk: null {@code usage}/{@code manual}/
-     * {@code creator} become {@code ""}, null {@code versions}/{@code config} become
-     * {@code List.of()}, and a null {@code configValues} becomes {@code Map.of()}. This is
-     * the single point where old, v1-shaped {@code meta.json} files (which predate these
-     * fields) are made safe for every caller.
+     * {@code icon}/{@code creator} become {@code ""}, null {@code versions}/{@code config}
+     * become {@code List.of()}, and a null {@code configValues} becomes {@code Map.of()}.
+     * This is the single point where old, v1-shaped {@code meta.json} files (which predate
+     * these fields) are made safe for every caller.
      */
     private static StoredMod normalize(StoredMod mod) {
         if (mod == null) {
@@ -471,6 +475,7 @@ public final class ModStore {
                 nullToEmpty(mod.description()),
                 nullToEmpty(mod.usage()),
                 nullToEmpty(mod.manual()),
+                nullToEmpty(mod.icon()),
                 mod.mainClass(),
                 mod.currentVersion(),
                 mod.enabled(),

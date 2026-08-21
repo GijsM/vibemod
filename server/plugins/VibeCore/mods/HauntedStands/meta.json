@@ -1,0 +1,85 @@
+{
+  "name": "HauntedStands",
+  "description": "At night, armor stands slowly creep toward the nearest player whenever nobody is looking directly at them.",
+  "usage": "Place an armor stand nearby, wait for night, then look away and see it creep closer",
+  "manual": "Once night falls, every armor stand on the server quietly checks whether any nearby player is watching it. If nobody is looking directly at it (and there\u0027s a clear line of sight), it inches toward the closest player and turns to face them, sometimes with a soul particle puff and a low creaking sound. The night-only knob (default true) controls whether this only happens at night or all the time. move-distance (default 0.15 blocks) sets how far it creeps per pulse, and move-period-ticks (default 20, i.e. once a second) sets how often pulses happen. detection-range (default 16 blocks) is how far away a stand can sense a player, watch-angle (default 15 degrees) is how precisely a player must be looking at it to freeze it, and stop-distance (default 2.0 blocks) is how close it will get before stopping. sound-chance (default 0.15) is the odds of a creepy sound and particle playing on any given move. Turn around and watch closely - it stops dead the instant you look at it.",
+  "icon": "ARMOR_STAND",
+  "mainClass": "vibemod.hauntedstands.HauntedStands",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "Rcon",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "haunted armor stands: at night armor stands slowly creep toward the nearest player when nobody is looking directly at them",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787325391270
+    }
+  ],
+  "config": [
+    {
+      "key": "night-only",
+      "type": "boolean",
+      "def": "true",
+      "description": "Whether stands only creep at night (turn off for constant haunting).",
+      "min": 0.0,
+      "max": 0.0,
+      "step": 0.0
+    },
+    {
+      "key": "move-distance",
+      "type": "decimal",
+      "def": "0.15",
+      "description": "How far a stand creeps per movement pulse, in blocks.",
+      "min": 0.05,
+      "max": 1.0,
+      "step": 0.05
+    },
+    {
+      "key": "move-period-ticks",
+      "type": "integer",
+      "def": "20",
+      "description": "Ticks between movement pulses (20 ticks \u003d 1 second).",
+      "min": 5.0,
+      "max": 100.0,
+      "step": 5.0
+    },
+    {
+      "key": "detection-range",
+      "type": "decimal",
+      "def": "16",
+      "description": "Max distance at which a stand will detect and creep toward a player.",
+      "min": 4.0,
+      "max": 64.0,
+      "step": 1.0
+    },
+    {
+      "key": "watch-angle",
+      "type": "decimal",
+      "def": "15",
+      "description": "Angle in degrees within which a player counts as looking directly at a stand, freezing it.",
+      "min": 5.0,
+      "max": 90.0,
+      "step": 5.0
+    },
+    {
+      "key": "stop-distance",
+      "type": "decimal",
+      "def": "2.0",
+      "description": "Distance from the target player at which a stand stops creeping closer.",
+      "min": 0.5,
+      "max": 5.0,
+      "step": 0.5
+    },
+    {
+      "key": "sound-chance",
+      "type": "decimal",
+      "def": "0.15",
+      "description": "Chance each pulse that a moving stand plays a creepy sound and particle burst.",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    }
+  ],
+  "configValues": {}
+}

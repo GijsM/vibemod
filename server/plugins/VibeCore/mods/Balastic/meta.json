@@ -3,6 +3,7 @@
   "description": "Typing /balastic with no target gives you a missile launcher item that fires ballistic explosions at whatever block or point in the air you\u0027re aiming at, from any distance.",
   "usage": "",
   "manual": "",
+  "icon": "",
   "mainClass": "vibemod.balastic.Balastic",
   "currentVersion": 2,
   "enabled": true,

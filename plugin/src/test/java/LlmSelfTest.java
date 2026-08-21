@@ -28,6 +28,7 @@ public class LlmSelfTest {
         testParseBothShapesThrows();
         testParseNeitherShapeThrows();
         testConfigKnobParsing();
+        testParseIconMapping();
         testSystemPromptContent();
         testPromptBuilders();
 
@@ -57,6 +58,7 @@ public class LlmSelfTest {
             check("clean JSON: not an edit response", !p.isEditResponse());
             check("clean JSON: usage null when absent", p.usage() == null);
             check("clean JSON: manual null when absent", p.manual() == null);
+            check("clean JSON: icon null when absent", p.icon() == null);
             check("clean JSON: config null when absent", p.config() == null);
             check("clean JSON: edits null on full shape", p.edits() == null);
             System.out.println("PASS: parse() on clean JSON -> " + p.name());
@@ -248,12 +250,47 @@ public class LlmSelfTest {
         check("systemPrompt contains 'config'", prompt.contains("config"));
         check("systemPrompt contains 'manual'", prompt.contains("manual"));
         check("systemPrompt contains 'usage'", prompt.contains("usage"));
+        check("systemPrompt contains 'icon'", prompt.contains("\"icon\""));
         check("systemPrompt contains example 1 mod name 'ChickenCreepers'", prompt.contains("ChickenCreepers"));
         check("systemPrompt contains example 2 mod name 'SpeedPulse'", prompt.contains("SpeedPulse"));
+        check("systemPrompt example 1 few-shot JSON sets icon CHICKEN", prompt.contains("\"icon\":\"CHICKEN\""));
+        check("systemPrompt example 2 few-shot JSON sets icon SUGAR", prompt.contains("\"icon\":\"SUGAR\""));
         check("systemPrompt mentions configInt", prompt.contains("configInt"));
         check("systemPrompt mentions edit shape", prompt.contains("\"edits\""));
         if (failures == 0) {
             System.out.println("PASS: systemPrompt() contains all required markers");
+        }
+    }
+
+    private static void testParseIconMapping() {
+        String withIcon = "{\"name\":\"Foo\",\"description\":\"d\",\"icon\":\"CHICKEN\",\"mainClass\":\"Foo\","
+                + "\"files\":[{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"}]}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(withIcon);
+            check("icon: full shape maps icon", "CHICKEN".equals(p.icon()));
+            System.out.println("PASS: parse() maps \"icon\" on the full project shape");
+        } catch (Exception e) {
+            fail("icon mapping (full shape) threw: " + e);
+        }
+
+        String withoutIcon = "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\","
+                + "\"files\":[{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"}]}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(withoutIcon);
+            check("icon: absent -> null", p.icon() == null);
+            System.out.println("PASS: parse() maps missing \"icon\" to null");
+        } catch (Exception e) {
+            fail("icon mapping (absent) threw: " + e);
+        }
+
+        String editWithIcon = "{\"edits\":[{\"path\":\"Foo.java\",\"find\":\"a\",\"replace\":\"b\"}],"
+                + "\"icon\":\"SUGAR\"}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(editWithIcon);
+            check("icon: edit shape maps icon", "SUGAR".equals(p.icon()));
+            System.out.println("PASS: parse() maps \"icon\" on the edit shape");
+        } catch (Exception e) {
+            fail("icon mapping (edit shape) threw: " + e);
         }
     }
 

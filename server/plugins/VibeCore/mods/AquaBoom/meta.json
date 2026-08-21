@@ -3,6 +3,7 @@
   "description": "Chickens that touch water spontaneously explode in a burst of feathers and fire.",
   "usage": "",
   "manual": "",
+  "icon": "",
   "mainClass": "vibemod.aquaboom.AquaBoom",
   "currentVersion": 1,
   "enabled": true,
