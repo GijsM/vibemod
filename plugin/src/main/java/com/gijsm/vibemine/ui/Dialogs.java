@@ -268,12 +268,13 @@ public final class Dialogs {
         return knobKey.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
     }
 
-    /** Close any open container first, then show the dialog next tick. */
+    /**
+     * Show next tick (never inside an inventory-click handler). Deliberately no
+     * closeInventory(): showDialog replaces the client screen on its own, and a
+     * close-container packet from here has stalled the main thread before.
+     */
     private void show(Player p, Dialog dialog) {
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            p.closeInventory();
-            show(p, dialog);
-        });
+        Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
     }
 
     private static Component labelFor(Knob knob) {
