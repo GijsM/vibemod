@@ -78,6 +78,10 @@ public final class Dialogs {
     }
 
     private static final int PROMPT_MAX_LENGTH = 2000;
+    /** Wider inputs + body lines so labels/values do not clip. */
+    private static final int INPUT_WIDTH = 350;
+    private static final int BODY_WIDTH = 400;
+
     private static final int KNOB_TEXT_MAX_LENGTH = 256;
     private static final int NAME_HINT_MAX_LENGTH = 32;
     private static final int MULTILINE_HEIGHT = 160;
@@ -198,7 +202,17 @@ public final class Dialogs {
         if (errorMessage != null && !errorMessage.isBlank()) {
             body.add(DialogBody.plainMessage(Component.text(errorMessage, NamedTextColor.RED)));
         }
-        body.add(DialogBody.plainMessage(Component.text("Configure " + mod, NamedTextColor.GRAY)));
+        // Inputs get short key-only labels (long text clips inside sliders/fields);
+        // the descriptions live up here as one readable block instead.
+        for (Knob knob : knobs) {
+            String desc = knob.description();
+            if (desc != null && !desc.isBlank()) {
+                body.add(DialogBody.plainMessage(
+                        Component.text(knob.key(), NamedTextColor.AQUA)
+                                .append(Component.text(" — " + desc, NamedTextColor.GRAY)),
+                        BODY_WIDTH));
+            }
+        }
 
         List<DialogInput> inputs = new ArrayList<>();
         for (Knob knob : knobs) {
@@ -245,6 +259,7 @@ public final class Dialogs {
                 double step = knob.step() != null ? knob.step() : DEFAULT_STEP;
                 double initial = parseDouble(current, min);
                 return DialogInput.numberRange(inputKey(knob.key()), label, (float) min, (float) max)
+                        .width(INPUT_WIDTH)
                         .labelFormat("%s: %s")
                         .initial((float) initial)
                         .step((float) step)
@@ -253,6 +268,7 @@ public final class Dialogs {
             case "text":
             default:
                 return DialogInput.text(inputKey(knob.key()), label)
+                        .width(INPUT_WIDTH)
                         .maxLength(KNOB_TEXT_MAX_LENGTH)
                         .initial(current == null ? "" : current)
                         .build();
@@ -277,10 +293,9 @@ public final class Dialogs {
         Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
     }
 
+    /** Short label only — full descriptions render in the dialog body above the inputs. */
     private static Component labelFor(Knob knob) {
-        String desc = knob.description();
-        String text = (desc == null || desc.isBlank()) ? knob.key() : knob.key() + " - " + desc;
-        return Component.text(text);
+        return Component.text(knob.key());
     }
 
     private void handleConfigSubmit(String mod, List<Knob> knobs, DialogResponseView view, Audience audience) {
