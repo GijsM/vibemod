@@ -1,8 +1,10 @@
 {
   "name": "ChickenCreepers",
-  "description": "When a creeper dies it turns into two chickens with a puff of smoke.",
+  "description": "When a creeper dies it explodes into chickens with a puff of smoke, cloud particles, and a sound.",
+  "usage": "Kill a creeper and watch it burst into chickens",
+  "manual": "Whenever a creeper dies anywhere on the server, it turns into a burst of chickens along with cloud particles and a poof sound at the death location. The chicken-count knob controls how many chickens spawn per creeper kill, defaulting to 3 and ranging from 1 up to 16. The particle-count knob controls how many cloud particles appear in the puff, defaulting to 15 and ranging from 0 up to 60. Both settings are read fresh every time a creeper dies, so changes from the config book or /vibe gui apply to the very next kill without needing a reload.",
   "mainClass": "vibemod.chickencreepers.ChickenCreepers",
-  "currentVersion": 1,
+  "currentVersion": 3,
   "enabled": true,
   "creator": "Rcon",
   "versions": [
@@ -17,6 +19,41 @@
       "prompt": "spawn exactly two chickens instead of one",
       "model": "anthropic/claude-sonnet-5",
       "createdAt": 1787318698305
+    },
+    {
+      "version": 3,
+      "prompt": "when a creeper dies chickens spawn at its location with a poof sound and cloud particles",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787324091494
+    },
+    {
+      "version": 4,
+      "prompt": "also play a loud chicken ambient sound when the chickens appear, change nothing else",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787324368405
     }
-  ]
+  ],
+  "config": [
+    {
+      "key": "chicken-count",
+      "type": "integer",
+      "def": "3",
+      "description": "How many chickens spawn per creeper kill.",
+      "min": 1.0,
+      "max": 16.0,
+      "step": 1.0
+    },
+    {
+      "key": "particle-count",
+      "type": "integer",
+      "def": "15",
+      "description": "How many cloud particles appear in the puff.",
+      "min": 0.0,
+      "max": 60.0,
+      "step": 1.0
+    }
+  ],
+  "configValues": {
+    "chicken-count": "5"
+  }
 }

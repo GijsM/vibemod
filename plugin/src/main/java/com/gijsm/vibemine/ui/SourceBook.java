@@ -18,8 +18,8 @@ import org.bukkit.inventory.meta.BookMeta;
  */
 public final class SourceBook {
 
-    private static final int MAX_PAGE_CHARS = 700;
-    private static final int MAX_LINES_PER_PAGE = 14;
+    private static final int MAX_PAGE_CHARS = 256;
+    private static final int MAX_LINES_PER_PAGE = 13;
     private static final int MAX_PAGES = 90;
 
     private SourceBook() {

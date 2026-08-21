@@ -103,3 +103,58 @@ books, `/vibe chat` mode, and player-only mechanics. Code paths compile-verified
 ## Cost
 The whole verified session (≈10 generations incl. retries + smoke tests): ≈ $0.65 of
 OpenRouter credit.
+
+
+---
+
+# v2 verification (2026-08-21, evening)
+
+Built by 5 parallel subagents against frozen contracts; **zero integration compile errors on
+first full assembly** (again). Self-tests: LlmSelfTest (incl. embedded-API-copy drift guard +
+few-shots extracted from the live prompt, parsed, compiled clean), StoreSelfTest (v1-meta
+normalization, validation matrix, schema evolution), BookParserSelfTest (pure JVM) — all PASS.
+
+## Live config loop ✅ (the headline)
+```
+> vibe make when a creeper dies chickens spawn ... with a poof
+  Generated ChickenCreepers v3        knobs: chicken-count (1-16), particle-count
+> (kill creeper)                      → Test passed, count: 3     (schema default)
+> vibe set ChickenCreepers chicken-count 5   → 3 -> 5
+> (kill creeper)                      → Test passed, count: 5     (live read — no reload!)
+> vibe set ... chicken-count 999      → 999 is above the maximum of 16
+> vibe set ... chicken-count banana   → not a valid integer
+> vibe set ... chiken-count 4         → no config key 'chiken-count'
+```
+
+## Documentation surfaces ✅
+`/vibe info ChickenCreepers` (console-rendered): card + usage + [manual][config][info][off] +
+verified facts (listeners: 1, knobs with live values). v1 mod `/vibe info ZombieFireworks`:
+degrades to description + introspected facts, no knob section, no errors.
+
+## Diff-based repair/edit ✅ (first live use)
+```
+> vibe edit ChickenCreepers also play a chicken sound, change nothing else
+  Applied 1 edit block(s) from an edit-shaped response
+  Generated ChickenCreepers v4       knobs preserved; player's chicken-count=5 survived
+```
+
+## Reload ✅
+config.yml watchdog 250→400ms + `/vibe reload` → `Config reloaded (model=..., watchdog=400ms/...)`.
+
+## Export with config ✅
+`ChickenCreepers-4.jar` embeds a seeded config.yml (`chicken-count: 5` — the live override, with
+description comments); the standalone wrapper reads it via standard Bukkit getConfig.
+
+## Regression ✅
+Rollback v4→v3 recompiles + hot-swaps; knob values still apply across versions (5 chickens on v3).
+
+## Deferred / human-verified 🎮
+- Standalone boot of a v2 exported jar (mechanism proven in v1; deferred to avoid restarting the
+  server twice while player was online — drop the jar in a plugins/ dir to confirm).
+- Book flows in the client (sign-to-submit prompt/edit books, config-book Done-loop), GUI detail
+  panel + steppers + settings page, install-card buttons: give/parse/apply logic is unit- and
+  compile-verified; the clicking needs hands. Steps: `/vibe book`, write a wish, Sign it.
+  `/vibe config GrapplingHook`, change pull-strength, press Done mid-swing.
+
+Field note: while v2 was being verified, player (age-appropriate chaos engineer) had already
+generated GrapplingHook v1 with three perfectly-formed knobs. The contract works under real use.

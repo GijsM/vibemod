@@ -1,0 +1,26 @@
+{
+  "name": "Balastic",
+  "description": "Typing /balastic with no target gives you a missile launcher item that fires ballistic explosions at whatever block or point in the air you\u0027re aiming at, from any distance.",
+  "usage": "",
+  "manual": "",
+  "mainClass": "vibemod.balastic.Balastic",
+  "currentVersion": 2,
+  "enabled": true,
+  "creator": "player",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "make the /balastic \u003cplayer\u003e command that will spawn a \u0027balistic bullet\u0027 a random 3d line of explosions from above will come towards the player",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787320887586
+    },
+    {
+      "version": 2,
+      "prompt": "Can you make it so that when I type balastic with no player behind it, I get an item that will spawn balastic misiles at the blocks I point towards and hit the air (so also from a large distance, not just breaking blocks)",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787321341578
+    }
+  ],
+  "config": [],
+  "configValues": {}
+}

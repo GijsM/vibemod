@@ -240,3 +240,236 @@ watchdog:
 commands:
   allow-top-level: true
 ```
+
+============================================================================
+# V2 ADDENDUM (frozen contracts for the v2 iteration — legible, tunable mods)
+============================================================================
+
+v2 theme: per-mod config knobs with LIVE reads, model-written manuals + introspected verified
+facts, writable-book workflows, a teaching GUI, diff-based repair rounds, /vibe reload.
+Everything in the v1 sections above still holds unless amended here.
+
+## Amended frozen files (already rewritten — read them, do not modify)
+- `api/VibeContext.java`: gains `configBool/configInt/configDouble/configString(String key)`.
+  Resolution: stored value → knob default → type zero + one-time warning. Prompt rule: mods read
+  config at the moment of use, never cache in fields.
+- `gen/GeneratedProject.java`: now
+  `(name, description, usage, manual, mainClass, files, config, edits)` with nested
+  `ConfigKnob(key, type, def, description, min, max, step, choices)` (type ∈
+  boolean|integer|decimal|text|choice) and `EditBlock(path, find, replace)`, plus
+  `isEditResponse()`. usage/manual/config/edits all optional.
+
+## store/ModStore.java v2 (owner: agent B)
+```java
+public record StoredVersion(int version, String prompt, String model, long createdAt) {}  // unchanged
+public record StoredMod(String name, String description, String usage, String manual,
+                        String mainClass, int currentVersion, boolean enabled, String creator,
+                        List<StoredVersion> versions,
+                        List<GeneratedProject.ConfigKnob> config,
+                        Map<String,String> configValues) {}
+// saveNewVersion keeps its signature; usage/manual/config now come from the project argument.
+// On a new version: keep existing configValues entries whose key is still in the new schema.
+// Old meta.json deserializes with null usage/manual/config/configValues — every reader in this
+// class must normalize nulls to ""/List.of()/Map.of() before returning (add a normalize(StoredMod) helper).
+public void setConfigValue(String name, String key, String rawValue)  // validates vs schema: type parse,
+        // min/max for numerics, membership for choice; throws IllegalArgumentException with a human reason
+public Map<String,String> resolvedConfigValues(String name)  // schema defaults overlaid with stored values
+```
+
+## store/ModConfigs.java — NEW (owner: agent B)
+In-memory live-read cache the runtime contexts hit on every event; persistence via ModStore.
+```java
+public final class ModConfigs {
+    public ModConfigs(ModStore store)
+    public void register(String mod, List<GeneratedProject.ConfigKnob> schema, Map<String,String> values) // replace
+    public void forget(String mod)
+    public boolean bool(String mod, String key)     // typed live reads; schema-default fallback;
+    public long integer(String mod, String key)     // unknown key/mod -> type zero + ONE-TIME warning
+    public double decimal(String mod, String key)   // via java.util.logging (rate-limit per mod+key)
+    public String text(String mod, String key)
+    public void set(String mod, String key, String rawValue)  // validate -> cache -> store.setConfigValue
+    public List<GeneratedProject.ConfigKnob> schema(String mod)   // empty list for v1 mods
+    public Map<String,String> values(String mod)                  // resolved (defaults overlaid)
+}
+```
+Thread-safety: reads are hot-path (event handlers) — ConcurrentHashMap, no locks on read.
+
+## store/JarExporter.java v2 (owner: agent B)
+- Generated `StandaloneContext` implements the four config accessors by reading the exported
+  plugin's own Bukkit config (`plugin.getConfig().getBoolean/Long/Double/String(key, <default>)`),
+  defaults baked from the schema at export time.
+- Export embeds a `config.yml` seeded with the mod's current resolved values, each key preceded
+  by a `# <description>` comment line. plugin wrapper calls `saveDefaultConfig()` in onEnable.
+
+## runtime/ModRegistry.java v2 (owner: agent C)
+```java
+public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog, ModConfigs configs)
+public ModHandle load(String name, int version, String description, String mainClassFqcn,
+                      Map<String,byte[]> classes,
+                      List<GeneratedProject.ConfigKnob> schema, Map<String,String> values)
+        throws ModLoadException
+// old 5-arg load stays as a delegate with List.of()/Map.of()
+```
+- load(): configs.register(name, schema, values) BEFORE onEnable; unload(): configs.forget(name);
+  disable(): keep registered (values still viewable/settable while off).
+- VibeContextImpl implements the four accessors → configs.bool(displayName, key) etc.
+
+## runtime reload setters (owner: agent C)
+- `Watchdog`: `public void setBudgets(long singleInvocationMs, long perSecondBudgetMs)` — volatile
+  fields; 0/negative single budget = disabled (same semantics as constructor).
+- `DynamicCommands`: `public void setAllowTopLevel(boolean allow)` — volatile; affects future
+  registrations only.
+- `OpenRouterClient` (owner: agent A): `public void setTimeout(Duration timeout)` — volatile,
+  used for subsequent requests.
+
+## llm/PromptLibrary.java v2 (owner: agent A)
+- systemPrompt(): update the embedded VibeContext source to the REAL current file content
+  (copy it verbatim from api/VibeContext.java); output contract adds:
+  `"usage"`: one-line "try this" hint (e.g. "Kill a creeper and watch"),
+  `"manual"`: 4-10 sentence player-facing guide that mentions the knobs,
+  `"config"`: array of {key, type(boolean|integer|decimal|text|choice), default, description,
+  min?, max?, step?, choices?}. Hard rules add: expose the values a player would obviously want
+  to tweak as config knobs; read them with ctx.configX INSIDE handlers (never cache in fields).
+- BOTH few-shot examples updated: ChickenCreepers gains a `chicken-count` integer knob (default 1,
+  min 1, max 10, step 1) read live in the listener via ctx.configInt; SpeedPulse gains
+  `period-seconds` (integer) and `strength` (choice: [weak,normal,strong]) — examples MUST compile
+  (verify against paper-api like v1).
+- EDIT RESPONSE SHAPE for editPrompt/repairPrompt rounds only: the prompt tells the model it MAY
+  respond `{"edits":[{"path":"X.java","find":"<exact snippet>","replace":"<new snippet>"}],
+  "usage"?, "manual"?, "config"?}` instead of full files when changes are small; `find` must match
+  EXACTLY ONCE in that file (whitespace included). Initial generation must use the full shape.
+- `parse()` accepts both shapes: full (files non-empty) or edit (edits non-empty, files absent/empty);
+  reject responses with BOTH or NEITHER. Optional-field mapping: missing usage/manual/config → null.
+- New builder: `public static String demandFullProject(String reason)` — a user message used by
+  ModGenerator when an edit block failed to apply ("your edits did not apply cleanly: <reason>;
+  return the FULL corrected project as strict JSON with complete files").
+- editPrompt(request, currentSources) additionally takes the current schema + values:
+  new signature `editPrompt(String request, Map<String,String> currentSources,
+  List<GeneratedProject.ConfigKnob> schema, Map<String,String> values)` — includes them so edits
+  preserve/extend knobs.
+- NEW self-test requirement (in LlmSelfTest): assert the embedded VibeContext/VibeMod/
+  ModCommandHandler constants match the real api/*.java files ignoring leading/trailing whitespace
+  per line — read the real files from disk relative to a base dir passed as args[0].
+
+## ui/BookFlows.java + ui/ConfigBookParser.java — NEW (owner: agent D)
+PDC keys (NamespacedKey(plugin,...)): `book-kind` (prompt|edit|config), `book-mod`,
+`book-mod-version` (int), `book-owner` (player UUID string), `book-id` (random UUID string).
+Capture must work from PDC alone (restart-safe); soft session map only for hints.
+```java
+public final class BookFlows implements Listener {
+    public interface EditSubmit { void submit(Player p, String modName, String changeRequest); }
+    public interface ConfigSubmit { List<String> apply(Player p, String modName, Map<String,String> values); } // returns per-key error strings
+    public record ConfigEntry(String key, String description, String currentValue) {}
+    public BookFlows(Plugin plugin,
+                     BiConsumer<Player,String> onPromptSubmit,          // full text (title hint prepended as "Name hint: <title>\n" when signed with a custom title)
+                     EditSubmit onEditSubmit,
+                     ConfigSubmit onConfigSubmit,
+                     Function<String, List<ConfigEntry>> schemaLookup)  // re-fetch at capture time
+    public void givePromptBook(Player p);
+    public void giveEditBook(Player p, String modName, int modVersion, String manualText, List<ConfigEntry> entries);
+    public void giveConfigBook(Player p, String modName, int modVersion, List<ConfigEntry> entries);
+}
+```
+Behavior (validated against Paper source — see plan):
+- PlayerEditBookEvent is main-thread; isSigning() distinguishes Done vs Sign; PDC survives the
+  round-trip (read it from event.getNewBookMeta().getPersistentDataContainer()).
+- prompt/edit books: Done = ignore (vanilla draft save). Sign = read pages + title, setCancelled(true),
+  consume the book NEXT TICK by scanning the player inventory for matching `book-id` PDC (never
+  trust event.getSlot()), dispatch callback next tick. Owner mismatch -> refuse politely, no cancel.
+- config books: Done = parse + apply + one chat feedback block (applied keys green, per-line errors
+  red, clickable [fresh config book] -> /vibe config <mod>), do NOT cancel (vanilla keeps their text).
+  Sign = apply + cancel + consume.
+- Pre-fill: WritableBookMeta#setPages(String...) PLAIN STRINGS ONLY, <=13 lines and <=230 chars per
+  page, <=4 knobs per config page as "# description\nkey: value", edit books = manual summary pages +
+  "== Changes: ==" page + 3 blank pages, prompt books = instruction page + blank pages.
+- Deleted mod at capture -> message + consume; version mismatch (book-mod-version != current) ->
+  warn but proceed for edit, warn + still apply for config.
+- Full inventory on give -> drop at feet (SourceBook pattern) + ITEM_BOOK_PAGE_TURN sound.
+```java
+public final class ConfigBookParser {   // pure static, zero Bukkit imports, unit-tested
+    public record ParseResult(Map<String,String> values, List<String> errors) {}
+    public static ParseResult parse(List<String> pages, Set<String> knownKeys)
+}
+```
+Grammar: per page per line; strip §codes; trim; skip blank and #-or-//-prefixed lines; split on the
+FIRST ':' or '='; key lowercased, matched case-insensitively; unknown key -> error with nearest-key
+suggestion (edit distance <=2 or prefix); duplicate key -> last wins + warning entry; no separator ->
+"page N, line M: expected 'key: value'". Values NOT validated here (schema's job).
+Self-test: plugin/src/test/java/BookParserSelfTest.java (plain main, pure JVM) covering grammar,
+comments, suggestions, duplicates, partial updates, §-stripping, empty input.
+
+## ui v2 + command (owner: agent E)
+```java
+public record GuiCallbacks(BiConsumer<Player,String> export,
+                           BiConsumer<Player,String> applyVersion,
+                           BiConsumer<Player,String> giveConfigBook,
+                           BiConsumer<Player,String> giveManualBook,
+                           BiConsumer<Player,String> giveSourceBook,
+                           Runnable reloadConfig,
+                           Supplier<String> getModel, Consumer<String> setModel) {}   // ui/GuiCallbacks.java
+
+public final class ModBrowserGui implements Listener {   // REWORK
+    public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs, GuiCallbacks cb)
+    public void open(Player p)          // main list: one item per mod, LEFT-CLICK opens detail panel
+    public void openDetail(Player p, String modName)
+    public void openSettings(Player p)  // ops page: model picker (curated list), watchdog/retry steppers, [reload] button
+}
+```
+- Main list: lime/gray dye per live-enabled state, lore = wrapped description + "v<N> · click for details";
+  last row: [settings] item visible only with vibe.admin permission.
+- Detail panel: header item (wrapped description, usage line, state, version, creator); per-knob items —
+  boolean toggle on click, choice cycles, integer/decimal shown with current value and edited via click
+  (−step on left, +step on right, ×10 with shift, clamped to min/max, defaults step=1 min=0 max=1e9);
+  text knob click -> cb.giveConfigBook; buttons: [manual] [source] [config book] [enable/disable]
+  [rollback] [export] [delete w/ 5s confirm] [back]. Knob edits go through ModConfigs.set with the
+  IllegalArgumentException message surfaced red.
+- Settings page writes: setModel via callback; watchdog/retry steppers mutate config.yml via a
+  BiConsumer<String,Object> configWrite callback? NO — keep it simple: settings page calls
+  cb.reloadConfig only for the [reload] button, and model via cb.setModel; watchdog/retry steppers
+  are DISPLAY + click hint "edit config.yml + click reload" in this iteration (avoid comment-stripping
+  saveConfig writes). Document this in the lore.
+- Shared word-wrap helper: ui/Text.java `public static List<Component> wrap(String s, int width, NamedTextColor c)`
+  (~38 chars/line, no italics) — used by GUI lore and install card.
+- SourceBook: page budget fixed to <=256 chars and <=13 lines per page.
+```java
+public final class InstallCard {   // ui/InstallCard.java — static builders
+    public static Component build(ModStore.StoredMod mod, ModHandle liveOrNull)
+        // name+version+state line, wrapped description, "Try: <usage>" when present,
+        // clickable [manual] [config] [info] [off] buttons (runCommand /vibe ...)
+    public static Component verifiedFooter(ModStore.StoredMod mod, ModHandle liveOrNull, Map<String,String> values)
+        // introspected facts: commands, actions, listener/task counts, knobs with current values, creator
+}
+```
+```java
+public final class VibeCommand implements TabExecutor {   // REWORK — new constructor
+    public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
+                       ModConfigs configs, JarExporter exporter, ModBrowserGui gui, ChatMode chatMode,
+                       BookFlows books, Supplier<String> getModel, Consumer<String> setModel,
+                       BiConsumer<CommandSender,String> applyVersion, Runnable reloadConfig)
+}
+```
+- New subcommands: `info <mod>` (install card + verified footer, works for console), `manual <mod>`
+  (player: written book manual+footer+config table via a new ui/ManualBook.java static give(...);
+  console: chat dump), `config <mod>` (player-only, books.giveConfigBook), `set <mod> <key> <value>`
+  (configs.set, errors red, success shows old -> new), `book [mod]` (player-only; no arg = prompt
+  book, arg = edit book), `reload` (runs reloadConfig, reports what changed where feasible).
+- READ_ONLY (vibe.use) now also includes info + manual. `set` tab-completes: mod -> schema keys ->
+  current value + choices. `list` rows: click -> /vibe info <name>, hover adds usage line.
+- On successful generation, onGenerationDone prints the InstallCard (fetch store.get(result.modName())).
+- help updated; keep every v1 subcommand working.
+
+## gen/ModGenerator v2 + VibeCore v2 (owner: ARCHITECT — do not implement)
+For reference: ModGenerator applies EditBlocks to the previous round's sources (exact-unique match
+per file; failure -> next round uses PromptLibrary.demandFullProject), carries forward
+usage/manual/config when an edit response omits them, and calls the 7-arg registry.load with the
+schema+values (values from store after save). VibeCore constructs ModConfigs, BookFlows, GuiCallbacks,
+wires /vibe reload (re-reads config.yml -> watchdog.setBudgets, client.setModel/setTimeout,
+dynamicCommands.setAllowTopLevel, generator retry supplier), and passes the InstallCard path into
+its finish() dedupe.
+
+## v2 ground rules
+- v1 mods (null usage/manual/config in meta.json) MUST degrade gracefully everywhere: normalize
+  nulls at the ModStore boundary; empty knob panels say "No configurable settings"; info/manual fall
+  back to description + verified footer only.
+- No new dependencies. Books: plain-string pages only. All Bukkit calls main-thread.
+- Existing self-tests must keep passing; update them where records grew (they construct positionally).

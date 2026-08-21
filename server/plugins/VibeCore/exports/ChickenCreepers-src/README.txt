@@ -1,5 +1,5 @@
-VibeMine export: ChickenCreepers (version 1)
-Generated 2026-08-21T13:36:07.604479Z by com.gijsm.vibemine.store.JarExporter.
+VibeMine export: ChickenCreepers (version 4)
+Generated 2026-08-21T14:59:54.979922Z by com.gijsm.vibemine.store.JarExporter.
 
 This directory holds the full Java source for the exported mod, including the
 generated standalone plugin wrapper (vibemod.chickencreepers.ChickenCreepersExportPlugin) that hosts it outside

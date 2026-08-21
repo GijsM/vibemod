@@ -31,7 +31,7 @@ public final class OpenRouterClient {
 
     private final String apiKey;
     private volatile String model;
-    private final Duration timeout;
+    private volatile Duration timeout;
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
         this.apiKey = apiKey;
@@ -110,5 +110,10 @@ public final class OpenRouterClient {
 
     public void setModel(String model) {
         this.model = model;
+    }
+
+    /** Timeout applied to subsequent requests; does not affect requests already in flight. */
+    public void setTimeout(Duration timeout) {
+        this.timeout = timeout;
     }
 }

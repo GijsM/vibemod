@@ -1,0 +1,20 @@
+{
+  "name": "PoopyDiamonds",
+  "description": "Breaking diamond ore or diamond blocks drops a custom \u0027Poop\u0027 item instead of diamonds.",
+  "usage": "",
+  "manual": "",
+  "mainClass": "vibemod.poopydiamonds.PoopyDiamonds",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "player",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "diamond blocks drop \u0027poop\u0027 instead of diamonds",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787323649135
+    }
+  ],
+  "config": [],
+  "configValues": {}
+}

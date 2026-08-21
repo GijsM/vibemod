@@ -34,12 +34,17 @@ import net.kyori.adventure.text.format.NamedTextColor;
 public final class DynamicCommands {
 
     private final Plugin plugin;
-    private final boolean allowTopLevel;
+    private volatile boolean allowTopLevel;
     private final Map<String, VibeModCommand> ours = new ConcurrentHashMap<>();
 
     public DynamicCommands(Plugin plugin, boolean allowTopLevel) {
         this.plugin = plugin;
         this.allowTopLevel = allowTopLevel;
+    }
+
+    /** Change whether future {@link #register} calls may create real top-level commands. */
+    public void setAllowTopLevel(boolean allow) {
+        this.allowTopLevel = allow;
     }
 
     /**

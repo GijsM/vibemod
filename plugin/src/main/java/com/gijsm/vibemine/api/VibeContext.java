@@ -54,4 +54,23 @@ public interface VibeContext {
 
     /** Register a named action invocable as {@code /vibe do <mod> <name> [args]}. Tracked. */
     void action(String name, ModCommandHandler handler);
+
+    // ---- live config ----
+    // Mods declare tunable settings in their generation output ("config" knobs);
+    // these accessors serve the CURRENT value at call time: stored value, else the
+    // knob's declared default, else the type's zero value with a one-time warning.
+    // Read config at the moment of use - never cache it in a field - so that
+    // knob changes apply instantly without a reload.
+
+    /** Current value of a boolean knob. */
+    boolean configBool(String key);
+
+    /** Current value of an integer knob. */
+    long configInt(String key);
+
+    /** Current value of a decimal knob. */
+    double configDouble(String key);
+
+    /** Current value of a text or choice knob. */
+    String configString(String key);
 }

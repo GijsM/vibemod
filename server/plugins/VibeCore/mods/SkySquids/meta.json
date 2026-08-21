@@ -1,0 +1,20 @@
+{
+  "name": "SkySquids",
+  "description": "Squids no longer need water to swim — they glide and swim freely through the air, taking no fall damage and drifting like they\u0027re still submerged.",
+  "usage": "",
+  "manual": "",
+  "mainClass": "vibemod.skysquids.SkySquids",
+  "currentVersion": 1,
+  "enabled": false,
+  "creator": "player",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "squids fly through the air, they are able to escape water and just move like usual through the air",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787323047654
+    }
+  ],
+  "config": [],
+  "configValues": {}
+}

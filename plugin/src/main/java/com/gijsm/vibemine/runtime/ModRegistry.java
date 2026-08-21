@@ -35,6 +35,8 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import com.gijsm.vibemine.api.ModCommandHandler;
 import com.gijsm.vibemine.api.VibeContext;
 import com.gijsm.vibemine.api.VibeMod;
+import com.gijsm.vibemine.gen.GeneratedProject;
+import com.gijsm.vibemine.store.ModConfigs;
 
 /**
  * Owns the lifecycle of every hot-loaded mod: compiling bytecode in, wiring a
@@ -48,12 +50,14 @@ public final class ModRegistry {
     private final Plugin plugin;
     private final DynamicCommands dynamicCommands;
     private final Watchdog watchdog;
+    private final ModConfigs configs;
     private final LinkedHashMap<String, LoadedMod> mods = new LinkedHashMap<>();
 
-    public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog) {
+    public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog, ModConfigs configs) {
         this.plugin = plugin;
         this.dynamicCommands = commands;
         this.watchdog = watchdog;
+        this.configs = configs;
         this.watchdog.onTrip(modName -> {
             LoadedMod lm = mods.get(lower(modName));
             String displayName = lm != null ? lm.displayName : modName;
@@ -69,6 +73,17 @@ public final class ModRegistry {
     /** Compile output -> live mod. Replaces (tears down) an existing mod of the same name. Main thread. */
     public ModHandle load(String name, int version, String description, String mainClassFqcn,
                            Map<String, byte[]> classes) throws ModLoadException {
+        return load(name, version, description, mainClassFqcn, classes, List.of(), Map.of());
+    }
+
+    /**
+     * Compile output -> live mod, with the config schema and current values to register for it.
+     * Replaces (tears down) an existing mod of the same name. Main thread.
+     */
+    public ModHandle load(String name, int version, String description, String mainClassFqcn,
+                           Map<String, byte[]> classes,
+                           List<GeneratedProject.ConfigKnob> schema, Map<String, String> values)
+            throws ModLoadException {
         assertMainThread();
         String key = lower(name);
         LoadedMod existing = mods.remove(key);
@@ -78,10 +93,12 @@ public final class ModRegistry {
         ModHandle handle = new ModHandle(name, version, description);
         LoadedMod lm = new LoadedMod(name, version, description, mainClassFqcn, Map.copyOf(classes), handle);
         mods.put(key, lm);
+        configs.register(name, schema, values);
         try {
             activate(lm);
         } catch (ModLoadException e) {
             mods.remove(key);
+            configs.forget(name);
             throw e;
         }
         return handle;
@@ -115,6 +132,7 @@ public final class ModRegistry {
         if (lm != null) {
             disableInternal(lm);
         }
+        configs.forget(name);
     }
 
     /** Disable ALL mods. */
@@ -462,6 +480,26 @@ public final class ModRegistry {
         public void action(String name, ModCommandHandler handler) {
             assertMainThread();
             lm.handle.actions.put(lower(name), handler);
+        }
+
+        @Override
+        public boolean configBool(String key) {
+            return configs.bool(lm.displayName, key);
+        }
+
+        @Override
+        public long configInt(String key) {
+            return configs.integer(lm.displayName, key);
+        }
+
+        @Override
+        public double configDouble(String key) {
+            return configs.decimal(lm.displayName, key);
+        }
+
+        @Override
+        public String configString(String key) {
+            return configs.text(lm.displayName, key);
         }
     }
 

@@ -40,6 +40,32 @@ API key resolution order: `plugins/VibeCore/config.yml` → `$OPENROUTER_API_KEY
 Join at `localhost` with a 1.21.8 client (server runs offline mode for local testing). You need op:
 `./scripts/rcon.sh 'op <yourname>'`.
 
+## v2: legible, tunable mods
+
+Every generated mod now documents and exposes itself:
+
+- **Config knobs** — mods declare tunable settings (type, default, min/max/step, description).
+  Change them three ways, all applying **instantly** (mods read config live, no reload):
+  `/vibe set <mod> <key> <value>`, the GUI's −/+ steppers, or a **config book**
+  (`/vibe config <mod>`: edit the `key: value` lines, press *Done* to apply — the book stays in
+  your hand as an editing loop; *Sign* to apply-and-finish).
+- **Manuals** — the model writes a player guide; VibeCore appends *verified facts* it introspects
+  itself (real commands/actions/listeners + current knob values). `/vibe manual <mod>` = a written
+  book, `/vibe info <mod>` = a chat card with clickable [manual] [config] [info] [off] buttons —
+  the same card printed on every install.
+- **Book authoring** — `/vibe book` hands you a book-and-quill: draft a multi-page mod idea at
+  your own pace (*Done* saves the draft), then **Sign to submit** — the title becomes a name hint.
+  `/vibe book <mod>` pre-fills the mod's manual + config with a *Changes:* page for edit requests.
+- **GUI v2** — `/vibe gui`: click a mod for its detail panel (knob steppers, manual/source/config
+  books, enable/rollback/export/delete), plus an ops-only settings page with a model picker and
+  `[reload]`.
+- **Cheap self-heals** — repair and edit rounds may return SEARCH/REPLACE edit blocks instead of
+  whole files (the format Claude's own tooling uses; classic line-number diffs are brittle).
+  Blocks that fail to apply trigger an automatic full-project retry.
+- **`/vibe reload`** — re-reads config.yml live (model, timeouts, watchdog budgets, retries).
+
+v1 mods degrade gracefully: no knobs, introspected-facts-only manuals.
+
 ## Commands
 
 | Command | What it does |

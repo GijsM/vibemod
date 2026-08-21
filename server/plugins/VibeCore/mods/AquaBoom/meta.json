@@ -1,0 +1,20 @@
+{
+  "name": "AquaBoom",
+  "description": "Chickens that touch water spontaneously explode in a burst of feathers and fire.",
+  "usage": "",
+  "manual": "",
+  "mainClass": "vibemod.aquaboom.AquaBoom",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "player",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "chickens explode when they touch water",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787322954516
+    }
+  ],
+  "config": [],
+  "configValues": {}
+}

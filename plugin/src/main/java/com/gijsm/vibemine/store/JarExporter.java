@@ -7,7 +7,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -17,6 +20,7 @@ import java.util.jar.Manifest;
 
 import com.gijsm.vibemine.compile.CompileResult;
 import com.gijsm.vibemine.compile.InMemoryCompiler;
+import com.gijsm.vibemine.gen.GeneratedProject.ConfigKnob;
 
 /**
  * Exports a stored mod as a standalone Paper plugin jar that can run on any
@@ -26,6 +30,14 @@ import com.gijsm.vibemine.compile.InMemoryCompiler;
  * the mod's own sources, embeds copies of the three {@code com.gijsm.vibemine.api}
  * classes so the jar is self-contained, and writes a {@code plugin.yml} plus the
  * full source tree next to the jar.
+ *
+ * When the mod declares config knobs, the wrapper's standalone {@code VibeContext}
+ * reads them live from the exported plugin's own {@code config.yml} (each knob's
+ * default baked into the generated source as the fallback argument), and the jar
+ * embeds a {@code config.yml} seeded with the mod's current resolved values, one
+ * {@code # <description>} comment line per key. A mod with no knobs exports
+ * exactly as v1: no {@code config.yml} entry is written at all (an empty/comment-only
+ * file would be harmless but adds nothing, so it is simply omitted).
  */
 public final class JarExporter {
 
@@ -49,7 +61,8 @@ public final class JarExporter {
         String wrapperSimpleName = name + "ExportPlugin";
         String wrapperFqcn = packageName + "." + wrapperSimpleName;
 
-        String wrapperSource = buildWrapperSource(packageName, wrapperSimpleName, name, mod.mainClass());
+        List<ConfigKnob> knobs = mod.config() == null ? List.of() : mod.config();
+        String wrapperSource = buildWrapperSource(packageName, wrapperSimpleName, name, mod.mainClass(), knobs);
 
         Map<String, String> compileUnits = new LinkedHashMap<>(sources);
         compileUnits.put(wrapperFqcn, wrapperSource);
@@ -64,12 +77,16 @@ public final class JarExporter {
         Files.createDirectories(outDir);
         Path jarPath = outDir.resolve(name + "-" + mod.currentVersion() + ".jar");
         String pluginYml = buildPluginYml(name, mod, wrapperFqcn);
+        String configYml = knobs.isEmpty() ? null : buildConfigYml(knobs, resolvedValues(mod));
 
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
 
         try (JarOutputStream jos = new JarOutputStream(Files.newOutputStream(jarPath), manifest)) {
             writeEntry(jos, "plugin.yml", pluginYml.getBytes(StandardCharsets.UTF_8));
+            if (configYml != null) {
+                writeEntry(jos, "config.yml", configYml.getBytes(StandardCharsets.UTF_8));
+            }
             for (Map.Entry<String, byte[]> e : result.classes().entrySet()) {
                 writeEntry(jos, e.getKey().replace('.', '/') + ".class", e.getValue());
             }
@@ -107,6 +124,58 @@ public final class JarExporter {
     private static String yamlQuote(String value) {
         String v = value == null ? "" : value;
         return "\"" + v.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** Schema defaults overlaid with the mod's currently stored config values. */
+    private static Map<String, String> resolvedValues(ModStore.StoredMod mod) {
+        Map<String, String> result = new LinkedHashMap<>();
+        List<ConfigKnob> config = mod.config() == null ? List.of() : mod.config();
+        for (ConfigKnob k : config) {
+            result.put(k.key(), k.def() == null ? "" : k.def());
+        }
+        Map<String, String> stored = mod.configValues() == null ? Map.of() : mod.configValues();
+        result.putAll(stored);
+        return result;
+    }
+
+    /** Builds a {@code config.yml} body: one {@code # <description>} line then {@code key: value} per knob. */
+    private static String buildConfigYml(List<ConfigKnob> knobs, Map<String, String> resolved) {
+        StringBuilder sb = new StringBuilder();
+        for (ConfigKnob k : knobs) {
+            String description = k.description() == null ? "" : k.description();
+            if (!description.isBlank()) {
+                for (String line : description.split("\n", -1)) {
+                    sb.append("# ").append(line).append('\n');
+                }
+            }
+            String value = resolved.getOrDefault(k.key(), k.def() == null ? "" : k.def());
+            sb.append(k.key()).append(": ").append(yamlValue(k, value)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String yamlValue(ConfigKnob knob, String value) {
+        String type = knob.type() == null ? "text" : knob.type().toLowerCase(Locale.ROOT);
+        switch (type) {
+            case "boolean":
+                return (value != null && value.trim().equalsIgnoreCase("true")) ? "true" : "false";
+            case "integer":
+                try {
+                    return Long.toString(Long.parseLong(value.trim()));
+                } catch (Exception e) {
+                    return "0";
+                }
+            case "decimal":
+                try {
+                    return Double.toString(Double.parseDouble(value.trim()));
+                } catch (Exception e) {
+                    return "0.0";
+                }
+            case "text":
+            case "choice":
+            default:
+                return yamlQuote(value);
+        }
     }
 
     // -- api class byte loading --
@@ -208,7 +277,7 @@ public final class JarExporter {
     // -- wrapper source generation --
 
     private static String buildWrapperSource(String packageName, String wrapperSimpleName, String modName,
-                                              String mainClassSimpleName) {
+                                              String mainClassSimpleName, List<ConfigKnob> knobs) {
         String prefix = modName.toLowerCase(java.util.Locale.ROOT);
         return "package " + packageName + ";\n\n"
                 + "import com.gijsm.vibemine.api.ModCommandHandler;\n"
@@ -240,6 +309,7 @@ public final class JarExporter {
                 + "    private StandaloneContext ctx;\n\n"
                 + "    @Override\n"
                 + "    public void onEnable() {\n"
+                + "        saveDefaultConfig();\n"
                 + "        try {\n"
                 + "            this.ctx = new StandaloneContext(this);\n"
                 + "            this.mod = new " + mainClassSimpleName + "();\n"
@@ -346,8 +416,77 @@ public final class JarExporter {
                 + "        public void action(String name, ModCommandHandler handler) {\n"
                 + "            plugin.getLogger().warning(\"Action '\" + name\n"
                 + "                    + \"' requires VibeCore and is not available in a standalone export.\");\n"
-                + "        }\n"
+                + "        }\n\n"
+                + buildConfigAccessorMethod("boolean", "configBool", "getBoolean", knobs, "boolean", null, "false")
+                + buildConfigAccessorMethod("long", "configInt", "getLong", knobs, "integer", null, "0L")
+                + buildConfigAccessorMethod("double", "configDouble", "getDouble", knobs, "decimal", null, "0.0")
+                + buildConfigAccessorMethod("String", "configString", "getString", knobs, "text", "choice", "\"\"")
                 + "    }\n"
                 + "}\n";
+    }
+
+    /**
+     * Generates one of the four {@code VibeContext} config accessor overrides as a
+     * {@code switch} over the knob keys of the matching type(s), each case baking that
+     * knob's schema default in as the {@code getXxx(key, default)} fallback argument. A
+     * key not present in the schema (or a mod with no knobs at all) falls through to the
+     * type's zero value, mirroring {@code ModConfigs}' unknown-key behavior.
+     */
+    private static String buildConfigAccessorMethod(String returnType, String methodName, String getter,
+                                                      List<ConfigKnob> knobs, String type1, String type2,
+                                                      String zeroLiteral) {
+        List<ConfigKnob> matching = new ArrayList<>();
+        for (ConfigKnob k : knobs) {
+            String t = k.type() == null ? "text" : k.type().toLowerCase(Locale.ROOT);
+            if (t.equals(type1) || (type2 != null && t.equals(type2))) {
+                matching.add(k);
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("        @Override\n");
+        sb.append("        public ").append(returnType).append(' ').append(methodName).append("(String key) {\n");
+        if (matching.isEmpty()) {
+            sb.append("            return plugin.getConfig().").append(getter)
+                    .append("(key, ").append(zeroLiteral).append(");\n");
+        } else {
+            sb.append("            switch (key) {\n");
+            for (ConfigKnob k : matching) {
+                sb.append("                case \"").append(escapeJava(k.key())).append("\": return plugin.getConfig().")
+                        .append(getter).append("(key, ").append(defaultLiteral(k, type1, zeroLiteral)).append(");\n");
+            }
+            sb.append("                default: return plugin.getConfig().").append(getter)
+                    .append("(key, ").append(zeroLiteral).append(");\n");
+            sb.append("            }\n");
+        }
+        sb.append("        }\n\n");
+        return sb.toString();
+    }
+
+    /** Renders a knob's schema default as a Java literal matching {@code kind}'s accessor. */
+    private static String defaultLiteral(ConfigKnob k, String kind, String zeroLiteral) {
+        String def = k.def();
+        switch (kind) {
+            case "boolean":
+                return (def != null && def.trim().equalsIgnoreCase("true")) ? "true" : "false";
+            case "integer":
+                try {
+                    return Long.parseLong(def.trim()) + "L";
+                } catch (Exception e) {
+                    return zeroLiteral;
+                }
+            case "decimal":
+                try {
+                    return Double.toString(Double.parseDouble(def.trim()));
+                } catch (Exception e) {
+                    return zeroLiteral;
+                }
+            case "text":
+            default:
+                return "\"" + escapeJava(def == null ? "" : def) + "\"";
+        }
+    }
+
+    private static String escapeJava(String s) {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 }

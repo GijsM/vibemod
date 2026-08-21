@@ -33,6 +33,7 @@ public final class ChickenCreepersExportPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        saveDefaultConfig();
         try {
             this.ctx = new StandaloneContext(this);
             this.mod = new vibemod.chickencreepers.ChickenCreepers();
@@ -153,5 +154,30 @@ public final class ChickenCreepersExportPlugin extends JavaPlugin {
             plugin.getLogger().warning("Action '" + name
                     + "' requires VibeCore and is not available in a standalone export.");
         }
+
+        @Override
+        public boolean configBool(String key) {
+            return plugin.getConfig().getBoolean(key, false);
+        }
+
+        @Override
+        public long configInt(String key) {
+            switch (key) {
+                case "chicken-count": return plugin.getConfig().getLong(key, 3L);
+                case "particle-count": return plugin.getConfig().getLong(key, 15L);
+                default: return plugin.getConfig().getLong(key, 0L);
+            }
+        }
+
+        @Override
+        public double configDouble(String key) {
+            return plugin.getConfig().getDouble(key, 0.0);
+        }
+
+        @Override
+        public String configString(String key) {
+            return plugin.getConfig().getString(key, "");
+        }
+
     }
 }

@@ -89,7 +89,7 @@ fi
 # on the next tick, which would make most vibe-coded mods look broken.
 cat > "$SERVER_DIR/server.properties" <<EOF
 online-mode=false
-level-type=minecraft\:flat
+level-type=minecraft\:normal
 spawn-protection=0
 view-distance=4
 simulation-distance=4

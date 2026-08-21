@@ -1,0 +1,16 @@
+{
+  "name": "CoolBoss",
+  "description": "Adds a /coolboss command that summons the Stormlord, a hard-hitting Wither Skeleton boss that periodically teleport-slams the nearest player with an AoE shockwave.",
+  "mainClass": "vibemod.coolboss.CoolBoss",
+  "currentVersion": 1,
+  "enabled": false,
+  "creator": "player",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "make a new boss with a cool fighting mechanic spawnable via /coolboss",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787322097834
+    }
+  ]
+}
