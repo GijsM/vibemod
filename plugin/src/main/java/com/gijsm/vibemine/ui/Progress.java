@@ -16,9 +16,10 @@ import org.bukkit.plugin.Plugin;
  * Visual + chat feedback for one in-flight generation. Shows an Adventure boss
  * bar to player viewers (progressing in quarters across the Thinking / Writing
  * / Compiling / Loading phases) and always mirrors progress as plain chat
- * lines, since generation work happens off the main thread and console
- * senders have no boss bar. All Bukkit/Adventure mutations are hopped onto
- * the main thread.
+ * lines - routed through {@link Style} for the unified {@code ⬡ vibe} prefix
+ * and semantic colors - since generation work happens off the main thread and
+ * console senders have no boss bar. All Bukkit/Adventure mutations are hopped
+ * onto the main thread.
  */
 public final class Progress {
 
@@ -51,13 +52,13 @@ public final class Progress {
                 bossBar.name(name);
                 bossBar.color(barColor);
             }
-            chat(name);
+            chat(Style.prefix().append(name));
         });
     }
 
     /** A gray, low-priority informational chat line. */
     public void detail(String line) {
-        runOnMain(() -> chat(Component.text(line, NamedTextColor.GRAY)));
+        runOnMain(() -> chat(Style.info(line)));
     }
 
     /** Complete successfully: full green bar, success sound + firework, then hide. */
@@ -74,7 +75,7 @@ public final class Progress {
                 player.getWorld().spawnParticle(Particle.FIREWORK, loc, 30, 0.5, 0.5, 0.5);
                 hideAfter(60);
             }
-            chat(name);
+            chat(Style.ok(message));
         });
     }
 
@@ -90,7 +91,7 @@ public final class Progress {
                 player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1f, 1f);
                 hideAfter(100);
             }
-            chat(name);
+            chat(Style.err(message));
         });
     }
 

@@ -1,5 +1,9 @@
 # DEMO.md — verified end-to-end runs (2026-08-21)
 
+> **v3 note:** the plugin was renamed VibeCore → VibeMod after these v1/v2 runs were recorded.
+> The transcripts below are left exactly as captured (including `[VibeCore]` log lines) — they
+> are historical, not rewritten. New v3 runs are logged under `[VibeMod]`.
+
 Everything below was executed for real against the live Paper 1.21.8 server in `server/`,
 driven over RCON with `scripts/rcon.sh`. Model: `anthropic/claude-sonnet-5` via OpenRouter.
 ✅ = machine-verified via console assertions; 🎮 = needs a human player (verified code paths only).
@@ -158,3 +162,51 @@ Rollback v4→v3 recompiles + hot-swaps; knob values still apply across versions
 
 Field note: while v2 was being verified, player (age-appropriate chaos engineer) had already
 generated GrapplingHook v1 with three perfectly-formed knobs. The contract works under real use.
+
+
+---
+
+# v3 verification (2026-08-21, evening) — VibeMod
+
+Rename + debuggability + native dialogs. Three parallel agents (rename sweep / ModErrors+DebugEcho
+runtime / dialog UX), architect-integrated; full compile clean on first assembly (fourth in a row).
+
+## Rename + migration ✅
+Server stopped, plugins/VibeCore → plugins/VibeMod migrated (API key + mods + moddata + exports
+intact), stale VibeCore.jar removed. Boot: `[VibeMod] Enabling VibeMod`, all 7 enabled mods
+recompiled from stored sources that still say `implements VibeMod` — the deprecated
+`VibeMod extends Mod` bridge is load-bearing and works. New generations teach/emit `implements Mod`.
+
+## Degraded → fix loop ✅ (the headline)
+```
+> vibe make ... action "boomcheck" which intentionally throws ...   → Generated DiagCheck v1
+> vibe do DiagCheck boomcheck
+  Error in mod command: kaboom test
+  DiagCheck hit an error (RuntimeException) — [fix] [errors]        (one announce, buttoned)
+> vibe list → ● DiagCheck [degraded]                                (mod keeps running)
+> vibe do DiagCheck boomcheck (again) → deduped to 2×, NO second announce
+> vibe errors DiagCheck → "2× java.lang.RuntimeException: kaboom test
+                            at vibemod.diagcheck.DiagCheck...(DiagCheck.java:30) (action:boomcheck, last just now)"
+> vibe fix DiagCheck
+  Applied 1 edit block(s) from an edit-shaped response              (surgical repair!)
+  Generated DiagCheck v2
+> vibe do DiagCheck boomcheck → "[DiagCheck] boomcheck ran successfully"
+> vibe list → ● DiagCheck [on]                                      (degraded cleared)
+```
+
+## Error storm ✅
+Rolled back to throwing v1, 11 rapid triggers → `DiagCheck was auto-disabled after an error storm`.
+Storm fires once per episode; threshold live-reloadable (verified via /vibe reload).
+
+## Also machine-verified ✅
+Rollback regression (used as the storm setup), `/vibe debug <mod> on` toggle, reload of errors.*
+keys, boot-restore of the full mod set post-migration, self-test suites (ErrorsSelfTest 36 checks:
+dedup/episodes/storm-once/cap-eviction/persistence; Llm/Store/Compiler suites incl. a
+bridge-compile case and "prompt never teaches the deprecated name").
+
+## Human-verified 🎮 (client-only)
+Native dialogs (`/vibe make` argless → popup with multiline idea field; `/vibe config <mod>` →
+sliders/checkboxes/dropdowns with Save; fix-confirm dialog), virtual books (manual/source/errors
+open with NO item), the restyled GUI (state-colored borders, ● dots, expressive buttons incl.
+per-mod [⟳ reload], sounds), debug-echo lines to ops, unified ⬡ vibe chat style. Dialog API
+signatures were javap-verified against the real paper-api jar; the clicking needs hands.

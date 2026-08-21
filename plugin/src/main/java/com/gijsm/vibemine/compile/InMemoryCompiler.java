@@ -38,7 +38,7 @@ public final class InMemoryCompiler {
 
     private final List<Path> extraClasspath;
 
-    /** extraClasspath entries are appended after the auto-detected paper jar + VibeCore jar. */
+    /** extraClasspath entries are appended after the auto-detected paper jar + VibeMod jar. */
     public InMemoryCompiler(Path... extraClasspath) {
         this.extraClasspath = List.of(extraClasspath);
     }

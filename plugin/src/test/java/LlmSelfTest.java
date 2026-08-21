@@ -13,7 +13,7 @@ import com.gijsm.vibemine.llm.PromptLibrary;
  * parse() is robust and its systemPrompt() covers the required content.
  *
  * args[0]: base directory of the real api/*.java sources (used to verify the
- * embedded VibeMod/VibeContext/ModCommandHandler constants match verbatim).
+ * embedded Mod/VibeContext/ModCommandHandler constants match verbatim).
  */
 public class LlmSelfTest {
 
@@ -257,6 +257,13 @@ public class LlmSelfTest {
         check("systemPrompt example 2 few-shot JSON sets icon SUGAR", prompt.contains("\"icon\":\"SUGAR\""));
         check("systemPrompt mentions configInt", prompt.contains("configInt"));
         check("systemPrompt mentions edit shape", prompt.contains("\"edits\""));
+        check("systemPrompt few-shots teach 'implements Mod'", prompt.contains("implements Mod {"));
+        check("systemPrompt mentions the host plugin by its v3 name 'VibeMod'",
+                prompt.contains("host plugin called VibeMod"));
+        check("systemPrompt never teaches 'implements VibeMod' (the deprecated bridge)",
+                !prompt.contains("implements VibeMod"));
+        check("systemPrompt never embeds the deprecated VibeMod bridge source",
+                !prompt.contains("api/VibeMod.java") && !prompt.contains("interface VibeMod"));
         if (failures == 0) {
             System.out.println("PASS: systemPrompt() contains all required markers");
         }
@@ -326,13 +333,27 @@ public class LlmSelfTest {
         check("demandFullProject mentions reason", demand.contains("find snippet matched 0 times in Foo.java"));
         check("demandFullProject demands full project", demand.toLowerCase().contains("full"));
 
+        String errorReport = "3x NullPointerException at Foo.java:12 (onEnable)\n";
+        String fix = PromptLibrary.fixPrompt(errorReport, sources, schema, values);
+        check("fixPrompt includes the error report", fix.contains("NullPointerException"));
+        check("fixPrompt asks for the root cause", fix.contains("ROOT CAUSE"));
+        check("fixPrompt includes source", fix.contains("public final class Foo"));
+        check("fixPrompt mentions edit shape", fix.contains("\"edits\""));
+        check("fixPrompt includes knob key", fix.contains("chicken-count"));
+        check("fixPrompt includes knob current value", fix.contains("3"));
+        check("fixPrompt says to keep the same mod name", fix.contains("same") && fix.contains("name"));
+
+        String fixNoSchema = PromptLibrary.fixPrompt(errorReport, sources, List.of(), Map.of());
+        check("fixPrompt tolerates empty schema", fixNoSchema.contains("NullPointerException"));
+
         if (failures == 0) {
-            System.out.println("PASS: makePrompt/editPrompt/repairPrompt/demandFullProject build expected content");
+            System.out.println("PASS: makePrompt/editPrompt/repairPrompt/demandFullProject/fixPrompt build "
+                    + "expected content");
         }
     }
 
     /**
-     * Asserts the VibeMod/VibeContext/ModCommandHandler sources embedded in PromptLibrary's
+     * Asserts the Mod/VibeContext/ModCommandHandler sources embedded in PromptLibrary's
      * system prompt match the real api/*.java files on disk, ignoring per-line leading/
      * trailing whitespace and blank lines (so reformatting the embedded text block's
      * indentation doesn't spuriously fail this check).
@@ -340,9 +361,9 @@ public class LlmSelfTest {
     private static void testEmbeddedApiSourcesMatchDisk(String baseDir) {
         String prompt = PromptLibrary.systemPrompt();
 
-        checkEmbeddedMatches(prompt, "VibeMod.java",
-                Path.of(baseDir, "VibeMod.java"),
-                "--- com/gijsm/vibemine/api/VibeMod.java ---",
+        checkEmbeddedMatches(prompt, "Mod.java",
+                Path.of(baseDir, "Mod.java"),
+                "--- com/gijsm/vibemine/api/Mod.java ---",
                 "--- com/gijsm/vibemine/api/VibeContext.java ---");
         checkEmbeddedMatches(prompt, "VibeContext.java",
                 Path.of(baseDir, "VibeContext.java"),

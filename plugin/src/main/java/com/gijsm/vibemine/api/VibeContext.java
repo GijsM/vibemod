@@ -16,7 +16,7 @@ import org.bukkit.scheduler.BukkitTask;
  */
 public interface VibeContext {
 
-    /** The host plugin (VibeCore). For advanced use only. */
+    /** The host plugin (VibeMod). For advanced use only. */
     Plugin plugin();
 
     /** Convenience for {@code plugin().getServer()}. */

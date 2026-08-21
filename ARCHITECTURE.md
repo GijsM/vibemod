@@ -1,8 +1,15 @@
 # VibeMine architecture contract (FROZEN — implement exactly these surfaces)
 
-VibeMine = one Paper 1.21.8 plugin, **VibeCore** (`com.gijsm.vibemine`), that turns a player prompt
+> **v3 note:** the plugin below is described under its v1/v2 name, VibeCore; it was renamed to
+> **VibeMod** in v3 (see the V3 ADDENDUM at the bottom of this file), and the api contract's
+> `VibeMod` interface was itself renamed to `Mod` at the same time (deprecated `VibeMod extends
+> Mod` bridge kept for compatibility). Mentions of "VibeMod" below the fold now refer to the
+> plugin, per that rename; api-interface mentions ("implements VibeMod", "api/VibeMod.java") are
+> the v1/v2-era name for what is now `Mod`.
+
+VibeMine = one Paper 1.21.8 plugin, **VibeMod** (`com.gijsm.vibemine`), that turns a player prompt
 (`/vibe make "sheep can fly"`) into LLM-generated Java, compiles it **in-process** with `javax.tools`,
-and hot-loads it as a "mod" in a child `URLClassLoader` under VibeCore's plugin identity.
+and hot-loads it as a "mod" in a child `URLClassLoader` under VibeMod's plugin identity.
 Generated mods are NOT Bukkit plugins (runtime plugin loading is unsupported on modern Paper).
 
 Ground rules for ALL code in this repo:
@@ -28,7 +35,7 @@ Ground rules for ALL code in this repo:
 ### compile/InMemoryCompiler.java
 ```java
 public final class InMemoryCompiler {
-    /** extraClasspath entries are appended after the auto-detected paper jar + VibeCore jar. */
+    /** extraClasspath entries are appended after the auto-detected paper jar + VibeMod jar. */
     public InMemoryCompiler(Path... extraClasspath)
     /** sources: fully-qualified class name -> source text. Never throws on bad source; returns failure result. */
     public CompileResult compile(Map<String, String> sources)
@@ -37,7 +44,7 @@ public final class InMemoryCompiler {
 }
 ```
 Classpath auto-detection: `Bukkit.class.getProtectionDomain().getCodeSource().getLocation()` (running
-Paper jar) + `InMemoryCompiler.class.getProtectionDomain()...` (VibeCore jar). Must ALSO work in a
+Paper jar) + `InMemoryCompiler.class.getProtectionDomain()...` (VibeMod jar). Must ALSO work in a
 plain-JVM self-test where Bukkit isn't loaded: detect reflectively/gracefully — if a class isn't
 present, skip that entry. Compile options: `--release <Runtime.version().feature()>`, `-proc:none`.
 Capture bytecode in memory via ForwardingJavaFileManager; include inner classes in the result map.
@@ -99,7 +106,7 @@ public final class ModHandle {   // read surface used by UI; internals package-p
     public List<String> commandNames(); public List<String> actionNames();
 }
 ```
-Rules: each enabled mod = ONE fresh `URLClassLoader` (parent = VibeCore's own class loader) fed by an
+Rules: each enabled mod = ONE fresh `URLClassLoader` (parent = VibeMod's own class loader) fed by an
 in-memory map (subclass, override findClass -> defineClass from bytes). Teardown MUST use
 `HandlerList.unregisterAll(listenerInstance)` per instance and `task.cancel()` per task — NEVER the
 `Plugin`-wide overloads. VibeContext impl lives here and forwards registrations into the handle's
@@ -170,7 +177,7 @@ in `UncheckedIOException`.
 public final class JarExporter {
     public JarExporter(InMemoryCompiler compiler)
     /** Standalone Paper plugin jar. Embeds compiled mod classes, copies of the three api classes
-        (bytes read from VibeCore's own jar), a generated <Name>Plugin JavaPlugin wrapper with a
+        (bytes read from VibeMod's own jar), a generated <Name>Plugin JavaPlugin wrapper with a
         standalone VibeContext impl (no watchdog, plain registerEvents/scheduler/commandMap), and a
         generated plugin.yml (name=<Name>, main=wrapper, api-version 1.21). Also writes the source
         tree next to it as <Name>-src/. Returns the jar path. */
@@ -212,7 +219,7 @@ public final class ChatMode implements Listener {  // ui/ChatMode.java
     public boolean toggle(Player p)    // when on: AsyncChatEvent lines from that player are cancelled and routed to onPrompt (hop to main thread)
 }
 public final class VibeCommand implements TabExecutor {  // command/VibeCommand.java
-    // constructor takes (VibeCore plugin, ModGenerator gen, ModRegistry registry, ModStore store,
+    // constructor takes (VibeMod plugin, ModGenerator gen, ModRegistry registry, ModStore store,
     //                    JarExporter exporter, ModBrowserGui gui, ChatMode chatMode, Supplier<String> model, Consumer<String> setModel)
     // subcommands: make|edit|again|list|source|rollback|enable|disable|delete|export|do|model|chat|gui|panic|help
     // make/edit take a quoted-or-rest-of-line prompt; permission vibe.use for read-only (list/source/help), vibe.admin for the rest; full tab completion incl. mod names
@@ -220,7 +227,7 @@ public final class VibeCommand implements TabExecutor {  // command/VibeCommand.
 ```
 `/vibe list` prints hoverable/clickable lines using Paper's Adventure API (net.kyori.adventure, part of paper-api).
 
-## Wiring (owned by architect in VibeCore.java — for reference only)
+## Wiring (owned by architect in VibeMod.java — for reference only)
 onEnable: read config → construct compiler/client/store/watchdog/dynCommands/registry/generator/ui →
 register /vibe (declared in plugin.yml) → async boot-restore: for each StoredMod enabled=true, compile
 sources(current version) and registry.load on main thread.
@@ -458,11 +465,11 @@ public final class VibeCommand implements TabExecutor {   // REWORK — new cons
 - On successful generation, onGenerationDone prints the InstallCard (fetch store.get(result.modName())).
 - help updated; keep every v1 subcommand working.
 
-## gen/ModGenerator v2 + VibeCore v2 (owner: ARCHITECT — do not implement)
+## gen/ModGenerator v2 + VibeMod v2 (owner: ARCHITECT — do not implement)
 For reference: ModGenerator applies EditBlocks to the previous round's sources (exact-unique match
 per file; failure -> next round uses PromptLibrary.demandFullProject), carries forward
 usage/manual/config when an edit response omits them, and calls the 7-arg registry.load with the
-schema+values (values from store after save). VibeCore constructs ModConfigs, BookFlows, GuiCallbacks,
+schema+values (values from store after save). VibeMod constructs ModConfigs, BookFlows, GuiCallbacks,
 wires /vibe reload (re-reads config.yml -> watchdog.setBudgets, client.setModel/setTimeout,
 dynamicCommands.setAllowTopLevel, generator retry supplier), and passes the InstallCard path into
 its finish() dedupe.
@@ -487,3 +494,98 @@ its finish() dedupe.
   else fallback `PAPER`. Enabled state = `ItemMeta#setEnchantmentGlintOverride(true)` (Paper 1.21
   API) instead of dye swapping; disabled = no glint + name in gray + "(off)" in the state lore.
   Applies to the main list item AND the detail-panel header item.
+
+============================================================================
+# V3 ADDENDUM — rename to VibeMod, debuggability, native dialogs
+============================================================================
+The approved v3 plan (rename + degraded/fix/debug + dialog UX) is frozen in
+/Users/gijsmulder/.claude/plans/this-is-actually-a-synthetic-lampson.md — read it FIRST; its
+"Design" section IS the frozen spec (surfaces quoted there are exact). Extra implementation
+contracts not fully spelled out there:
+
+## Already done by the architect (do not modify)
+- api/Mod.java (the renamed interface) + api/VibeMod.java (deprecated bridge `VibeMod extends Mod`).
+
+## Style helper (owner: agent U) — ui/Style.java
+```java
+public final class Style {
+    public static Component prefix()                       // "⬡ vibe " gradient-ish (two-tone), non-italic
+    public static Component ok(String msg)                 // prefix + green
+    public static Component warn(String msg)               // prefix + gold
+    public static Component err(String msg)                // prefix + red
+    public static Component info(String msg)               // prefix + gray
+    public static Component button(String label, String command, String hover, NamedTextColor color) // "[label]" runCommand
+    public static Component dot(boolean enabled, boolean degraded)  // ● colored green/gold/gray
+}
+```
+ALL user-facing chat lines in ui/ + command/ route through Style. Semantic colors: GREEN success,
+GOLD degraded/warn, RED error, AQUA clickable/actions, GRAY info.
+
+## Dialogs (owner: agent U) — implementation notes beyond the plan
+- Imports: io.papermc.paper.dialog.Dialog, io.papermc.paper.registry.data.dialog.{DialogBase,ActionButton},
+  .input.DialogInput (+TextDialogInput.MultilineOptions), .body.DialogBody, .type.DialogType,
+  .action.DialogAction; net.kyori.adventure.text.event.ClickCallback.
+- Suppress the @Experimental warnings file-wide with @SuppressWarnings("UnstableApiUsage") + a javadoc
+  note; do NOT let the build fail on them (no -Werror anywhere).
+- Submit buttons: DialogAction.customClick(callback, ClickCallback.Options.builder().uses(1).build());
+  callbacks MUST runTask to main before Bukkit calls; audience instanceof Player guard.
+- Config dialog value mapping: numberRange returns Float — convert per knob type (integer: Math.round,
+  respecting step); text inputs .maxLength(256) for knob text, 2000 for prompt/edit; every submitted
+  value re-validated via the injected ConfigSubmit (which calls ModConfigs.set) — on any error,
+  re-open the dialog via openConfig with a red plainMessage error body prepended and the player's
+  submitted values as initial values (add a private overload carrying (errorMessage, priorValues)).
+- Functional shapes reused from the deleted BookFlows: EditSubmit{submit(Player,String mod,String)},
+  ConfigSubmit{List<String> apply(Player,String mod,Map<String,String>)} — declare them INSIDE Dialogs.
+- openPrompt name-hint: single-line text input key "name" (maxLength 32, labelVisible); when non-blank,
+  prepend "Name hint: <v>\n" to the prompt text (same convention BookFlows used).
+- WAIT_FOR_RESPONSE afterAction on prompt/edit submit buttons; config uses CLOSE.
+
+## Virtual books (owner: agent U) — ui/VirtualBooks.java
+Replaces ManualBook + SourceBook giving; DELETE ManualBook.java and SourceBook.java (fold their
+pagination logic in; keep the 256-char/13-line page budget as static helpers). Book building:
+net.kyori.adventure.inventory.Book.book(Component title, Component author, List<Component> pages);
+player.openBook(book). Signatures exactly as in the plan (openManual/openSource/openErrors).
+openErrors pages: one error per section — "3× NullPointerException", where-line, relative time,
+then the truncated stack lines. VibeCommand console paths keep chat dumps (move the dump helpers
+into VibeCommand or VirtualBooks statics taking CommandSender).
+
+## GUI callbacks (owner: agent U) — ui/GuiCallbacks.java v3 (replaces v2 record)
+```java
+public record GuiCallbacks(BiConsumer<Player,String> export,
+                           BiConsumer<Player,String> applyVersion,     // = per-mod [reload]
+                           BiConsumer<Player,String> configure,        // opens config dialog
+                           BiConsumer<Player,String> editMod,          // opens edit dialog
+                           BiConsumer<Player,String> fix,              // opens fix-confirm dialog
+                           BiConsumer<Player,String> openManual,
+                           BiConsumer<Player,String> openSource,
+                           BiConsumer<Player,String> openErrors,
+                           Runnable reloadConfig,
+                           Supplier<String> getModel, Consumer<String> setModel) {}
+```
+ModBrowserGui ctor: (Plugin, ModRegistry, ModStore, ModConfigs, ModErrors, DebugEcho, GuiCallbacks).
+
+## ModErrors detail (owner: agent D)
+- errors.json shape: {"records":[ErrorRecord...]} Gson pretty; file lives at <modsDir>/<Name>/errors.json.
+- report(mod,n): "== <mod> errors ==\n" + per record "N× <cls>: <msg>\n  at <topFrame> (<where>, last <rel-time>)\n<indented stack>".
+- Relative-time helper package-private static (also used by UI via recent() records' lastSeen).
+- Storm + episode fields volatile; setLimits mirrors Watchdog.setBudgets semantics.
+- Plain-JVM self-test: plugin/src/test/java/ErrorsSelfTest.java — dedup, episode transitions, storm
+  trip once, cap eviction, persistence round-trip (construct with a fake Plugin? NO — split the
+  Bukkit-free core: put record/dedup/window/persistence in a package-private static core class or
+  make the Bukkit scheduler hop injectable (Consumer<Runnable> mainThreadRunner param defaulting to
+  Runnable::run in a test ctor) — implementer's choice, but the self-test must run without Bukkit).
+
+## VibeCommand v3 (owner: agent U) — behavior notes
+- `make`/`edit` argless + player -> dialogs.openPrompt/openEdit; console argless -> usage error.
+- `fix <mod>`: sender==Player -> dialogs.openFixConfirm; console -> run fix immediately
+  (generator.fix with errors.report(mod,8)) — console needs no confirm.
+- `errors <mod>`: player -> VirtualBooks.openErrors + a compact chat summary; console -> report dump.
+- `debug <mod> [on|off]`: no arg toggles; prints new state; tab-completes on|off.
+- Keep `set` (RCON path) and `config` (dialog) both working. `book [mod]` aliases prompt/edit dialogs.
+- READ_ONLY += errors. MOD_ARG_SUBS += errors, fix, debug.
+- Generation completions route through Style + InstallCard as today.
+
+## Ground rules
+- No -Werror; @Experimental dialog API warnings are accepted and suppressed locally.
+- v1/v2 mods and stored sources MUST keep working (bridge interface, null-safe reads).
+- Existing self-tests keep passing; BookParserSelfTest is DELETED with its subject.

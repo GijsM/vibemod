@@ -10,7 +10,8 @@ import com.gijsm.vibemine.compile.InMemoryCompiler;
  * Standalone self-test (no test framework) proving InMemoryCompiler works
  * end-to-end: successful compile with inner class + lambda, real bytecode
  * loading/execution, syntax-error failure reporting, and compiling against
- * the frozen VibeMod api.
+ * the frozen Mod api (plus the deprecated VibeMod bridge, so pre-v3-rename
+ * generated sources still compile).
  */
 public class CompilerSelfTest {
 
@@ -25,7 +26,8 @@ public class CompilerSelfTest {
 
         testSuccessfulCompileWithInnerClassAndLambda();
         testSyntaxErrorFailure();
-        testCompileAgainstVibeModApi();
+        testCompileAgainstModApi();
+        testCompileAgainstDeprecatedVibeModBridge();
 
         if (failures == 0) {
             System.out.println("ALL CHECKS PASSED");
@@ -112,14 +114,14 @@ public class CompilerSelfTest {
         System.out.println("PASS: syntax error compile reports failure with line info");
     }
 
-    private static void testCompileAgainstVibeModApi() {
+    private static void testCompileAgainstModApi() {
         String source = """
                 package vibemod.selftest;
 
                 import com.gijsm.vibemine.api.VibeContext;
-                import com.gijsm.vibemine.api.VibeMod;
+                import com.gijsm.vibemine.api.Mod;
 
-                public class ApiMod implements VibeMod {
+                public class ApiMod implements Mod {
                     @Override
                     public void onEnable(VibeContext ctx) throws Exception {
                     }
@@ -132,14 +134,49 @@ public class CompilerSelfTest {
         InMemoryCompiler compiler = new InMemoryCompiler();
         CompileResult result = compiler.compile(sources);
 
-        check("compile against frozen VibeMod api succeeds", result.success());
+        check("compile against frozen Mod api succeeds", result.success());
         if (!result.success()) {
             System.out.println("  diagnostics: " + result.diagnostics());
             return;
         }
         check("ApiMod class present", result.classes().containsKey("vibemod.selftest.ApiMod"));
 
-        System.out.println("PASS: compiling against frozen VibeMod/VibeContext api works");
+        System.out.println("PASS: compiling against frozen Mod/VibeContext api works");
+    }
+
+    /**
+     * Proves the deprecated {@code VibeMod extends Mod} bridge still compiles, so mod
+     * sources generated before the v3 rename (which declare {@code implements VibeMod})
+     * keep recompiling from stored source at boot.
+     */
+    private static void testCompileAgainstDeprecatedVibeModBridge() {
+        String source = """
+                package vibemod.selftest;
+
+                import com.gijsm.vibemine.api.VibeContext;
+                import com.gijsm.vibemine.api.VibeMod;
+
+                public class BridgeMod implements VibeMod {
+                    @Override
+                    public void onEnable(VibeContext ctx) throws Exception {
+                    }
+                }
+                """;
+
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("vibemod.selftest.BridgeMod", source);
+
+        InMemoryCompiler compiler = new InMemoryCompiler();
+        CompileResult result = compiler.compile(sources);
+
+        check("compile against deprecated VibeMod bridge succeeds", result.success());
+        if (!result.success()) {
+            System.out.println("  diagnostics: " + result.diagnostics());
+            return;
+        }
+        check("BridgeMod class present", result.classes().containsKey("vibemod.selftest.BridgeMod"));
+
+        System.out.println("PASS: compiling a pre-v3-rename \"implements VibeMod\" source still works via the bridge");
     }
 
     private static String indent(String s) {

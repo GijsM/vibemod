@@ -387,8 +387,8 @@ public class StoreSelfTest {
 
         String modSource = "package vibemod.trivial;\n\n"
                 + "import com.gijsm.vibemine.api.VibeContext;\n"
-                + "import com.gijsm.vibemine.api.VibeMod;\n\n"
-                + "public class TrivialMod implements VibeMod {\n"
+                + "import com.gijsm.vibemine.api.Mod;\n\n"
+                + "public class TrivialMod implements Mod {\n"
                 + "    @Override\n"
                 + "    public void onEnable(VibeContext ctx) throws Exception {\n"
                 + "        ctx.log().info(\"trivial mod enabled\");\n"
@@ -428,7 +428,9 @@ public class StoreSelfTest {
             check("nested StandaloneContext class present",
                     jarFile.getJarEntry("vibemod/trivial/TrivialExportPlugin$StandaloneContext.class") != null);
             check("mod class present", jarFile.getJarEntry("vibemod/trivial/TrivialMod.class") != null);
-            check("api class VibeMod embedded", jarFile.getJarEntry("com/gijsm/vibemine/api/VibeMod.class") != null);
+            check("api class Mod embedded", jarFile.getJarEntry("com/gijsm/vibemine/api/Mod.class") != null);
+            check("deprecated api class VibeMod bridge embedded (old exported sources link)",
+                    jarFile.getJarEntry("com/gijsm/vibemine/api/VibeMod.class") != null);
             check("api class VibeContext embedded",
                     jarFile.getJarEntry("com/gijsm/vibemine/api/VibeContext.class") != null);
             check("api class ModCommandHandler embedded",
@@ -456,8 +458,8 @@ public class StoreSelfTest {
 
         String modSource = "package vibemod.knobby;\n\n"
                 + "import com.gijsm.vibemine.api.VibeContext;\n"
-                + "import com.gijsm.vibemine.api.VibeMod;\n\n"
-                + "public class KnobbyMod implements VibeMod {\n"
+                + "import com.gijsm.vibemine.api.Mod;\n\n"
+                + "public class KnobbyMod implements Mod {\n"
                 + "    @Override\n"
                 + "    public void onEnable(VibeContext ctx) throws Exception {\n"
                 + "        boolean flag = ctx.configBool(\"flag\");\n"

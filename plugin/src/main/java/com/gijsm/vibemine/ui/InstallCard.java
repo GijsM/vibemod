@@ -6,10 +6,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickEvent;
-import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 
 import com.gijsm.vibemine.runtime.ModHandle;
 import com.gijsm.vibemine.store.ModStore;
@@ -18,21 +15,29 @@ import com.gijsm.vibemine.store.ModStore;
  * Builds the chat-printable "install card" shown after a generation succeeds
  * or on {@code /vibe info <mod>}: a compact summary plus clickable follow-up
  * buttons, and a separate "verified facts" footer built from live
- * introspection (falling back to what's on record when the mod isn't loaded).
+ * introspection (falling back to what's on record when the mod isn't
+ * loaded). Degraded mods render their state in gold and gain
+ * {@code [fix]}/{@code [errors]} buttons alongside the usual ones.
  */
 public final class InstallCard {
 
     private InstallCard() {
     }
 
-    /** Name/version/state line, wrapped description, a "Try:" usage hint, and [manual][config][info][off] buttons. */
+    /**
+     * Name/version/state line, wrapped description, a "Try:" usage hint, and follow-up buttons:
+     * {@code [manual][config][info][off]} always, plus {@code [fix][errors]} when degraded.
+     */
     public static Component build(ModStore.StoredMod mod, ModHandle liveOrNull) {
         boolean enabled = liveOrNull != null ? liveOrNull.enabled() : mod.enabled();
-        NamedTextColor stateColor = enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY;
+        boolean degraded = liveOrNull != null && liveOrNull.degraded();
+        NamedTextColor stateColor = degraded ? Style.WARN : (enabled ? Style.OK : NamedTextColor.GRAY);
+        String stateText = degraded ? "[DEGRADED" + errorSuffix(liveOrNull) + "]" : (enabled ? "[ON]" : "[OFF]");
 
-        Component out = Component.text(mod.name(), NamedTextColor.GOLD)
+        Component out = Style.prefix()
+                .append(Component.text(mod.name(), NamedTextColor.GOLD))
                 .append(Component.text(" v" + mod.currentVersion() + " ", NamedTextColor.DARK_GRAY))
-                .append(Component.text(enabled ? "[ON]" : "[OFF]", stateColor));
+                .append(Component.text(stateText, stateColor));
 
         for (Component line : Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY)) {
             out = out.append(Component.newline()).append(line);
@@ -44,21 +49,38 @@ public final class InstallCard {
                     .append(Component.text(mod.usage(), NamedTextColor.WHITE));
         }
 
-        out = out.append(Component.newline()).append(buttons(mod.name()));
+        out = out.append(Component.newline()).append(buttons(mod.name(), degraded));
         return out;
     }
 
-    /** Introspected facts: commands, actions, listener/task counts, current knob values, creator. */
+    private static String errorSuffix(ModHandle live) {
+        if (live == null) {
+            return "";
+        }
+        int n = live.errorCount();
+        return n > 0 ? " ·" + n : "";
+    }
+
+    /** {@link #verifiedFooter(ModStore.StoredMod, ModHandle, Map, String)} with no errors line. */
     public static Component verifiedFooter(ModStore.StoredMod mod, ModHandle liveOrNull, Map<String, String> values) {
+        return verifiedFooter(mod, liveOrNull, values, null);
+    }
+
+    /** Introspected facts (commands/actions/listener/task counts, knob values, creator) plus an optional errors line. */
+    public static Component verifiedFooter(ModStore.StoredMod mod, ModHandle liveOrNull, Map<String, String> values,
+                                            String errorsLine) {
         Component out = Component.text("Verified facts", NamedTextColor.DARK_AQUA);
         for (String line : verifiedFactLines(mod, liveOrNull, values)) {
             out = out.append(Component.newline()).append(Component.text(line, NamedTextColor.GRAY));
+        }
+        if (errorsLine != null && !errorsLine.isBlank()) {
+            out = out.append(Component.newline()).append(Component.text(errorsLine, Style.WARN));
         }
         return out;
     }
 
     /**
-     * Plain-text lines behind {@link #verifiedFooter}, reused by {@link ManualBook} for its
+     * Plain-text lines behind {@link #verifiedFooter}, reused by {@link VirtualBooks} for its
      * written-book "Verified facts" page. When {@code live} is {@code null} (mod not currently
      * loaded), introspected counts aren't available from stored data alone, so that's said plainly
      * rather than guessed.
@@ -69,6 +91,9 @@ public final class InstallCard {
             lines.add("commands: " + joinOrNone(live.commandNames()));
             lines.add("actions: " + joinOrNone(live.actionNames()));
             lines.add("listeners: " + live.listenerCount() + "  tasks: " + live.taskCount());
+            if (live.degraded()) {
+                lines.add("state: DEGRADED (" + live.errorCount() + " error(s))");
+            }
         } else {
             lines.add("(not currently loaded - live counts unavailable)");
         }
@@ -86,20 +111,20 @@ public final class InstallCard {
         return items.isEmpty() ? "none" : String.join(", ", items);
     }
 
-    private static Component buttons(String modName) {
-        return button("[manual]", "/vibe manual " + modName, "View the player manual", NamedTextColor.AQUA)
+    private static Component buttons(String modName, boolean degraded) {
+        Component out = Style.button("manual", "/vibe manual " + modName, "View the player manual", Style.ACTION)
                 .append(Component.text(" "))
-                .append(button("[config]", "/vibe config " + modName, "Tune this mod's settings", NamedTextColor.AQUA))
+                .append(Style.button("config", "/vibe config " + modName, "Tune this mod's settings", Style.ACTION))
                 .append(Component.text(" "))
-                .append(button("[info]", "/vibe info " + modName, "Show this install card again", NamedTextColor.AQUA))
+                .append(Style.button("info", "/vibe info " + modName, "Show this install card again", Style.ACTION))
                 .append(Component.text(" "))
-                .append(button("[off]", "/vibe disable " + modName, "Disable this mod", NamedTextColor.RED));
-    }
-
-    private static Component button(String label, String command, String hover, NamedTextColor color) {
-        return Component.text(label, color)
-                .decoration(TextDecoration.ITALIC, false)
-                .hoverEvent(HoverEvent.showText(Component.text(hover, NamedTextColor.GRAY)))
-                .clickEvent(ClickEvent.runCommand(command));
+                .append(Style.button("off", "/vibe disable " + modName, "Disable this mod", Style.ERROR));
+        if (degraded) {
+            out = out.append(Component.text(" "))
+                    .append(Style.button("🔧 fix", "/vibe fix " + modName, "Send errors to the model", Style.WARN))
+                    .append(Component.text(" "))
+                    .append(Style.button("⚠ errors", "/vibe errors " + modName, "View the error log", Style.WARN));
+        }
+        return out;
     }
 }

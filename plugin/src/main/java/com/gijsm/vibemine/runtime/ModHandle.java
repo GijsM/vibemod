@@ -23,6 +23,8 @@ public final class ModHandle {
     private final int version;
     private final String description;
     volatile boolean enabled;
+    volatile boolean degraded;
+    volatile int errorCount;
 
     final Set<Listener> listeners = new LinkedHashSet<>();
     final List<BukkitTask> tasks = new ArrayList<>();
@@ -49,6 +51,16 @@ public final class ModHandle {
 
     public boolean enabled() {
         return enabled;
+    }
+
+    /** Whether this mod has an uncleared caught error (degrade episode still open). */
+    public boolean degraded() {
+        return degraded;
+    }
+
+    /** Total caught errors since load/enable, across all degrade episodes. */
+    public int errorCount() {
+        return errorCount;
     }
 
     public int listenerCount() {

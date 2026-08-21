@@ -1,9 +1,7 @@
 package com.gijsm.vibemine.ui;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -14,10 +12,10 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 
 import org.bukkit.Material;
+import org.bukkit.Sound;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -26,42 +24,49 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
-import com.gijsm.vibemine.gen.GeneratedProject;
+import com.gijsm.vibemine.runtime.DebugEcho;
+import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
 import com.gijsm.vibemine.runtime.ModRegistry;
 import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
 
 /**
- * The chest-inventory GUI for browsing and managing mods. The main list shows
- * one item per mod; left-clicking one opens a detail panel with per-knob
- * controls (booleans toggle, choices cycle, numerics step, text hands out a
- * config book) and lifecycle buttons. A settings page (visible only to
- * {@code vibe.admin}) exposes the LLM model picker and a config.yml reload.
+ * The playful, colorful chest-inventory GUI for browsing and managing mods.
+ * The main list shows one glinting item per mod, colored and dotted by live
+ * state; left-clicking one opens a detail panel whose buttons are expressive
+ * items (anvil reload, blaze powder fix, lever debug toggle, comparator
+ * configure, etc.) rather than per-knob steppers - all knob editing now goes
+ * through {@link Dialogs} via {@link GuiCallbacks#configure}. Borders and
+ * filler panes are tinted by aggregate/mod state (orange-ish when anything is
+ * degraded) so no screen ever shows a bare slot.
  */
 public final class ModBrowserGui implements Listener {
 
     private enum Screen { LIST, DETAIL, SETTINGS }
 
     private static final long DELETE_CONFIRM_MS = 5000L;
-    private static final Component LIST_TITLE = Component.text("VibeMine Mods");
-    private static final Component SETTINGS_TITLE = Component.text("VibeMine Settings");
+    private static final Component LIST_TITLE = Component.text("⬡ VibeMod");
+    private static final Component SETTINGS_TITLE = Component.text("⬡ VibeMod Settings");
 
     private static final List<String> KNOWN_MODELS = List.of(
             "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic/claude-haiku-5",
             "openai/gpt-5", "google/gemini-3-pro");
 
     private static final int DETAIL_SIZE = 54;
-    private static final int DETAIL_HEADER_SLOT = 4;
-    private static final int DETAIL_KNOB_START = 9;
-    private static final int DETAIL_KNOB_END = 44; // inclusive
-    private static final int SLOT_MANUAL = 45;
-    private static final int SLOT_SOURCE = 46;
-    private static final int SLOT_CONFIG_BOOK = 47;
-    private static final int SLOT_TOGGLE = 48;
-    private static final int SLOT_ROLLBACK = 49;
-    private static final int SLOT_EXPORT = 50;
-    private static final int SLOT_DELETE = 51;
+    private static final int SLOT_RELOAD = 10;
+    private static final int SLOT_FIX = 11;
+    private static final int SLOT_DEBUG = 12;
+    private static final int SLOT_HEADER = 13;
+    private static final int SLOT_CONFIGURE = 14;
+    private static final int SLOT_EDIT = 15;
+    private static final int SLOT_TOGGLE = 16;
+    private static final int SLOT_MANUAL = 19;
+    private static final int SLOT_SOURCE = 20;
+    private static final int SLOT_ERRORS = 21;
+    private static final int SLOT_ROLLBACK = 22;
+    private static final int SLOT_EXPORT = 23;
+    private static final int SLOT_DELETE = 24;
     private static final int SLOT_BACK = 53;
 
     private static final int SETTINGS_SIZE = 27;
@@ -75,14 +80,19 @@ public final class ModBrowserGui implements Listener {
     private final ModRegistry registry;
     private final ModStore store;
     private final ModConfigs configs;
+    private final ModErrors errors;
+    private final DebugEcho debug;
     private final GuiCallbacks cb;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
 
-    public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs, GuiCallbacks cb) {
+    public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs,
+                          ModErrors errors, DebugEcho debug, GuiCallbacks cb) {
         this.plugin = plugin;
         this.registry = registry;
         this.store = store;
         this.configs = configs;
+        this.errors = errors;
+        this.debug = debug;
         this.cb = cb;
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
     }
@@ -94,18 +104,30 @@ public final class ModBrowserGui implements Listener {
         List<ModStore.StoredMod> mods = store.all();
         boolean admin = p.hasPermission("vibe.admin");
         int size = idealListSize(mods.size(), admin);
+        boolean anyDegraded = anyDegradedLive();
+
         Inventory inv = plugin.getServer().createInventory(null, size, LIST_TITLE);
+        fillBorder(inv, size, anyDegraded);
+
         List<String> slotMods = new ArrayList<>(Collections.nCopies(size, null));
-        for (int i = 0; i < mods.size() && i < size; i++) {
-            ModStore.StoredMod mod = mods.get(i);
-            inv.setItem(i, buildListItem(mod));
-            slotMods.set(i, mod.name());
+        int slot = firstContentSlot(size);
+        for (ModStore.StoredMod mod : mods) {
+            slot = nextContentSlot(slot, size);
+            if (slot < 0) {
+                break;
+            }
+            inv.setItem(slot, buildListItem(mod));
+            slotMods.set(slot, mod.name());
+            slot++;
         }
+
         int settingsSlot = -1;
         if (admin) {
-            settingsSlot = size - 1;
+            settingsSlot = size - 5;
             inv.setItem(settingsSlot, buildSettingsEntryItem());
         }
+        fillerRow(inv, 9, size - 10); // no bare slots among the unused content rows
+
         Session session = new Session(Screen.LIST, inv);
         session.slotMods = slotMods;
         session.settingsSlot = settingsSlot;
@@ -125,7 +147,7 @@ public final class ModBrowserGui implements Listener {
         Session session = new Session(Screen.DETAIL, inv);
         session.modName = modName;
         sessions.put(p.getUniqueId(), session);
-        populateDetail(session, mod);
+        populateDetail(p, session, mod);
         p.openInventory(inv);
     }
 
@@ -160,8 +182,8 @@ public final class ModBrowserGui implements Listener {
 
         switch (session.screen) {
             case LIST -> onListClick(player, session, event.getSlot());
-            case DETAIL -> onDetailClick(player, session, event.getSlot(), event.getClick());
-            case SETTINGS -> onSettingsClick(player, session, event.getSlot(), event.getClick());
+            case DETAIL -> onDetailClick(player, session, event.getSlot());
+            case SETTINGS -> onSettingsClick(player, session, event.getSlot());
         }
     }
 
@@ -185,6 +207,7 @@ public final class ModBrowserGui implements Listener {
 
     private void onListClick(Player player, Session session, int slot) {
         if (slot == session.settingsSlot) {
+            click(player);
             openSettings(player);
             return;
         }
@@ -193,6 +216,7 @@ public final class ModBrowserGui implements Listener {
         }
         String modName = session.slotMods.get(slot);
         if (modName != null) {
+            click(player);
             openDetail(player, modName);
         }
     }
@@ -200,23 +224,35 @@ public final class ModBrowserGui implements Listener {
     private ItemStack buildListItem(ModStore.StoredMod mod) {
         ModHandle handle = registry.get(mod.name());
         boolean enabled = handle != null ? handle.enabled() : mod.enabled();
+        boolean degraded = handle != null && handle.degraded();
+        NamedTextColor nameColor = degraded ? NamedTextColor.GOLD : (enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY);
+
         ItemStack item = new ItemStack(resolveIcon(mod.icon()));
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(mod.name(), enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY));
+        meta.displayName(plain(mod.name(), nameColor));
         meta.setEnchantmentGlintOverride(enabled ? Boolean.TRUE : Boolean.FALSE);
 
         List<Component> lore = new ArrayList<>(Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
-        lore.add(plain(enabled ? "State: ON" : "State: OFF", enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
-        lore.add(plain("v" + mod.currentVersion() + " · click for details", NamedTextColor.DARK_GRAY));
+        lore.add(stateDotLine(enabled, degraded, handle));
+        lore.add(plain("v" + mod.currentVersion() + "  ▶ click to open", NamedTextColor.DARK_GRAY));
         meta.lore(lore);
         item.setItemMeta(meta);
         return item;
     }
 
+    /** {@code "● running" / "● degraded (n errors)" / "● off"}. */
+    private Component stateDotLine(boolean enabled, boolean degraded, ModHandle handle) {
+        Component dot = Style.dot(enabled, degraded);
+        if (degraded) {
+            int n = handle != null ? errors.distinctCount(handle.name()) : 0;
+            return dot.append(plain(" degraded (" + n + " errors)", NamedTextColor.GOLD));
+        }
+        return dot.append(plain(enabled ? " running" : " off", enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY));
+    }
+
     /**
      * Resolves a mod's icon Material from its stored {@code icon} name, falling back to
-     * {@link Material#PAPER} when the name is blank, unrecognized, or not a real item
-     * (e.g. a block-only or technical material the model should never emit but might).
+     * {@link Material#PAPER} when the name is blank, unrecognized, or not a real item.
      */
     private static Material resolveIcon(String icon) {
         if (icon != null && !icon.isBlank()) {
@@ -231,122 +267,106 @@ public final class ModBrowserGui implements Listener {
     private ItemStack buildSettingsEntryItem() {
         ItemStack item = new ItemStack(Material.COMMAND_BLOCK);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain("Settings", NamedTextColor.GOLD));
+        meta.displayName(plain("⚙ Settings", NamedTextColor.GOLD));
         meta.lore(List.of(plain("Model, watchdog, reload", NamedTextColor.GRAY)));
         item.setItemMeta(meta);
         return item;
     }
 
     private static int idealListSize(int modCount, boolean reserveSettings) {
-        int needed = modCount + (reserveSettings ? 1 : 0);
+        int needed = modCount + (reserveSettings ? 1 : 0) + 9; // reserve a border row
         int rows = Math.max(3, (needed + 8) / 9);
-        return rows * 9;
+        return Math.min(54, rows * 9);
+    }
+
+    private boolean anyDegradedLive() {
+        for (ModHandle h : registry.mods()) {
+            if (h.degraded()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- DETAIL screen ----
 
     private Component detailTitle(ModStore.StoredMod mod) {
-        return Component.text("Mod: " + mod.name());
+        return Component.text("⬡ " + mod.name());
     }
 
-    private void populateDetail(Session session, ModStore.StoredMod mod) {
+    private void populateDetail(Player player, Session session, ModStore.StoredMod mod) {
         Inventory inv = session.inventory;
         inv.clear();
-        session.knobSlots = new LinkedHashMap<>();
 
         ModHandle live = registry.get(mod.name());
         boolean enabled = live != null ? live.enabled() : mod.enabled();
+        boolean degraded = live != null && live.degraded();
 
-        inv.setItem(DETAIL_HEADER_SLOT, buildHeaderItem(mod, enabled));
-
-        List<GeneratedProject.ConfigKnob> schema = configs.schema(mod.name());
-        if (schema.isEmpty()) {
-            ItemStack none = new ItemStack(Material.BARRIER);
-            ItemMeta meta = none.getItemMeta();
-            meta.displayName(plain("No configurable settings", NamedTextColor.GRAY));
-            none.setItemMeta(meta);
-            inv.setItem(DETAIL_KNOB_START, none);
-        } else {
-            Map<String, String> values = configs.values(mod.name());
-            int slot = DETAIL_KNOB_START;
-            for (GeneratedProject.ConfigKnob knob : schema) {
-                if (slot > DETAIL_KNOB_END) {
-                    break;
-                }
-                inv.setItem(slot, buildKnobItem(knob, values.get(knob.key())));
-                session.knobSlots.put(slot, knob);
-                slot++;
-            }
+        // Fix-success jingle: this mod was degraded last time we drew this panel, and now isn't.
+        if (session.knownDegraded && !degraded && enabled) {
+            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1f, 1f);
         }
+        session.knownDegraded = degraded;
 
-        inv.setItem(SLOT_MANUAL, button(Material.WRITTEN_BOOK, "[manual]", NamedTextColor.AQUA,
-                "Give a manual book for this mod"));
-        inv.setItem(SLOT_SOURCE, button(Material.BOOK, "[source]", NamedTextColor.AQUA,
-                "Give the source book for this mod"));
-        inv.setItem(SLOT_CONFIG_BOOK, button(Material.WRITABLE_BOOK, "[config book]", NamedTextColor.AQUA,
-                "Give a writable config book"));
-        inv.setItem(SLOT_TOGGLE, button(enabled ? Material.REDSTONE : Material.LIME_DYE,
-                enabled ? "[disable]" : "[enable]", enabled ? NamedTextColor.RED : NamedTextColor.GREEN,
+        fillBorder(inv, DETAIL_SIZE, degraded);
+
+        inv.setItem(SLOT_HEADER, buildHeaderItem(mod, enabled, degraded, live));
+
+        inv.setItem(SLOT_RELOAD, button(Material.ANVIL, "[⟳ reload]", Style.ACTION,
+                "Recompile and apply the current stored version"));
+        if (degraded) {
+            inv.setItem(SLOT_FIX, button(Material.BLAZE_POWDER, "[🔧 fix]", Style.WARN,
+                    "Send recent errors to the model for a repair round"));
+        }
+        inv.setItem(SLOT_DEBUG, debugLeverItem(mod.name()));
+        inv.setItem(SLOT_CONFIGURE, button(Material.COMPARATOR, "[⚙ configure]", Style.ACTION,
+                "Open the config dialog"));
+        inv.setItem(SLOT_EDIT, button(Material.WRITABLE_BOOK, "[✎ edit]", Style.ACTION,
+                "Open the edit-request dialog"));
+        inv.setItem(SLOT_TOGGLE, button(enabled ? Material.SLIME_BALL : Material.GRAY_DYE,
+                enabled ? "[disable]" : "[enable]", enabled ? Style.ERROR : Style.OK,
                 enabled ? "Disable this mod" : "Enable this mod"));
+
+        inv.setItem(SLOT_MANUAL, button(Material.BOOK, "[📖 manual]", Style.ACTION, "Open the manual"));
+        inv.setItem(SLOT_SOURCE, button(Material.PAPER, "[<> source]", Style.ACTION, "Open the source"));
+        inv.setItem(SLOT_ERRORS, button(Material.OBSERVER, "[⚠ errors]", Style.WARN, "Open the error log"));
         inv.setItem(SLOT_ROLLBACK, button(Material.CLOCK, "[rollback]", NamedTextColor.YELLOW,
                 "Revert to the previous version"));
-        inv.setItem(SLOT_EXPORT, button(Material.CHEST, "[export]", NamedTextColor.AQUA,
-                "Export a standalone plugin jar"));
+        inv.setItem(SLOT_EXPORT, button(Material.CHEST, "[export]", Style.ACTION, "Export a standalone plugin jar"));
         inv.setItem(SLOT_DELETE, deleteButton(session));
-        inv.setItem(SLOT_BACK, button(Material.ARROW, "[back]", NamedTextColor.GRAY, "Back to the mod list"));
+        inv.setItem(SLOT_BACK, button(Material.ARROW, "[← back]", NamedTextColor.GRAY, "Back to the mod list"));
+
+        fillerRow(inv, 9, DETAIL_SIZE - 10); // no bare slots among the interior rows
     }
 
-    private ItemStack buildHeaderItem(ModStore.StoredMod mod, boolean enabled) {
+    private ItemStack buildHeaderItem(ModStore.StoredMod mod, boolean enabled, boolean degraded, ModHandle live) {
         ItemStack item = new ItemStack(resolveIcon(mod.icon()));
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(mod.name(), enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY));
+        NamedTextColor nameColor = degraded ? NamedTextColor.GOLD : (enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY);
+        meta.displayName(plain(mod.name(), nameColor));
         meta.setEnchantmentGlintOverride(enabled ? Boolean.TRUE : Boolean.FALSE);
 
         List<Component> lore = new ArrayList<>(Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
         if (mod.usage() != null && !mod.usage().isBlank()) {
             lore.addAll(Text.wrap("Try: " + mod.usage(), Text.DEFAULT_WIDTH, NamedTextColor.YELLOW));
         }
-        lore.add(plain(enabled ? "State: ON" : "State: OFF", enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
+        lore.add(stateDotLine(enabled, degraded, live));
         lore.add(plain("v" + mod.currentVersion(), NamedTextColor.DARK_GRAY));
         lore.add(plain("by " + mod.creator(), NamedTextColor.DARK_GRAY));
+        int knobs = configs.schema(mod.name()).size();
+        lore.add(plain(knobs == 0 ? "No configurable settings" : knobs + " config knob(s)", NamedTextColor.DARK_GRAY));
         meta.lore(lore);
         item.setItemMeta(meta);
         return item;
     }
 
-    private ItemStack buildKnobItem(GeneratedProject.ConfigKnob knob, String rawValue) {
-        String value = rawValue != null ? rawValue : knob.def();
-        Material icon = switch (knob.type()) {
-            case "boolean" -> "true".equalsIgnoreCase(value) ? Material.LIME_DYE : Material.GRAY_DYE;
-            case "choice" -> Material.COMPASS;
-            case "integer", "decimal" -> Material.COMPARATOR;
-            default -> Material.WRITABLE_BOOK;
-        };
-        ItemStack item = new ItemStack(icon);
+    private ItemStack debugLeverItem(String modName) {
+        boolean on = debug.enabled(modName);
+        ItemStack item = new ItemStack(Material.LEVER);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(knob.key() + " = " + value, NamedTextColor.WHITE));
-
-        List<Component> lore = new ArrayList<>();
-        if (knob.description() != null && !knob.description().isBlank()) {
-            lore.addAll(Text.wrap(knob.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
-        }
-        lore.add(plain("type: " + knob.type(), NamedTextColor.DARK_GRAY));
-        switch (knob.type()) {
-            case "boolean" -> lore.add(plain("Click to toggle", NamedTextColor.YELLOW));
-            case "choice" -> {
-                if (knob.choices() != null) {
-                    lore.add(plain("choices: " + String.join(", ", knob.choices()), NamedTextColor.DARK_GRAY));
-                }
-                lore.add(plain("Click to cycle", NamedTextColor.YELLOW));
-            }
-            case "integer", "decimal" -> {
-                double step = knob.step() != null ? knob.step() : 1.0;
-                lore.add(plain("Left: -" + trim(step) + "  Right: +" + trim(step), NamedTextColor.YELLOW));
-                lore.add(plain("Shift: x10", NamedTextColor.YELLOW));
-            }
-            default -> lore.add(plain("Click for a config book", NamedTextColor.YELLOW));
-        }
-        meta.lore(lore);
+        meta.displayName(plain("[debug: " + (on ? "ON" : "OFF") + "]", on ? Style.OK : NamedTextColor.GRAY));
+        meta.lore(List.of(plain("Echo ctx.log() + exceptions to ops chat", NamedTextColor.GRAY),
+                plain("Click to toggle", NamedTextColor.YELLOW)));
         item.setItemMeta(meta);
         return item;
     }
@@ -355,14 +375,14 @@ public final class ModBrowserGui implements Listener {
         boolean armed = session.pendingDelete && System.currentTimeMillis() < session.pendingDeleteExpiresAt;
         ItemStack item = new ItemStack(Material.TNT);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(armed ? "[delete] click again to confirm!" : "[delete]", NamedTextColor.RED));
-        meta.lore(List.of(plain(armed ? "Confirm within 5s" : "Shift-click twice within 5s to delete",
+        meta.displayName(plain(armed ? "[✖ delete] click again to confirm!" : "[✖ delete]", Style.ERROR));
+        meta.lore(List.of(plain(armed ? "Confirm within 5s" : "Click twice within 5s to delete",
                 NamedTextColor.GRAY)));
         item.setItemMeta(meta);
         return item;
     }
 
-    private void onDetailClick(Player player, Session session, int slot, ClickType click) {
+    private void onDetailClick(Player player, Session session, int slot) {
         String modName = session.modName;
         ModStore.StoredMod mod = store.get(modName);
         if (mod == null) {
@@ -371,30 +391,65 @@ public final class ModBrowserGui implements Listener {
             return;
         }
 
-        if (session.knobSlots.containsKey(slot)) {
-            handleKnobClick(player, session, mod, session.knobSlots.get(slot), click);
-            return;
-        }
-
         if (slot != SLOT_DELETE) {
             session.pendingDelete = false;
         }
 
         switch (slot) {
-            case SLOT_MANUAL -> cb.giveManualBook().accept(player, modName);
-            case SLOT_SOURCE -> cb.giveSourceBook().accept(player, modName);
-            case SLOT_CONFIG_BOOK -> cb.giveConfigBook().accept(player, modName);
+            case SLOT_RELOAD -> {
+                click(player);
+                cb.applyVersion().accept(player, modName);
+                refreshDetail(player);
+            }
+            case SLOT_FIX -> {
+                click(player);
+                cb.fix().accept(player, modName);
+            }
+            case SLOT_DEBUG -> {
+                click(player);
+                boolean now = debug.toggle(modName);
+                info(player, modName + " debug echo " + (now ? "ON" : "OFF") + ".");
+                refreshDetail(player);
+            }
+            case SLOT_CONFIGURE -> {
+                click(player);
+                cb.configure().accept(player, modName);
+            }
+            case SLOT_EDIT -> {
+                click(player);
+                cb.editMod().accept(player, modName);
+            }
             case SLOT_TOGGLE -> {
+                click(player);
                 toggleEnabled(player, modName);
                 refreshDetail(player);
             }
+            case SLOT_MANUAL -> {
+                click(player);
+                cb.openManual().accept(player, modName);
+            }
+            case SLOT_SOURCE -> {
+                click(player);
+                cb.openSource().accept(player, modName);
+            }
+            case SLOT_ERRORS -> {
+                click(player);
+                cb.openErrors().accept(player, modName);
+            }
             case SLOT_ROLLBACK -> {
+                click(player);
                 rollback(player, modName);
                 refreshDetail(player);
             }
-            case SLOT_EXPORT -> cb.export().accept(player, modName);
+            case SLOT_EXPORT -> {
+                click(player);
+                cb.export().accept(player, modName);
+            }
             case SLOT_DELETE -> handleDeleteClick(player, session, modName);
-            case SLOT_BACK -> open(player);
+            case SLOT_BACK -> {
+                click(player);
+                open(player);
+            }
             default -> {
             }
         }
@@ -402,6 +457,7 @@ public final class ModBrowserGui implements Listener {
 
     private void handleDeleteClick(Player player, Session session, String modName) {
         long now = System.currentTimeMillis();
+        click(player);
         if (session.pendingDelete && now < session.pendingDeleteExpiresAt) {
             registry.unload(modName);
             store.delete(modName);
@@ -411,66 +467,8 @@ public final class ModBrowserGui implements Listener {
         }
         session.pendingDelete = true;
         session.pendingDeleteExpiresAt = now + DELETE_CONFIRM_MS;
-        warn(player, "Click [delete] again within 5s to permanently delete " + modName + ".");
+        warn(player, "Click [✖ delete] again within 5s to permanently delete " + modName + ".");
         refreshDetail(player);
-    }
-
-    private void handleKnobClick(Player player, Session session, ModStore.StoredMod mod,
-                                 GeneratedProject.ConfigKnob knob, ClickType click) {
-        Map<String, String> values = configs.values(mod.name());
-        String current = values.getOrDefault(knob.key(), knob.def());
-        String newValue;
-        switch (knob.type()) {
-            case "boolean" -> newValue = Boolean.toString(!parseBool(current));
-            case "choice" -> newValue = nextChoice(knob, current);
-            case "integer", "decimal" -> newValue = steppedNumber(knob, current, click);
-            default -> {
-                cb.giveConfigBook().accept(player, mod.name());
-                return;
-            }
-        }
-        try {
-            configs.set(mod.name(), knob.key(), newValue);
-        } catch (IllegalArgumentException ex) {
-            error(player, ex.getMessage());
-        }
-        refreshDetail(player);
-    }
-
-    private static boolean parseBool(String s) {
-        return "true".equalsIgnoreCase(s);
-    }
-
-    private static String nextChoice(GeneratedProject.ConfigKnob knob, String current) {
-        List<String> choices = knob.choices();
-        if (choices == null || choices.isEmpty()) {
-            return current;
-        }
-        int idx = choices.indexOf(current);
-        int next = (idx + 1) % choices.size();
-        return choices.get(next);
-    }
-
-    private static String steppedNumber(GeneratedProject.ConfigKnob knob, String current, ClickType click) {
-        double step = knob.step() != null ? knob.step() : 1.0;
-        double min = knob.min() != null ? knob.min() : 0.0;
-        double max = knob.max() != null ? knob.max() : 1e9;
-        double multiplier = (click == ClickType.SHIFT_LEFT || click == ClickType.SHIFT_RIGHT) ? 10.0 : 1.0;
-        double sign = (click == ClickType.RIGHT || click == ClickType.SHIFT_RIGHT) ? 1.0 : -1.0;
-
-        double value;
-        try {
-            value = Double.parseDouble(current);
-        } catch (NumberFormatException e) {
-            value = 0.0;
-        }
-        value += sign * step * multiplier;
-        value = Math.max(min, Math.min(max, value));
-        return "integer".equals(knob.type()) ? Long.toString(Math.round(value)) : trim(value);
-    }
-
-    private static String trim(double v) {
-        return BigDecimal.valueOf(v).stripTrailingZeros().toPlainString();
     }
 
     private void refreshDetail(Player player) {
@@ -483,7 +481,7 @@ public final class ModBrowserGui implements Listener {
             open(player);
             return;
         }
-        populateDetail(session, mod);
+        populateDetail(player, session, mod);
     }
 
     private void toggleEnabled(Player player, String modName) {
@@ -528,6 +526,8 @@ public final class ModBrowserGui implements Listener {
     // ---- SETTINGS screen ----
 
     private void populateSettings(Inventory inv) {
+        fillBorder(inv, SETTINGS_SIZE, anyDegradedLive());
+
         ItemStack model = new ItemStack(Material.NETHER_STAR);
         ItemMeta modelMeta = model.getItemMeta();
         modelMeta.displayName(plain("Model: " + cb.getModel().get(), NamedTextColor.WHITE));
@@ -540,9 +540,9 @@ public final class ModBrowserGui implements Listener {
         inv.setItem(SETTINGS_RETRY_SLOT, displayOnly("Max retries",
                 "generation.max-retries"));
 
-        inv.setItem(SETTINGS_RELOAD_SLOT, button(Material.EMERALD, "[reload]", NamedTextColor.GREEN,
-                "Re-read config.yml"));
-        inv.setItem(SETTINGS_BACK_SLOT, button(Material.ARROW, "[back]", NamedTextColor.GRAY, "Back to the mod list"));
+        inv.setItem(SETTINGS_RELOAD_SLOT, button(Material.EMERALD, "[reload]", Style.OK, "Re-read config.yml"));
+        inv.setItem(SETTINGS_BACK_SLOT, button(Material.ARROW, "[← back]", NamedTextColor.GRAY, "Back to the mod list"));
+        fillerRow(inv, 9, SETTINGS_SIZE - 10);
     }
 
     private ItemStack displayOnly(String name, String key) {
@@ -558,12 +558,13 @@ public final class ModBrowserGui implements Listener {
         return item;
     }
 
-    private void onSettingsClick(Player player, Session session, int slot, ClickType click) {
+    private void onSettingsClick(Player player, Session session, int slot) {
         if (!player.hasPermission("vibe.admin")) {
             return;
         }
         switch (slot) {
             case SETTINGS_MODEL_SLOT -> {
+                click(player);
                 String current = cb.getModel().get();
                 int idx = KNOWN_MODELS.indexOf(current);
                 String next = KNOWN_MODELS.get((idx + 1) % KNOWN_MODELS.size());
@@ -571,11 +572,15 @@ public final class ModBrowserGui implements Listener {
                 populateSettings(session.inventory);
             }
             case SETTINGS_RELOAD_SLOT -> {
+                click(player);
                 cb.reloadConfig().run();
                 info(player, "Config reloaded.");
                 populateSettings(session.inventory);
             }
-            case SETTINGS_BACK_SLOT -> open(player);
+            case SETTINGS_BACK_SLOT -> {
+                click(player);
+                open(player);
+            }
             default -> {
             }
         }
@@ -592,20 +597,68 @@ public final class ModBrowserGui implements Listener {
         return item;
     }
 
+    /** Colors the top and bottom rows with a glass pane tinted by state; degraded skews orange. */
+    private static void fillBorder(Inventory inv, int size, boolean degraded) {
+        Material pane = degraded ? Material.ORANGE_STAINED_GLASS_PANE : Material.LIGHT_BLUE_STAINED_GLASS_PANE;
+        ItemStack filler = fillerPane(pane);
+        int rows = size / 9;
+        for (int col = 0; col < 9; col++) {
+            inv.setItem(col, filler);
+            if (rows > 1) {
+                inv.setItem(size - 9 + col, filler);
+            }
+        }
+    }
+
+    /** Fills every currently-empty slot in {@code [from, to]} (inclusive) with a plain decorative pane. */
+    private static void fillerRow(Inventory inv, int from, int to) {
+        ItemStack filler = fillerPane(Material.GRAY_STAINED_GLASS_PANE);
+        for (int i = from; i <= to && i < inv.getSize(); i++) {
+            if (inv.getItem(i) == null) {
+                inv.setItem(i, filler);
+            }
+        }
+    }
+
+    private static ItemStack fillerPane(Material paneMaterial) {
+        ItemStack item = new ItemStack(paneMaterial);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text(" ").decoration(TextDecoration.ITALIC, false));
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private static int firstContentSlot(int size) {
+        return 9; // skip the top border row
+    }
+
+    /** Next slot after {@code from} that isn't in the bottom border row, or -1 if the screen is full. */
+    private static int nextContentSlot(int from, int size) {
+        int bottomRowStart = size - 9;
+        if (from >= bottomRowStart) {
+            return -1;
+        }
+        return from;
+    }
+
     private static Component plain(String text, NamedTextColor color) {
         return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
     }
 
+    private static void click(Player player) {
+        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1f);
+    }
+
     private static void info(Player player, String msg) {
-        player.sendMessage(Component.text(msg, NamedTextColor.GREEN));
+        player.sendMessage(Style.ok(msg));
     }
 
     private static void warn(Player player, String msg) {
-        player.sendMessage(Component.text(msg, NamedTextColor.YELLOW));
+        player.sendMessage(Style.warn(msg));
     }
 
     private static void error(Player player, String msg) {
-        player.sendMessage(Component.text(msg, NamedTextColor.RED));
+        player.sendMessage(Style.err(msg));
     }
 
     /** Per-player GUI state: which screen is open, in what inventory, and any screen-specific bookkeeping. */
@@ -619,9 +672,9 @@ public final class ModBrowserGui implements Listener {
 
         // DETAIL
         String modName;
-        Map<Integer, GeneratedProject.ConfigKnob> knobSlots;
         boolean pendingDelete;
         long pendingDeleteExpiresAt;
+        boolean knownDegraded;
 
         Session(Screen screen, Inventory inventory) {
             this.screen = screen;

@@ -91,6 +91,35 @@ public final class ModGenerator {
         });
     }
 
+    /**
+     * Repair a degraded mod: the model sees the current sources, knobs and the
+     * recent runtime errors, and returns a new version fixing the root cause.
+     */
+    public CompletableFuture<Result> fix(String modName, String errorReport, String creator, ProgressListener l) {
+        return run(l, () -> {
+            ModStore.StoredMod existing = store.get(modName);
+            if (existing == null) {
+                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.");
+            }
+            Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
+            return pipeline("fix: " + errorHeadline(errorReport), creator, existing.name(),
+                    baseProject(existing, sources),
+                    PromptLibrary.fixPrompt(errorReport, sources, existing.config(),
+                            store.resolvedConfigValues(existing.name())), l);
+        });
+    }
+
+    /** First meaningful line of an error report (skipping the "== ... ==" header). */
+    private static String errorHeadline(String report) {
+        for (String line : report.split("\n")) {
+            String t = line.trim();
+            if (!t.isEmpty() && !t.startsWith("==")) {
+                return t.length() > 80 ? t.substring(0, 77) + "…" : t;
+            }
+        }
+        return "runtime errors";
+    }
+
     /** "Again": regenerate a fresh take on the mod's most recent prompt. */
     public CompletableFuture<Result> remake(String modName, String creator, ProgressListener l) {
         return run(l, () -> {

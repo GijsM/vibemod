@@ -7,8 +7,8 @@ server/world*/
 server/logs/
 server/crash-reports/
 
-# Holds the OpenRouter API key once VibeCore writes it back — never commit.
-server/plugins/VibeCore/config.yml
+# Holds the OpenRouter API key once VibeMod writes it back — never commit.
+server/plugins/VibeMod/config.yml
 
 server/plugins/.paper-remapped/
 
@@ -42,5 +42,5 @@ server/permissions.yml
 server/config/
 server/plugins/bStats/
 server/plugins/*.jar
-server/plugins/VibeCore/exports/*.jar
+server/plugins/VibeMod/exports/*.jar
 server/plugins/spark/

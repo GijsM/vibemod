@@ -1,6 +1,6 @@
-name: VibeCore
+name: VibeMod
 version: 0.1.0
-main: com.gijsm.vibemine.VibeCore
+main: com.gijsm.vibemine.VibeMod
 api-version: '1.21'
 author: gijsm
 description: "Vibe-code gameplay mods from in-game prompts"

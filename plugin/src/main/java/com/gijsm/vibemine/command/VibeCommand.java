@@ -25,65 +25,80 @@ import org.bukkit.plugin.Plugin;
 
 import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.gen.ModGenerator;
+import com.gijsm.vibemine.runtime.DebugEcho;
+import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
 import com.gijsm.vibemine.runtime.ModRegistry;
 import com.gijsm.vibemine.store.JarExporter;
 import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
-import com.gijsm.vibemine.ui.BookFlows;
 import com.gijsm.vibemine.ui.ChatMode;
+import com.gijsm.vibemine.ui.Dialogs;
 import com.gijsm.vibemine.ui.InstallCard;
-import com.gijsm.vibemine.ui.ManualBook;
 import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.Progress;
-import com.gijsm.vibemine.ui.SourceBook;
+import com.gijsm.vibemine.ui.Style;
+import com.gijsm.vibemine.ui.VirtualBooks;
 
 /**
  * The {@code /vibe} command: generate, edit, tune, and manage in-game mods.
- * Read-only subcommands (list/source/info/manual/help) require
+ * Read-only subcommands (list/source/info/manual/errors/help) require
  * {@code vibe.use}; everything else requires {@code vibe.admin}.
+ *
+ * <p>Typing UX moved to native dialogs in v3: {@code make}/{@code edit} with
+ * no free-text description, {@code config}, and {@code book} all open a
+ * {@link Dialogs} popup for players (console/RCON keeps working exactly as
+ * before by supplying the text inline). Reading moved to virtual books via
+ * {@link VirtualBooks} - no more given items.
  */
 public final class VibeCommand implements TabExecutor {
 
     private static final List<String> SUBCOMMANDS = List.of(
             "make", "edit", "again", "list", "source", "info", "manual", "config", "set", "book",
             "rollback", "enable", "disable", "delete", "export", "do", "model", "chat", "gui",
-            "reload", "panic", "help");
-    private static final Set<String> READ_ONLY = Set.of("list", "source", "info", "manual", "help");
+            "reload", "panic", "errors", "fix", "debug", "help");
+    private static final Set<String> READ_ONLY = Set.of("list", "source", "info", "manual", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
             "edit", "again", "source", "info", "manual", "config", "set", "book",
-            "rollback", "enable", "disable", "delete", "export", "do");
+            "rollback", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug");
     private static final List<String> KNOWN_MODELS = List.of(
             "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic/claude-haiku-5",
             "openai/gpt-5", "google/gemini-3-pro");
+    private static final int FIX_ERROR_LINES = 8;
+    private static final int CONSOLE_ERROR_LINES = 25;
 
     private final Plugin plugin;
     private final ModGenerator generator;
     private final ModRegistry registry;
     private final ModStore store;
     private final ModConfigs configs;
+    private final ModErrors errors;
+    private final DebugEcho debug;
     private final JarExporter exporter;
     private final ModBrowserGui gui;
     private final ChatMode chatMode;
-    private final BookFlows books;
+    private final Dialogs dialogs;
     private final Supplier<String> getModel;
     private final Consumer<String> setModel;
     private final BiConsumer<CommandSender, String> applyVersion;
     private final Runnable reloadConfig;
 
     public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
-                        ModConfigs configs, JarExporter exporter, ModBrowserGui gui, ChatMode chatMode,
-                        BookFlows books, Supplier<String> getModel, Consumer<String> setModel,
-                        BiConsumer<CommandSender, String> applyVersion, Runnable reloadConfig) {
+                        ModConfigs configs, ModErrors errors, DebugEcho debug, JarExporter exporter,
+                        ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs, Supplier<String> getModel,
+                        Consumer<String> setModel, BiConsumer<CommandSender, String> applyVersion,
+                        Runnable reloadConfig) {
         this.plugin = plugin;
         this.generator = generator;
         this.registry = registry;
         this.store = store;
         this.configs = configs;
+        this.errors = errors;
+        this.debug = debug;
         this.exporter = exporter;
         this.gui = gui;
         this.chatMode = chatMode;
-        this.books = books;
+        this.dialogs = dialogs;
         this.getModel = getModel;
         this.setModel = setModel;
         this.applyVersion = applyVersion;
@@ -131,6 +146,9 @@ public final class VibeCommand implements TabExecutor {
             case "gui" -> cmdGui(sender);
             case "reload" -> cmdReload(sender);
             case "panic" -> cmdPanic(sender);
+            case "errors" -> cmdErrors(sender, rest);
+            case "fix" -> cmdFix(sender, rest);
+            case "debug" -> cmdDebug(sender, rest);
             case "help" -> sendHelp(sender);
             default -> error(sender, "Unknown subcommand '" + sub + "'. Try /vibe help.");
         }
@@ -141,6 +159,10 @@ public final class VibeCommand implements TabExecutor {
 
     private void cmdMake(CommandSender sender, String[] args) {
         if (args.length == 0) {
+            if (sender instanceof Player player) {
+                dialogs.openPrompt(player);
+                return;
+            }
             error(sender, "Usage: /vibe make <description>");
             return;
         }
@@ -151,7 +173,15 @@ public final class VibeCommand implements TabExecutor {
     }
 
     private void cmdEdit(CommandSender sender, String[] args) {
-        if (args.length < 2) {
+        if (args.length == 0) {
+            error(sender, "Usage: /vibe edit <mod> <description>");
+            return;
+        }
+        if (args.length == 1) {
+            if (sender instanceof Player player) {
+                openEditDialog(player, args[0]);
+                return;
+            }
             error(sender, "Usage: /vibe edit <mod> <description>");
             return;
         }
@@ -160,6 +190,16 @@ public final class VibeCommand implements TabExecutor {
         Progress progress = new Progress(plugin, sender, "vibe: " + truncate(prompt, 40));
         generator.edit(modName, prompt, sender.getName(), bridge(progress))
                 .whenComplete((result, ex) -> onGenerationDone(sender, progress, result, ex));
+    }
+
+    private void openEditDialog(Player player, String modName) {
+        ModStore.StoredMod mod = store.get(modName);
+        if (mod == null) {
+            error(player, "Unknown mod: " + modName);
+            return;
+        }
+        String manual = mod.manual() == null || mod.manual().isBlank() ? mod.description() : mod.manual();
+        dialogs.openEdit(player, mod.name(), manual);
     }
 
     private void cmdAgain(CommandSender sender, String[] args) {
@@ -212,25 +252,28 @@ public final class VibeCommand implements TabExecutor {
     private void cmdList(CommandSender sender) {
         List<ModStore.StoredMod> mods = store.all();
         if (mods.isEmpty()) {
-            sender.sendMessage(Component.text("No mods yet - try /vibe make <description>.", NamedTextColor.GRAY));
+            sender.sendMessage(Style.info("No mods yet - try /vibe make <description>."));
             return;
         }
-        sender.sendMessage(Component.text("VibeMine mods:", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("VibeMod mods:", NamedTextColor.GOLD));
         for (ModStore.StoredMod mod : mods) {
             // Live registry state wins over the stored flag (e.g. a watchdog trip).
             ModHandle live = registry.get(mod.name());
             boolean enabled = live != null ? live.enabled() : mod.enabled();
-            NamedTextColor color = enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY;
+            boolean degraded = live != null && live.degraded();
+            NamedTextColor color = degraded ? Style.WARN : (enabled ? Style.OK : NamedTextColor.GRAY);
             Component hover = Component.text(mod.description()).append(Component.newline())
                     .append(Component.text("v" + mod.currentVersion() + " by " + mod.creator(), NamedTextColor.GRAY));
             if (mod.usage() != null && !mod.usage().isBlank()) {
                 hover = hover.append(Component.newline())
                         .append(Component.text("Try: " + mod.usage(), NamedTextColor.YELLOW));
             }
-            Component line = Component.text(mod.name(), color)
-                    .hoverEvent(HoverEvent.showText(hover))
-                    .clickEvent(ClickEvent.runCommand("/vibe info " + mod.name()))
-                    .append(Component.text(enabled ? " [on]" : " [off]", NamedTextColor.DARK_GRAY));
+            String stateSuffix = degraded ? " [degraded]" : (enabled ? " [on]" : " [off]");
+            Component line = Style.dot(enabled, degraded).append(Component.text(" "))
+                    .append(Component.text(mod.name(), color)
+                            .hoverEvent(HoverEvent.showText(hover))
+                            .clickEvent(ClickEvent.runCommand("/vibe info " + mod.name())))
+                    .append(Component.text(stateSuffix, NamedTextColor.DARK_GRAY));
             sender.sendMessage(line);
         }
     }
@@ -248,14 +291,9 @@ public final class VibeCommand implements TabExecutor {
         }
         Map<String, String> sources = store.sources(modName, mod.currentVersion());
         if (sender instanceof Player player) {
-            SourceBook.give(player, modName, sources);
+            VirtualBooks.openSource(player, modName, sources);
         } else {
-            for (Map.Entry<String, String> entry : sources.entrySet()) {
-                sender.sendMessage(Component.text("== " + entry.getKey() + " ==", NamedTextColor.GOLD));
-                for (String line : entry.getValue().split("\n", -1)) {
-                    sender.sendMessage(Component.text(line, NamedTextColor.GRAY));
-                }
-            }
+            VirtualBooks.dumpSource(sender, modName, sources);
         }
     }
 
@@ -272,7 +310,7 @@ public final class VibeCommand implements TabExecutor {
         }
         ModHandle live = registry.get(modName);
         sender.sendMessage(InstallCard.build(mod, live));
-        sender.sendMessage(InstallCard.verifiedFooter(mod, live, configs.values(modName)));
+        sender.sendMessage(InstallCard.verifiedFooter(mod, live, configs.values(modName), errorsLineFor(modName)));
     }
 
     private void cmdManual(CommandSender sender, String[] args) {
@@ -289,24 +327,15 @@ public final class VibeCommand implements TabExecutor {
         ModHandle live = registry.get(modName);
         Map<String, String> values = configs.values(modName);
         if (sender instanceof Player player) {
-            ManualBook.give(player, mod, live, values);
+            VirtualBooks.openManual(player, mod, live, values);
             return;
         }
-        String manual = mod.manual() == null || mod.manual().isBlank() ? mod.description() : mod.manual();
-        sender.sendMessage(Component.text(modName + " - manual", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text(manual, NamedTextColor.GRAY));
-        sender.sendMessage(InstallCard.verifiedFooter(mod, live, values));
-        if (!values.isEmpty()) {
-            sender.sendMessage(Component.text("Config:", NamedTextColor.GOLD));
-            for (Map.Entry<String, String> e : values.entrySet()) {
-                sender.sendMessage(Component.text("  " + e.getKey() + " = " + e.getValue(), NamedTextColor.GRAY));
-            }
-        }
+        VirtualBooks.dumpManual(sender, mod, live, values);
     }
 
     private void cmdConfig(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) {
-            error(sender, "Only players can use config books.");
+            error(sender, "Only players can use the config dialog.");
             return;
         }
         if (args.length < 1) {
@@ -319,7 +348,18 @@ public final class VibeCommand implements TabExecutor {
             error(sender, "Unknown mod: " + modName);
             return;
         }
-        books.giveConfigBook(player, modName, mod.currentVersion(), configEntries(modName));
+        dialogs.openConfig(player, mod.name(), knobsFor(modName));
+    }
+
+    private List<Dialogs.Knob> knobsFor(String modName) {
+        List<Dialogs.Knob> knobs = new ArrayList<>();
+        Map<String, String> values = configs.values(modName);
+        for (GeneratedProject.ConfigKnob knob : configs.schema(modName)) {
+            String current = values.getOrDefault(knob.key(), knob.def());
+            knobs.add(new Dialogs.Knob(knob.key(), knob.type(), knob.description(), current,
+                    knob.min(), knob.max(), knob.step(), knob.choices()));
+        }
+        return knobs;
     }
 
     private void cmdSet(CommandSender sender, String[] args) {
@@ -341,36 +381,19 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(Component.text(modName + "." + key + ": ", NamedTextColor.GRAY)
                 .append(Component.text(oldValue != null ? oldValue : "(default)", NamedTextColor.RED))
                 .append(Component.text(" -> ", NamedTextColor.GRAY))
-                .append(Component.text(newValue != null ? newValue : "", NamedTextColor.GREEN)));
+                .append(Component.text(newValue != null ? newValue : "", Style.OK)));
     }
 
     private void cmdBook(CommandSender sender, String[] args) {
         if (!(sender instanceof Player player)) {
-            error(sender, "Only players can use books.");
+            error(sender, "Only players can use the prompt/edit dialogs.");
             return;
         }
         if (args.length == 0) {
-            books.givePromptBook(player);
+            dialogs.openPrompt(player);
             return;
         }
-        String modName = args[0];
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            error(sender, "Unknown mod: " + modName);
-            return;
-        }
-        String manual = mod.manual() == null || mod.manual().isBlank() ? mod.description() : mod.manual();
-        books.giveEditBook(player, modName, mod.currentVersion(), manual, configEntries(modName));
-    }
-
-    private List<BookFlows.ConfigEntry> configEntries(String modName) {
-        List<BookFlows.ConfigEntry> entries = new ArrayList<>();
-        Map<String, String> values = configs.values(modName);
-        for (GeneratedProject.ConfigKnob knob : configs.schema(modName)) {
-            String current = values.getOrDefault(knob.key(), knob.def());
-            entries.add(new BookFlows.ConfigEntry(knob.key(), knob.description(), current));
-        }
-        return entries;
+        openEditDialog(player, args[0]);
     }
 
     // ---- lifecycle management ----
@@ -388,7 +411,7 @@ public final class VibeCommand implements TabExecutor {
         applyVersion.accept(sender, modName);
         ModStore.StoredMod mod = store.get(modName);
         int version = mod != null ? mod.currentVersion() : -1;
-        sender.sendMessage(Component.text("Rolled back " + modName + " to v" + version + ".", NamedTextColor.GREEN));
+        sender.sendMessage(Style.ok("Rolled back " + modName + " to v" + version + "."));
     }
 
     private void cmdEnable(CommandSender sender, String[] args) {
@@ -409,7 +432,7 @@ public final class VibeCommand implements TabExecutor {
                 return;
             }
             store.setEnabled(modName, true);
-            sender.sendMessage(Component.text(modName + " enabled.", NamedTextColor.GREEN));
+            sender.sendMessage(Style.ok(modName + " enabled."));
         } else {
             applyVersion.accept(sender, modName);
         }
@@ -424,9 +447,9 @@ public final class VibeCommand implements TabExecutor {
         boolean wasRunning = registry.disable(modName);
         store.setEnabled(modName, false);
         if (wasRunning) {
-            sender.sendMessage(Component.text(modName + " disabled.", NamedTextColor.YELLOW));
+            sender.sendMessage(Style.warn(modName + " disabled."));
         } else {
-            sender.sendMessage(Component.text(modName + " was already disabled or not loaded.", NamedTextColor.GRAY));
+            sender.sendMessage(Style.info(modName + " was already disabled or not loaded."));
         }
     }
 
@@ -442,7 +465,7 @@ public final class VibeCommand implements TabExecutor {
         }
         registry.unload(modName);
         store.delete(modName);
-        sender.sendMessage(Component.text("Deleted " + modName + ".", NamedTextColor.YELLOW));
+        sender.sendMessage(Style.warn("Deleted " + modName + "."));
     }
 
     private void cmdExport(CommandSender sender, String[] args) {
@@ -456,14 +479,13 @@ public final class VibeCommand implements TabExecutor {
             error(sender, "Unknown mod: " + modName);
             return;
         }
-        sender.sendMessage(Component.text("Exporting " + modName + "...", NamedTextColor.GRAY));
+        sender.sendMessage(Style.info("Exporting " + modName + "..."));
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 Map<String, String> sources = store.sources(modName, mod.currentVersion());
                 Path outDir = plugin.getDataFolder().toPath().resolve("exports");
                 Path jar = exporter.export(mod, sources, outDir);
-                Bukkit.getScheduler().runTask(plugin, () ->
-                        sender.sendMessage(Component.text("Exported to " + jar, NamedTextColor.GREEN)));
+                Bukkit.getScheduler().runTask(plugin, () -> sender.sendMessage(Style.ok("Exported to " + jar)));
             } catch (Exception e) {
                 Bukkit.getScheduler().runTask(plugin, () -> error(sender, "Export failed: " + rootMessage(e)));
             }
@@ -484,15 +506,87 @@ public final class VibeCommand implements TabExecutor {
         }
     }
 
+    // ---- debuggability: errors / fix / debug ----
+
+    private void cmdErrors(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            error(sender, "Usage: /vibe errors <mod>");
+            return;
+        }
+        String modName = args[0];
+        int distinct = errors.distinctCount(modName);
+        if (sender instanceof Player player) {
+            VirtualBooks.openErrors(player, modName, errors.recent(modName));
+            player.sendMessage(Style.warn(modName + ": " + distinct + " distinct error(s) - see the book."));
+            return;
+        }
+        VirtualBooks.dumpErrors(sender, errors.report(modName, CONSOLE_ERROR_LINES));
+    }
+
+    private void cmdFix(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            error(sender, "Usage: /vibe fix <mod>");
+            return;
+        }
+        String modName = args[0];
+        boolean confirmed = args.length >= 2 && args[1].equalsIgnoreCase("confirm");
+        if (sender instanceof Player player && !confirmed) {
+            dialogs.openFixConfirm(player, modName, lastErrorSummary(modName));
+            return;
+        }
+        String report = errors.report(modName, FIX_ERROR_LINES);
+        Progress progress = new Progress(plugin, sender, "vibe: fix " + modName);
+        generator.fix(modName, report, sender.getName(), bridge(progress))
+                .whenComplete((result, ex) -> onGenerationDone(sender, progress, result, ex));
+    }
+
+    private String lastErrorSummary(String modName) {
+        List<ModErrors.ErrorRecord> recent = errors.recent(modName);
+        if (recent == null || recent.isEmpty()) {
+            return "";
+        }
+        ModErrors.ErrorRecord last = recent.get(recent.size() - 1);
+        return last.exceptionClass() + ": " + last.message();
+    }
+
+    private String errorsLineFor(String modName) {
+        int distinct = errors.distinctCount(modName);
+        if (distinct <= 0) {
+            return null;
+        }
+        return "errors: " + distinct + " distinct - /vibe errors " + modName;
+    }
+
+    private void cmdDebug(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            error(sender, "Usage: /vibe debug <mod> [on|off]");
+            return;
+        }
+        String modName = args[0];
+        boolean now;
+        if (args.length >= 2) {
+            String want = args[1].toLowerCase(Locale.ROOT);
+            if (!want.equals("on") && !want.equals("off")) {
+                error(sender, "Usage: /vibe debug <mod> [on|off]");
+                return;
+            }
+            now = want.equals("on");
+            debug.set(modName, now);
+        } else {
+            now = debug.toggle(modName);
+        }
+        sender.sendMessage(Style.ok(modName + " debug echo " + (now ? "ON" : "OFF") + "."));
+    }
+
     // ---- misc ----
 
     private void cmdModel(CommandSender sender, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(Component.text("Current model: " + getModel.get(), NamedTextColor.GRAY));
+            sender.sendMessage(Style.info("Current model: " + getModel.get()));
             return;
         }
         setModel.accept(args[0]);
-        sender.sendMessage(Component.text("Model set to " + args[0], NamedTextColor.GREEN));
+        sender.sendMessage(Style.ok("Model set to " + args[0]));
     }
 
     private void cmdChat(CommandSender sender) {
@@ -502,10 +596,9 @@ public final class VibeCommand implements TabExecutor {
         }
         boolean on = chatMode.toggle(player);
         if (on) {
-            player.sendMessage(Component.text(
-                    "Chat mode ON - just type to generate/edit mods. Type 'off' to stop.", NamedTextColor.GREEN));
+            player.sendMessage(Style.ok("Chat mode ON - just type to generate/edit mods. Type 'off' to stop."));
         } else {
-            player.sendMessage(Component.text("Chat mode off.", NamedTextColor.GRAY));
+            player.sendMessage(Style.info("Chat mode off."));
         }
     }
 
@@ -519,15 +612,13 @@ public final class VibeCommand implements TabExecutor {
 
     private void cmdReload(CommandSender sender) {
         reloadConfig.run();
-        sender.sendMessage(Component.text(
-                "Config reloaded (model/timeout, watchdog budgets, top-level commands, retry count re-read).",
-                NamedTextColor.GREEN));
+        sender.sendMessage(Style.ok(
+                "Config reloaded (model/timeout, watchdog budgets, top-level commands, error/debug limits re-read)."));
     }
 
     private void cmdPanic(CommandSender sender) {
         registry.panic();
-        Component msg = Component.text("[VibeMine] PANIC triggered by " + sender.getName()
-                + " - all mods disabled.", NamedTextColor.RED);
+        Component msg = Style.err("PANIC triggered by " + sender.getName() + " - all mods disabled.");
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.sendMessage(msg);
         }
@@ -535,17 +626,20 @@ public final class VibeCommand implements TabExecutor {
     }
 
     private void sendHelp(CommandSender sender) {
-        sender.sendMessage(Component.text("VibeMine - " + "turn prompts into mods:", NamedTextColor.GOLD));
-        sender.sendMessage(helpLine("/vibe make <description>", "generate a new mod"));
-        sender.sendMessage(helpLine("/vibe edit <mod> <description>", "revise a mod"));
+        sender.sendMessage(Component.text("VibeMod - turn prompts into mods:", NamedTextColor.GOLD));
+        sender.sendMessage(helpLine("/vibe make [description]", "generate a new mod (no text: opens a dialog)"));
+        sender.sendMessage(helpLine("/vibe edit <mod> [description]", "revise a mod (no text: opens a dialog)"));
         sender.sendMessage(helpLine("/vibe again <mod>", "rerun a mod's last prompt"));
         sender.sendMessage(helpLine("/vibe list", "list stored mods"));
         sender.sendMessage(helpLine("/vibe source <mod>", "view a mod's source"));
         sender.sendMessage(helpLine("/vibe info <mod>", "show the install card + verified facts"));
-        sender.sendMessage(helpLine("/vibe manual <mod>", "get the player manual"));
-        sender.sendMessage(helpLine("/vibe config <mod>", "get a writable config book"));
-        sender.sendMessage(helpLine("/vibe set <mod> <key> <value>", "set one config knob"));
-        sender.sendMessage(helpLine("/vibe book [mod]", "get a prompt book, or an edit book for a mod"));
+        sender.sendMessage(helpLine("/vibe manual <mod>", "open the player manual"));
+        sender.sendMessage(helpLine("/vibe config <mod>", "open the config dialog"));
+        sender.sendMessage(helpLine("/vibe set <mod> <key> <value>", "set one config knob (console/RCON)"));
+        sender.sendMessage(helpLine("/vibe book [mod]", "open the prompt dialog, or an edit dialog for a mod"));
+        sender.sendMessage(helpLine("/vibe errors <mod>", "view a mod's deduped error log"));
+        sender.sendMessage(helpLine("/vibe fix <mod>", "send recent errors to the model for a repair round"));
+        sender.sendMessage(helpLine("/vibe debug <mod> [on|off]", "toggle live ctx.log()/exception echo to ops"));
         sender.sendMessage(helpLine("/vibe rollback <mod>", "revert to the previous version"));
         sender.sendMessage(helpLine("/vibe enable|disable <mod>", "toggle a mod"));
         sender.sendMessage(helpLine("/vibe delete <mod>", "permanently remove a mod"));
@@ -559,11 +653,11 @@ public final class VibeCommand implements TabExecutor {
     }
 
     private static Component helpLine(String cmd, String desc) {
-        return Component.text(cmd, NamedTextColor.AQUA).append(Component.text(" - " + desc, NamedTextColor.GRAY));
+        return Component.text(cmd, Style.ACTION).append(Component.text(" - " + desc, NamedTextColor.GRAY));
     }
 
     private static void error(CommandSender sender, String msg) {
-        sender.sendMessage(Component.text(msg, NamedTextColor.RED));
+        sender.sendMessage(Style.err(msg));
     }
 
     private static String truncate(String s, int max) {
@@ -600,6 +694,9 @@ public final class VibeCommand implements TabExecutor {
             if (handle != null) {
                 return startsWithFilter(handle.actionNames(), args[2]);
             }
+        }
+        if (args.length == 3 && sub.equals("debug")) {
+            return startsWithFilter(List.of("on", "off"), args[2]);
         }
         if (args.length == 3 && sub.equals("set")) {
             List<String> keys = new ArrayList<>();

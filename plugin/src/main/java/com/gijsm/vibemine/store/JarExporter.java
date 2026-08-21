@@ -24,10 +24,10 @@ import com.gijsm.vibemine.gen.GeneratedProject.ConfigKnob;
 
 /**
  * Exports a stored mod as a standalone Paper plugin jar that can run on any
- * Paper server without VibeCore installed.
+ * Paper server without VibeMod installed.
  *
  * The export compiles a small generated {@code JavaPlugin} wrapper alongside
- * the mod's own sources, embeds copies of the three {@code com.gijsm.vibemine.api}
+ * the mod's own sources, embeds copies of the four {@code com.gijsm.vibemine.api}
  * classes so the jar is self-contained, and writes a {@code plugin.yml} plus the
  * full source tree next to the jar.
  *
@@ -41,7 +41,10 @@ import com.gijsm.vibemine.gen.GeneratedProject.ConfigKnob;
  */
 public final class JarExporter {
 
-    private static final String[] API_CLASSES = {"VibeMod", "VibeContext", "ModCommandHandler"};
+    // Mod (the current interface) plus the deprecated VibeMod bridge are both
+    // embedded so mod sources stored before the v3 rename (which still declare
+    // `implements VibeMod`) keep linking in an exported jar.
+    private static final String[] API_CLASSES = {"Mod", "VibeMod", "VibeContext", "ModCommandHandler"};
 
     private final InMemoryCompiler compiler;
 
@@ -181,10 +184,10 @@ public final class JarExporter {
     // -- api class byte loading --
 
     /**
-     * Loads the three api interface classes as bytecode so they can be embedded in
+     * Loads the four api interface classes as bytecode so they can be embedded in
      * the export jar. Prefers reading them as classloader resources (works whether
-     * VibeCore itself is running from a jar or, as in tests, from a directory of
-     * .class files); falls back to reading them directly out of VibeCore's own code
+     * VibeMod itself is running from a jar or, as in tests, from a directory of
+     * .class files); falls back to reading them directly out of VibeMod's own code
      * source (jar file or classes directory) if the resource lookup fails.
      */
     private Map<String, byte[]> loadApiClasses() throws IOException {
@@ -268,8 +271,8 @@ public final class JarExporter {
                 + "Generated " + Instant.now() + " by com.gijsm.vibemine.store.JarExporter.\n\n"
                 + "This directory holds the full Java source for the exported mod, including the\n"
                 + "generated standalone plugin wrapper (" + wrapperFqcn + ") that hosts it outside\n"
-                + "VibeCore. It is a plain source tree rooted at the package directory, e.g.\n"
-                + "javac-compilable against paper-api plus the three com.gijsm.vibemine.api classes\n"
+                + "VibeMod. It is a plain source tree rooted at the package directory, e.g.\n"
+                + "javac-compilable against paper-api plus the four com.gijsm.vibemine.api classes\n"
                 + "that are embedded in the sibling jar.\n";
         Files.writeString(srcDir.resolve("README.txt"), readme, StandardCharsets.UTF_8);
     }
@@ -280,9 +283,9 @@ public final class JarExporter {
                                               String mainClassSimpleName, List<ConfigKnob> knobs) {
         String prefix = modName.toLowerCase(java.util.Locale.ROOT);
         return "package " + packageName + ";\n\n"
+                + "import com.gijsm.vibemine.api.Mod;\n"
                 + "import com.gijsm.vibemine.api.ModCommandHandler;\n"
                 + "import com.gijsm.vibemine.api.VibeContext;\n"
-                + "import com.gijsm.vibemine.api.VibeMod;\n"
                 + "import org.bukkit.Bukkit;\n"
                 + "import org.bukkit.Server;\n"
                 + "import org.bukkit.command.Command;\n"
@@ -298,14 +301,14 @@ public final class JarExporter {
                 + "import java.util.logging.Logger;\n\n"
                 + "/**\n"
                 + " * Standalone export wrapper for VibeMine mod \"" + modName + "\": a real Paper plugin\n"
-                + " * hosting a single mod outside VibeCore, with a minimal VibeContext implementation\n"
+                + " * hosting a single mod outside VibeMod, with a minimal VibeContext implementation\n"
                 + " * (no watchdog, plain Bukkit registration calls).\n"
                 + " */\n"
                 + "public final class " + wrapperSimpleName + " extends JavaPlugin {\n\n"
                 + "    private final List<Listener> listeners = new ArrayList<>();\n"
                 + "    private final List<BukkitTask> tasks = new ArrayList<>();\n"
                 + "    private final List<Command> commands = new ArrayList<>();\n"
-                + "    private VibeMod mod;\n"
+                + "    private Mod mod;\n"
                 + "    private StandaloneContext ctx;\n\n"
                 + "    @Override\n"
                 + "    public void onEnable() {\n"
@@ -415,7 +418,7 @@ public final class JarExporter {
                 + "        @Override\n"
                 + "        public void action(String name, ModCommandHandler handler) {\n"
                 + "            plugin.getLogger().warning(\"Action '\" + name\n"
-                + "                    + \"' requires VibeCore and is not available in a standalone export.\");\n"
+                + "                    + \"' requires VibeMod and is not available in a standalone export.\");\n"
                 + "        }\n\n"
                 + buildConfigAccessorMethod("boolean", "configBool", "getBoolean", knobs, "boolean", null, "false")
                 + buildConfigAccessorMethod("long", "configInt", "getLong", knobs, "integer", null, "0L")

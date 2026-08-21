@@ -36,7 +36,7 @@ public final class PromptLibrary {
     // exact contract it must code against, regardless of plugin jar layout.
     // ------------------------------------------------------------------
 
-    private static final String VIBE_MOD_SOURCE = """
+    private static final String MOD_SOURCE = """
             package com.gijsm.vibemine.api;
 
             /**
@@ -47,7 +47,7 @@ public final class PromptLibrary {
              * supplied {@link VibeContext} so the mod can be torn down exactly on
              * disable/unload. A mod must never call Bukkit registration APIs directly.
              */
-            public interface VibeMod {
+            public interface Mod {
 
                 /**
                  * Called on the main server thread when the mod is enabled.
@@ -84,7 +84,7 @@ public final class PromptLibrary {
              */
             public interface VibeContext {
 
-                /** The host plugin (VibeCore). For advanced use only. */
+                /** The host plugin (VibeMod). For advanced use only. */
                 Plugin plugin();
 
                 /** Convenience for {@code plugin().getServer()}. */
@@ -165,14 +165,14 @@ public final class PromptLibrary {
             "Create a mod: when a creeper dies, spawn a chicken at its location with a poof (requested by Steve)";
 
     private static final String EXAMPLE_1_ASSISTANT = """
-            {"name":"ChickenCreepers","description":"When a creeper dies it turns into one or more chickens with a puff of smoke.","usage":"Kill a creeper and watch","manual":"Every time a creeper dies anywhere on the server, it bursts into a cloud of smoke and leaves behind some chickens instead. By default only one chicken appears, but you can turn up the chaos with the chicken-count setting, which controls how many chickens spawn per creeper kill (from 1 up to 10). Change it any time from the mod's config book or the settings panel in /vibe gui - the very next creeper that dies will use the new count immediately, no reload needed. A short puff of particles and a chicken sound play at the creeper's location so the swap is obvious even in a crowd.","icon":"CHICKEN","mainClass":"ChickenCreepers","files":[{"path":"ChickenCreepers.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport com.gijsm.vibemine.api.VibeMod;\\n\\npublic final class ChickenCreepers implements VibeMod {\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        ctx.listen(new CreeperDeathListener(ctx));\\n        ctx.log().info(\\"ChickenCreepers enabled.\\");\\n    }\\n}\\n"},{"path":"CreeperDeathListener.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport org.bukkit.Location;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.World;\\nimport org.bukkit.entity.EntityType;\\nimport org.bukkit.entity.LivingEntity;\\nimport org.bukkit.event.EventHandler;\\nimport org.bukkit.event.Listener;\\nimport org.bukkit.event.entity.EntityDeathEvent;\\n\\npublic final class CreeperDeathListener implements Listener {\\n\\n    private final VibeContext ctx;\\n\\n    public CreeperDeathListener(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    @EventHandler\\n    public void onCreeperDeath(EntityDeathEvent event) {\\n        LivingEntity entity = event.getEntity();\\n        if (entity == null || entity.getType() != EntityType.CREEPER) {\\n            return;\\n        }\\n        World world = entity.getWorld();\\n        if (world == null) {\\n            return;\\n        }\\n        Location loc = entity.getLocation();\\n        long chickenCount = ctx.configInt(\\"chicken-count\\");\\n        if (chickenCount < 1) {\\n            chickenCount = 1;\\n        }\\n        for (long i = 0; i < chickenCount; i++) {\\n            world.spawnEntity(loc, EntityType.CHICKEN);\\n        }\\n        world.spawnParticle(Particle.POOF, loc, 12, 0.3, 0.3, 0.3, 0.01);\\n        world.playSound(loc, Sound.ENTITY_CHICKEN_AMBIENT, 1.0f, 1.2f);\\n    }\\n}\\n"}],"config":[{"key":"chicken-count","type":"integer","default":"1","description":"How many chickens spawn per creeper kill.","min":1,"max":10,"step":1}]}
+            {"name":"ChickenCreepers","description":"When a creeper dies it turns into one or more chickens with a puff of smoke.","usage":"Kill a creeper and watch","manual":"Every time a creeper dies anywhere on the server, it bursts into a cloud of smoke and leaves behind some chickens instead. By default only one chicken appears, but you can turn up the chaos with the chicken-count setting, which controls how many chickens spawn per creeper kill (from 1 up to 10). Change it any time from the mod's config book or the settings panel in /vibe gui - the very next creeper that dies will use the new count immediately, no reload needed. A short puff of particles and a chicken sound play at the creeper's location so the swap is obvious even in a crowd.","icon":"CHICKEN","mainClass":"ChickenCreepers","files":[{"path":"ChickenCreepers.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport com.gijsm.vibemine.api.Mod;\\n\\npublic final class ChickenCreepers implements Mod {\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        ctx.listen(new CreeperDeathListener(ctx));\\n        ctx.log().info(\\"ChickenCreepers enabled.\\");\\n    }\\n}\\n"},{"path":"CreeperDeathListener.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport org.bukkit.Location;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.World;\\nimport org.bukkit.entity.EntityType;\\nimport org.bukkit.entity.LivingEntity;\\nimport org.bukkit.event.EventHandler;\\nimport org.bukkit.event.Listener;\\nimport org.bukkit.event.entity.EntityDeathEvent;\\n\\npublic final class CreeperDeathListener implements Listener {\\n\\n    private final VibeContext ctx;\\n\\n    public CreeperDeathListener(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    @EventHandler\\n    public void onCreeperDeath(EntityDeathEvent event) {\\n        LivingEntity entity = event.getEntity();\\n        if (entity == null || entity.getType() != EntityType.CREEPER) {\\n            return;\\n        }\\n        World world = entity.getWorld();\\n        if (world == null) {\\n            return;\\n        }\\n        Location loc = entity.getLocation();\\n        long chickenCount = ctx.configInt(\\"chicken-count\\");\\n        if (chickenCount < 1) {\\n            chickenCount = 1;\\n        }\\n        for (long i = 0; i < chickenCount; i++) {\\n            world.spawnEntity(loc, EntityType.CHICKEN);\\n        }\\n        world.spawnParticle(Particle.POOF, loc, 12, 0.3, 0.3, 0.3, 0.01);\\n        world.playSound(loc, Sound.ENTITY_CHICKEN_AMBIENT, 1.0f, 1.2f);\\n    }\\n}\\n"}],"config":[{"key":"chicken-count","type":"integer","default":"1","description":"How many chickens spawn per creeper kill.","min":1,"max":10,"step":1}]}
             """;
 
     private static final String EXAMPLE_2_USER =
             "Create a mod: every 10 seconds all players get a brief speed boost (requested by Alex)";
 
     private static final String EXAMPLE_2_ASSISTANT = """
-            {"name":"SpeedPulse","description":"On a repeating timer, all online players get a short burst of Speed.","usage":"Stand around and feel the speed boost kick in","manual":"On a repeating timer, every player currently online gets a brief Speed effect together with a puff of cloud particles and a level-up sound. Two settings control the feel of it: period-seconds sets how many seconds pass between pulses (default 10, from 1 up to 120), and strength picks how strong the boost is - weak, normal, or strong. Both are read fresh every time the timer fires, so changing them from the config book or the settings panel in /vibe gui takes effect on the very next pulse without needing to reload or re-enable the mod.","icon":"SUGAR","mainClass":"SpeedPulse","files":[{"path":"SpeedPulse.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport com.gijsm.vibemine.api.VibeMod;\\n\\npublic final class SpeedPulse implements VibeMod {\\n\\n    private static final long TICK_PERIOD = 20L;\\n\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        SpeedPulseTask task = new SpeedPulseTask(ctx);\\n        ctx.repeat(TICK_PERIOD, TICK_PERIOD, task::tick);\\n        ctx.log().info(\\"SpeedPulse enabled.\\");\\n    }\\n}\\n"},{"path":"SpeedPulseTask.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.entity.Player;\\nimport org.bukkit.potion.PotionEffect;\\nimport org.bukkit.potion.PotionEffectType;\\n\\n/** Ticks once a second; fires the actual speed pulse once period-seconds have elapsed. */\\npublic final class SpeedPulseTask {\\n\\n    private final VibeContext ctx;\\n    private long secondsSinceLastPulse = 0L;\\n\\n    public SpeedPulseTask(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    public void tick() {\\n        secondsSinceLastPulse++;\\n        long periodSeconds = ctx.configInt(\\"period-seconds\\");\\n        if (periodSeconds < 1) {\\n            periodSeconds = 1;\\n        }\\n        if (secondsSinceLastPulse < periodSeconds) {\\n            return;\\n        }\\n        secondsSinceLastPulse = 0L;\\n        pulse();\\n    }\\n\\n    private void pulse() {\\n        int amplifier = amplifierFor(ctx.configString(\\"strength\\"));\\n        for (Player player : ctx.server().getOnlinePlayers()) {\\n            if (player == null || !player.isOnline()) {\\n                continue;\\n            }\\n            player.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 60, amplifier, false, true, true));\\n            player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation().add(0, 1, 0), 10, 0.3, 0.3, 0.3, 0.01);\\n            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.5f);\\n        }\\n    }\\n\\n    private int amplifierFor(String strength) {\\n        if (strength == null) {\\n            return 1;\\n        }\\n        return switch (strength) {\\n            case \\"weak\\" -> 0;\\n            case \\"strong\\" -> 2;\\n            default -> 1;\\n        };\\n    }\\n}\\n"}],"config":[{"key":"period-seconds","type":"integer","default":"10","description":"Seconds between speed pulses.","min":1,"max":120,"step":1},{"key":"strength","type":"choice","default":"normal","description":"How strong the speed boost is.","choices":["weak","normal","strong"]}]}
+            {"name":"SpeedPulse","description":"On a repeating timer, all online players get a short burst of Speed.","usage":"Stand around and feel the speed boost kick in","manual":"On a repeating timer, every player currently online gets a brief Speed effect together with a puff of cloud particles and a level-up sound. Two settings control the feel of it: period-seconds sets how many seconds pass between pulses (default 10, from 1 up to 120), and strength picks how strong the boost is - weak, normal, or strong. Both are read fresh every time the timer fires, so changing them from the config book or the settings panel in /vibe gui takes effect on the very next pulse without needing to reload or re-enable the mod.","icon":"SUGAR","mainClass":"SpeedPulse","files":[{"path":"SpeedPulse.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport com.gijsm.vibemine.api.Mod;\\n\\npublic final class SpeedPulse implements Mod {\\n\\n    private static final long TICK_PERIOD = 20L;\\n\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        SpeedPulseTask task = new SpeedPulseTask(ctx);\\n        ctx.repeat(TICK_PERIOD, TICK_PERIOD, task::tick);\\n        ctx.log().info(\\"SpeedPulse enabled.\\");\\n    }\\n}\\n"},{"path":"SpeedPulseTask.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemine.api.VibeContext;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.entity.Player;\\nimport org.bukkit.potion.PotionEffect;\\nimport org.bukkit.potion.PotionEffectType;\\n\\n/** Ticks once a second; fires the actual speed pulse once period-seconds have elapsed. */\\npublic final class SpeedPulseTask {\\n\\n    private final VibeContext ctx;\\n    private long secondsSinceLastPulse = 0L;\\n\\n    public SpeedPulseTask(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    public void tick() {\\n        secondsSinceLastPulse++;\\n        long periodSeconds = ctx.configInt(\\"period-seconds\\");\\n        if (periodSeconds < 1) {\\n            periodSeconds = 1;\\n        }\\n        if (secondsSinceLastPulse < periodSeconds) {\\n            return;\\n        }\\n        secondsSinceLastPulse = 0L;\\n        pulse();\\n    }\\n\\n    private void pulse() {\\n        int amplifier = amplifierFor(ctx.configString(\\"strength\\"));\\n        for (Player player : ctx.server().getOnlinePlayers()) {\\n            if (player == null || !player.isOnline()) {\\n                continue;\\n            }\\n            player.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 60, amplifier, false, true, true));\\n            player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation().add(0, 1, 0), 10, 0.3, 0.3, 0.3, 0.01);\\n            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.5f);\\n        }\\n    }\\n\\n    private int amplifierFor(String strength) {\\n        if (strength == null) {\\n            return 1;\\n        }\\n        return switch (strength) {\\n            case \\"weak\\" -> 0;\\n            case \\"strong\\" -> 2;\\n            default -> 1;\\n        };\\n    }\\n}\\n"}],"config":[{"key":"period-seconds","type":"integer","default":"10","description":"Seconds between speed pulses.","min":1,"max":120,"step":1},{"key":"strength","type":"choice","default":"normal","description":"How strong the speed boost is.","choices":["weak","normal","strong"]}]}
             """;
 
     /** The full system prompt sent with every generation/edit/repair call. */
@@ -182,11 +182,11 @@ public final class PromptLibrary {
         sb.append("""
                 You are an expert Paper 1.21.8 gameplay-mod author. You write small, delightful,
                 self-contained Minecraft server mods entirely in Java, targeting exactly one API:
-                the VibeMod/VibeContext contract shown below. You never touch anything else.
+                the Mod/VibeContext contract shown below. You never touch anything else.
 
-                Your mods run hot-loaded inside a host plugin called VibeCore. A mod is not a
+                Your mods run hot-loaded inside a host plugin called VibeMod. A mod is not a
                 Bukkit plugin: it is one or more plain Java classes, exactly one of which
-                implements VibeMod, compiled in-process and loaded into a child class loader.
+                implements Mod, compiled in-process and loaded into a child class loader.
                 Everything your mod does with the Bukkit API must be routed through the
                 VibeContext instance you are handed in onEnable, so the host can cleanly tear
                 your mod down later.
@@ -195,8 +195,8 @@ public final class PromptLibrary {
 
                 """);
 
-        sb.append("--- com/gijsm/vibemine/api/VibeMod.java ---\n");
-        sb.append(VIBE_MOD_SOURCE).append('\n');
+        sb.append("--- com/gijsm/vibemine/api/Mod.java ---\n");
+        sb.append(MOD_SOURCE).append('\n');
         sb.append("--- com/gijsm/vibemine/api/VibeContext.java ---\n");
         sb.append(VIBE_CONTEXT_SOURCE).append('\n');
         sb.append("--- com/gijsm/vibemine/api/ModCommandHandler.java ---\n");
@@ -238,13 +238,13 @@ public final class PromptLibrary {
                   item a player could hold, NEVER a block-only or technical/internal material (e.g.
                   never "BEDROCK", "COMMAND_BLOCK", "AIR", "STRUCTURE_VOID"), and NEVER "AIR" itself.
                 - "mainClass" is the simple (no package) name of the one public class that
-                  implements VibeMod, and must have a public no-arg constructor.
+                  implements Mod, and must have a public no-arg constructor.
                 - Every entry in "files" has a "path" ending in ".java" and "content" holding the
                   complete, compilable source of that file (proper escaping of quotes/newlines
                   since this is a JSON string).
                 - ALL files declare `package vibemod.<name lowercased>;` at the top (the mod name
                   from the JSON, lowercased, no dots, no dashes).
-                - Exactly one public class across all files implements VibeMod.
+                - Exactly one public class across all files implements Mod.
                 - "config" is an array of tunable knobs, one object per knob:
                   {"key", "type", "default", "description", "min"?, "max"?, "step"?, "choices"?}.
                   "type" is one of boolean | integer | decimal | text | choice. "default" is
@@ -282,7 +282,7 @@ public final class PromptLibrary {
                 - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
                   construct entity instances directly.
                 - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
-                  VibeMod class or listener, keyed by `player.getUniqueId()`. Do not use static
+                  Mod class or listener, keyed by `player.getUniqueId()`. Do not use static
                   mutable state shared across mod instances beyond that.
                 - Keep each file under roughly 150 lines. Split into a couple of small classes if a
                   single file would run long; every class still lives in the same
@@ -415,6 +415,71 @@ public final class PromptLibrary {
                 .append("change any config knob, include the full updated \"config\" array reflecting every ")
                 .append("knob the mod should have afterward; otherwise leave \"config\" out to keep the ")
                 .append("existing knobs unchanged.");
+        return sb.toString();
+    }
+
+    /**
+     * Prompt asking the model to fix a mod that is throwing at runtime (a "degraded"
+     * mod, as opposed to one that failed to compile — see {@link #repairPrompt}).
+     * Includes the current config schema and live values so a fix can preserve or
+     * extend the knob list, and reminds the model it may answer with either the full
+     * project shape or the edit shape.
+     */
+    public static String fixPrompt(String errorReport, Map<String, String> currentSources,
+                                    List<GeneratedProject.ConfigKnob> schema, Map<String, String> values) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("This mod throws at runtime. Most recent distinct errors with occurrence counts:\n");
+        sb.append(errorReport);
+        if (errorReport == null || !errorReport.endsWith("\n")) {
+            sb.append('\n');
+        }
+        sb.append("\nFix the ROOT CAUSE. Keep all other behavior identical. Keep the same mod name and ")
+                .append("knobs unless the fix requires changing them.\n\n");
+
+        sb.append("Here are the current project sources:\n\n");
+        for (Map.Entry<String, String> entry : currentSources.entrySet()) {
+            sb.append("--- ").append(entry.getKey()).append(" ---\n");
+            sb.append(entry.getValue());
+            if (!entry.getValue().endsWith("\n")) {
+                sb.append('\n');
+            }
+            sb.append('\n');
+        }
+
+        if (schema != null && !schema.isEmpty()) {
+            sb.append("Here are the mod's current config knobs and their live values:\n\n");
+            for (GeneratedProject.ConfigKnob knob : schema) {
+                String currentValue = values == null ? null : values.get(knob.key());
+                sb.append("- ").append(knob.key())
+                        .append(" (").append(knob.type()).append(", default=").append(knob.def()).append(")");
+                if (knob.min() != null) {
+                    sb.append(" min=").append(knob.min());
+                }
+                if (knob.max() != null) {
+                    sb.append(" max=").append(knob.max());
+                }
+                if (knob.step() != null) {
+                    sb.append(" step=").append(knob.step());
+                }
+                if (knob.choices() != null) {
+                    sb.append(" choices=").append(knob.choices());
+                }
+                sb.append(" - ").append(knob.description());
+                sb.append(" (current value: ")
+                        .append(currentValue != null ? currentValue : knob.def())
+                        .append(")\n");
+            }
+            sb.append('\n');
+        }
+
+        sb.append("You may respond with either shape described in the system prompt: the FULL ")
+                .append("project (every file, not just the ones that changed) if the fix is broad, ")
+                .append("or the EDIT shape ({\"edits\":[...]}) for small, surgical changes whose \"find\" ")
+                .append("matches the current source of that file exactly once. Keep the same \"name\" ")
+                .append("and config knobs unless the fix genuinely requires changing them. If you change ")
+                .append("any config knob, include the full updated \"config\" array reflecting every knob ")
+                .append("the mod should have afterward; otherwise leave \"config\" out to keep the existing ")
+                .append("knobs unchanged.");
         return sb.toString();
     }
 

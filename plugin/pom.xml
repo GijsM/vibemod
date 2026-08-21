@@ -5,11 +5,11 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.gijsm</groupId>
-    <artifactId>vibecore</artifactId>
+    <artifactId>vibemod</artifactId>
     <version>0.1.0</version>
     <packaging>jar</packaging>
 
-    <name>VibeCore</name>
+    <name>VibeMod</name>
     <description>VibeMine: turn player prompts into hot-loaded Paper mods.</description>
 
     <properties>
@@ -35,7 +35,7 @@
     </dependencies>
 
     <build>
-        <finalName>VibeCore</finalName>
+        <finalName>VibeMod</finalName>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

@@ -1,6 +1,10 @@
 # VibeMine
 
-Vibe-code Minecraft gameplay from inside the game. One Paper plugin — **VibeCore** — takes a prompt
+> **v3 note:** the plugin was renamed from VibeCore to **VibeMod** (the api contract mods
+> implement was renamed `VibeMod` → `Mod`, with a deprecated `VibeMod` bridge kept so old
+> generated sources keep compiling). See `ARCHITECTURE.md`'s V3 ADDENDUM for the full rename.
+
+Vibe-code Minecraft gameplay from inside the game. One Paper plugin — **VibeMod** — takes a prompt
 like `/vibe make "sheep can fly"`, asks an LLM for Java, **compiles it in-process** with the JDK's
 built-in compiler, and hot-loads the result into the running server. No restarts, no external
 services, prompt-to-gameplay in seconds.
@@ -17,7 +21,7 @@ Runtime *plugin* loading is unsupported on modern Paper — reloading a plugin i
 `Provider attempted to add duplicate plugin identifier`, and the Paper team has said unload/reload
 will not be supported ([discussion #10561](https://github.com/PaperMC/Paper/discussions/10561)).
 So generated mods are **not** plugins: each is compiled in memory (`javax.tools`) and loaded into
-its own child classloader under VibeCore's plugin identity, with every listener/task/command tracked
+its own child classloader under VibeMod's plugin identity, with every listener/task/command tracked
 per mod. That makes load/unload/reload genuinely instant and exact. Want a real plugin anyway?
 `/vibe export <mod>` emits a standalone drop-in jar (verified to boot on a plain Paper server).
 
@@ -28,13 +32,13 @@ Requirements: a full **JDK 21+** (the server needs `javac`; tested on Temurin 25
 
 ```bash
 ./scripts/setup.sh     # downloads Paper 1.21.8, writes eula/server.properties, installs rcon-client
-./scripts/build.sh     # mvn package → server/plugins/VibeCore.jar
+./scripts/build.sh     # mvn package → server/plugins/VibeMod.jar
 ./scripts/start.sh     # boots the server on localhost:25565 (offline mode)
 ./scripts/rcon.sh 'vibe make zombies explode into fireworks'   # console driving
 ./scripts/stop.sh
 ```
 
-API key resolution order: `plugins/VibeCore/config.yml` → `$OPENROUTER_API_KEY` →
+API key resolution order: `plugins/VibeMod/config.yml` → `$OPENROUTER_API_KEY` →
 `~/.config/vibemine/openrouter.key`. The server-side config.yml is gitignored — put your key there.
 
 Join at `localhost` with a 1.21.8 client (server runs offline mode for local testing). You need op:
@@ -49,7 +53,7 @@ Every generated mod now documents and exposes itself:
   `/vibe set <mod> <key> <value>`, the GUI's −/+ steppers, or a **config book**
   (`/vibe config <mod>`: edit the `key: value` lines, press *Done* to apply — the book stays in
   your hand as an editing loop; *Sign* to apply-and-finish).
-- **Manuals** — the model writes a player guide; VibeCore appends *verified facts* it introspects
+- **Manuals** — the model writes a player guide; VibeMod appends *verified facts* it introspects
   itself (real commands/actions/listeners + current knob values). `/vibe manual <mod>` = a written
   book, `/vibe info <mod>` = a chat card with clickable [manual] [config] [info] [off] buttons —
   the same card printed on every install.
@@ -88,11 +92,12 @@ v1 mods degrade gracefully: no knobs, introspected-facts-only manuals.
 
 ```
 plugin/src/main/java/com/gijsm/vibemine/
-├── api/        VibeMod + VibeContext — the tiny contract generated code writes against
+├── api/        Mod + VibeContext — the tiny contract generated code writes against
+│               (deprecated VibeMod bridge kept so pre-v3 generated sources keep compiling)
 ├── llm/        OpenRouterClient (JDK HttpClient) + PromptLibrary (system prompt, lenient JSON parse)
 ├── gen/        ModGenerator — generate → compile → on error feed javac output back → retry
 ├── compile/    InMemoryCompiler — javax.tools, bytecode captured in memory,
-│               classpath = running Paper jar + bundler libraries/ + VibeCore itself
+│               classpath = running Paper jar + bundler libraries/ + VibeMod itself
 ├── runtime/    ModRegistry (child classloader per mod, exact per-instance teardown),
 │               DynamicCommands (runtime /commands with neuterable handlers — Paper has no
 │               CommandMap#unregister), Watchdog (auto-disables slow mods)

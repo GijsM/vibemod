@@ -16,7 +16,7 @@ import java.util.List;
  * Contract enforced by the prompt: every file lives in package
  * {@code vibemod.<lowercased mod name>}, file paths are simple names like
  * {@code ChickenCreepers.java}, and exactly one public class implements
- * {@link com.gijsm.vibemine.api.VibeMod} and is named {@code mainClass}.
+ * {@link com.gijsm.vibemine.api.Mod} and is named {@code mainClass}.
  */
 public record GeneratedProject(String name, String description, String usage, String manual,
                                String icon, String mainClass, List<GeneratedFile> files,

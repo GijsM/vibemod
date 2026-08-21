@@ -30,11 +30,13 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 
+import com.gijsm.vibemine.api.Mod;
 import com.gijsm.vibemine.api.ModCommandHandler;
 import com.gijsm.vibemine.api.VibeContext;
-import com.gijsm.vibemine.api.VibeMod;
 import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.store.ModConfigs;
 
@@ -51,13 +53,18 @@ public final class ModRegistry {
     private final DynamicCommands dynamicCommands;
     private final Watchdog watchdog;
     private final ModConfigs configs;
+    private final ModErrors errors;
+    private final DebugEcho debug;
     private final LinkedHashMap<String, LoadedMod> mods = new LinkedHashMap<>();
 
-    public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog, ModConfigs configs) {
+    public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog, ModConfigs configs,
+                        ModErrors errors, DebugEcho debug) {
         this.plugin = plugin;
         this.dynamicCommands = commands;
         this.watchdog = watchdog;
         this.configs = configs;
+        this.errors = errors;
+        this.debug = debug;
         this.watchdog.onTrip(modName -> {
             LoadedMod lm = mods.get(lower(modName));
             String displayName = lm != null ? lm.displayName : modName;
@@ -66,6 +73,18 @@ public final class ModRegistry {
             if (wasEnabled) {
                 plugin.getServer().broadcast(Component.text(
                         displayName + " was auto-disabled by the watchdog (too slow)", NamedTextColor.RED));
+            }
+        });
+        // Default storm handler: mirrors the watchdog trip above. VibeCore supersedes this with its
+        // own onStorm registration (also flipping store.setEnabled(false)) once it owns errors.
+        this.errors.onStorm(modName -> {
+            LoadedMod lm = mods.get(lower(modName));
+            String displayName = lm != null ? lm.displayName : modName;
+            boolean wasEnabled = lm != null && lm.handle.enabled;
+            disableInternal(lm);
+            if (wasEnabled) {
+                plugin.getServer().broadcast(Component.text(
+                        displayName + " was auto-disabled after an error storm", NamedTextColor.RED));
             }
         });
     }
@@ -101,6 +120,8 @@ public final class ModRegistry {
             configs.forget(name);
             throw e;
         }
+        debug.track(name);
+        errors.clearEpisode(name);
         return handle;
     }
 
@@ -122,6 +143,10 @@ public final class ModRegistry {
             return false;
         }
         activate(lm);
+        lm.handle.degraded = false;
+        lm.handle.errorCount = 0;
+        debug.track(name);
+        errors.clearEpisode(name);
         return true;
     }
 
@@ -133,6 +158,8 @@ public final class ModRegistry {
             disableInternal(lm);
         }
         configs.forget(name);
+        errors.forget(name);
+        debug.forget(name);
     }
 
     /** Disable ALL mods. */
@@ -172,7 +199,7 @@ public final class ModRegistry {
         if (handler == null) {
             return false;
         }
-        runWrapped(lm, sender, handler, args);
+        runWrapped(lm, sender, handler, args, "action:" + action);
         return true;
     }
 
@@ -207,15 +234,15 @@ public final class ModRegistry {
     /** Instantiate the mod, build its context, and call onEnable. Rolls back on any failure. */
     private void activate(LoadedMod lm) throws ModLoadException {
         BytesClassLoader loader = new BytesClassLoader(ModRegistry.class.getClassLoader(), lm.classes);
-        VibeMod instance;
+        Mod instance;
         try {
             Class<?> mainClass = loader.loadClass(lm.mainClassFqcn);
             Object obj = mainClass.getDeclaredConstructor().newInstance();
-            if (!(obj instanceof VibeMod)) {
+            if (!(obj instanceof Mod)) {
                 throw new ModLoadException(
-                        lm.mainClassFqcn + " does not implement " + VibeMod.class.getName(), null);
+                        lm.mainClassFqcn + " does not implement " + Mod.class.getName(), null);
             }
-            instance = (VibeMod) obj;
+            instance = (Mod) obj;
         } catch (ModLoadException e) {
             throw e;
         } catch (Exception e) {
@@ -234,6 +261,7 @@ public final class ModRegistry {
             lm.loader = null;
             lm.context = null;
             lm.handle.enabled = false;
+            errors.note(lm.displayName, t, "onEnable");
             throw new ModLoadException("onEnable failed for mod " + lm.displayName, t);
         }
         lm.handle.enabled = true;
@@ -248,8 +276,9 @@ public final class ModRegistry {
             try {
                 lm.instance.onDisable(lm.context);
             } catch (Throwable t) {
-                Logger.getLogger("VibeCore." + lm.displayName)
+                Logger.getLogger("VibeMod." + lm.displayName)
                         .log(Level.WARNING, "onDisable failed for mod " + lm.displayName, t);
+                errors.note(lm.displayName, t, "onDisable");
             }
         }
         teardownRegistrations(lm);
@@ -293,7 +322,8 @@ public final class ModRegistry {
     }
 
     /** Run a mod handler through the watchdog, catching any failure and reporting it. */
-    private void runWrapped(LoadedMod lm, CommandSender sender, ModCommandHandler handler, String[] args) {
+    private void runWrapped(LoadedMod lm, CommandSender sender, ModCommandHandler handler, String[] args,
+                             String where) {
         try {
             watchdog.time(lm.displayName, () -> {
                 try {
@@ -303,19 +333,56 @@ public final class ModRegistry {
                 }
             });
         } catch (HandlerFailure f) {
-            reportFailure(lm, sender, f.getCause());
+            reportFailure(lm, sender, f.getCause(), where);
         } catch (Throwable t) {
-            reportFailure(lm, sender, t);
+            reportFailure(lm, sender, t, where);
         }
     }
 
-    private void reportFailure(LoadedMod lm, CommandSender sender, Throwable cause) {
-        Logger.getLogger("VibeCore." + lm.displayName)
+    private void reportFailure(LoadedMod lm, CommandSender sender, Throwable cause, String where) {
+        Logger.getLogger("VibeMod." + lm.displayName)
                 .log(Level.WARNING, "Handler in mod " + lm.displayName + " threw", cause);
         if (sender != null) {
             String msg = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName();
             sender.sendMessage(Component.text("Error in mod command: " + msg, NamedTextColor.RED));
         }
+        markFailure(lm, cause, where);
+    }
+
+    /** Marks a mod degraded, records the error, and announces the degrade episode once (per episode). */
+    private void markFailure(LoadedMod lm, Throwable cause, String where) {
+        if (lm == null || cause == null) {
+            return;
+        }
+        lm.handle.degraded = true;
+        lm.handle.errorCount++;
+        ModErrors.Outcome outcome = errors.record(lm.displayName, cause, where);
+        if (outcome.firstOfEpisode()) {
+            announceDegraded(lm, cause);
+        }
+    }
+
+    /** One clickable ops-chat announcement per degrade episode, with inline [fix]/[errors] buttons. */
+    private void announceDegraded(LoadedMod lm, Throwable cause) {
+        String cls = rootCauseSimpleName(cause);
+        Component message = Component.text(lm.displayName + " hit an error (" + cls + ") — ", NamedTextColor.GOLD)
+                .append(Component.text("[fix]", NamedTextColor.GOLD)
+                        .clickEvent(ClickEvent.runCommand("/vibe fix " + lm.displayName))
+                        .hoverEvent(HoverEvent.showText(
+                                Component.text("Send this mod's errors to the model for a fix"))))
+                .append(Component.text(" "))
+                .append(Component.text("[errors]", NamedTextColor.GRAY)
+                        .clickEvent(ClickEvent.runCommand("/vibe errors " + lm.displayName))
+                        .hoverEvent(HoverEvent.showText(Component.text("View this mod's error log"))));
+        plugin.getServer().broadcast(message, "vibe.admin");
+    }
+
+    private static String rootCauseSimpleName(Throwable t) {
+        Throwable cur = t;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        return cur.getClass().getSimpleName();
     }
 
     /** Internal unchecked carrier so a checked ModCommandHandler exception can cross a Runnable boundary. */
@@ -336,7 +403,7 @@ public final class ModRegistry {
         final Map<String, byte[]> classes;
         final ModHandle handle;
 
-        volatile VibeMod instance;
+        volatile Mod instance;
         volatile ClassLoader loader;
         volatile VibeContextImpl context;
 
@@ -377,7 +444,7 @@ public final class ModRegistry {
 
         @Override
         public Logger log() {
-            return Logger.getLogger("VibeCore." + lm.displayName);
+            return Logger.getLogger("VibeMod." + lm.displayName);
         }
 
         @Override
@@ -420,18 +487,22 @@ public final class ModRegistry {
                             }
                         });
                     } catch (HandlerFailure f) {
-                        Logger.getLogger("VibeCore." + lm.displayName).log(Level.WARNING,
-                                "Listener " + listener.getClass().getName() + "#" + method.getName()
-                                        + " in mod " + lm.displayName + " threw", f.getCause());
+                        reportListenerFailure(lm, listener, method, eventClass, f.getCause());
                     } catch (Throwable t) {
-                        Logger.getLogger("VibeCore." + lm.displayName).log(Level.WARNING,
-                                "Listener " + listener.getClass().getName() + "#" + method.getName()
-                                        + " in mod " + lm.displayName + " threw", t);
+                        reportListenerFailure(lm, listener, method, eventClass, t);
                     }
                 };
                 plugin.getServer().getPluginManager()
                         .registerEvent(eventClass, listener, ann.priority(), executor, plugin, ann.ignoreCancelled());
             }
+        }
+
+        private void reportListenerFailure(LoadedMod lm, Listener listener, Method method,
+                                            Class<? extends Event> eventClass, Throwable cause) {
+            Logger.getLogger("VibeMod." + lm.displayName).log(Level.WARNING,
+                    "Listener " + listener.getClass().getName() + "#" + method.getName()
+                            + " in mod " + lm.displayName + " threw", cause);
+            markFailure(lm, cause, "listener:" + eventClass.getSimpleName());
         }
 
         @Override
@@ -456,8 +527,9 @@ public final class ModRegistry {
                 try {
                     watchdog.time(lm.displayName, task);
                 } catch (Throwable t) {
-                    Logger.getLogger("VibeCore." + lm.displayName)
+                    Logger.getLogger("VibeMod." + lm.displayName)
                             .log(Level.WARNING, "Task in mod " + lm.displayName + " threw", t);
+                    markFailure(lm, t, "task");
                 }
             };
         }
@@ -466,7 +538,7 @@ public final class ModRegistry {
         public void command(String name, String description, ModCommandHandler handler) {
             assertMainThread();
             DynamicCommands.CommandExecutorLike wrapped =
-                    (sender, label, args) -> runWrapped(lm, sender, handler, args);
+                    (sender, label, args) -> runWrapped(lm, sender, handler, args, "command:" + name);
             boolean ok = dynamicCommands.register(name, description, null, wrapped);
             if (ok) {
                 lm.handle.commandNames.add(name);

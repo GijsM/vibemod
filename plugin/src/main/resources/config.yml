@@ -1,4 +1,4 @@
-# VibeCore configuration.
+# VibeMod configuration.
 #
 # Key resolution order for the OpenRouter API key (never hardcode a key anywhere):
 #   1. openrouter.api-key below
@@ -31,5 +31,24 @@ watchdog:
 commands:
   # If true, DynamicCommands will try to register real top-level commands
   # (e.g. /boom) for mods that ask for one. If registration is unavailable
-  # or fails, VibeCore falls back to "/vibe do <mod> <action>" automatically.
+  # or fails, VibeMod falls back to "/vibe do <mod> <action>" automatically.
   allow-top-level: true
+
+errors:
+  # A mod that throws this many times within storm-window-seconds is treated
+  # like a watchdog trip: auto-disabled and announced, instead of just being
+  # marked degraded.
+  storm-threshold: 10
+  # Rolling window (seconds) the storm-threshold count is measured over.
+  storm-window-seconds: 60
+  # Maximum distinct (deduped by root-cause class + top stack frame) error
+  # records kept per mod before the oldest is evicted.
+  max-distinct: 25
+  # Number of stack frames kept per recorded error (truncated for storage
+  # and for the [fix] prompt sent to the model).
+  stack-frames: 10
+
+debug:
+  # Default state of the per-mod debug echo (ctx.log() + caught exceptions
+  # streamed to ops) for mods that haven't had it explicitly toggled.
+  default-echo: false
