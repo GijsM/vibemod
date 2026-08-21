@@ -124,7 +124,7 @@ public final class Dialogs {
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 "Describe what the mod should do. Be specific.", NamedTextColor.GRAY))))
                         .inputs(List.of(textInput, nameInput))
-                        .afterAction(DialogBase.DialogAfterAction.WAIT_FOR_RESPONSE)
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(create, cancel)));
         show(p, dialog);
@@ -163,7 +163,7 @@ public final class Dialogs {
                 .base(DialogBase.builder(Component.text("Edit " + mod))
                         .body(List.of(DialogBody.plainMessage(Component.text(summary, NamedTextColor.GRAY))))
                         .inputs(List.of(changeInput))
-                        .afterAction(DialogBase.DialogAfterAction.WAIT_FOR_RESPONSE)
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(update, cancel)));
         show(p, dialog);
