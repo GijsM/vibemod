@@ -30,6 +30,8 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import com.gijsm.vibemine.llm.ModelCatalog;
+
 /**
  * Native Minecraft Dialog UI ({@code io.papermc.paper.dialog}, Paper 1.21.8)
  * replacing the retired book-and-quill flows: a multiline prompt dialog for
@@ -84,6 +86,7 @@ public final class Dialogs {
 
     private static final int KNOB_TEXT_MAX_LENGTH = 256;
     private static final int NAME_HINT_MAX_LENGTH = 32;
+    private static final int CUSTOM_MODEL_MAX_LENGTH = 80;
     private static final int MULTILINE_HEIGHT = 160;
     private static final double DEFAULT_MIN = 0.0;
     private static final double DEFAULT_MAX = 100.0;
@@ -382,6 +385,78 @@ public final class Dialogs {
             out.add(new Knob(k.key(), k.type(), k.description(), v, k.min(), k.max(), k.step(), k.choices()));
         }
         return out;
+    }
+
+    // ---- model picker ----
+
+    /**
+     * Opens the model picker: a dropdown of {@code models} (id + live price, cheapest-first
+     * per {@link ModelCatalog#featured}) plus a "custom model id" text field that wins over
+     * the dropdown when non-blank, so a player is never limited to the curated list.
+     */
+    public void openModelPicker(Player p, List<ModelCatalog.ModelInfo> models, String currentId,
+                                double sessionCostUsd, java.util.function.Consumer<String> onPick) {
+        List<ModelCatalog.ModelInfo> options = (models == null || models.isEmpty())
+                ? List.of(new ModelCatalog.ModelInfo(currentId, 0, -1.0, -1.0, false))
+                : models;
+
+        List<SingleOptionDialogInput.OptionEntry> entries = new ArrayList<>();
+        for (int i = 0; i < options.size(); i++) {
+            ModelCatalog.ModelInfo m = options.get(i);
+            boolean initial = m.id().equals(currentId);
+            entries.add(SingleOptionDialogInput.OptionEntry.create(
+                    inputKey("m" + i), Component.text(m.id() + " — " + m.priceLabel()), initial));
+        }
+        DialogInput dropdown = DialogInput.singleOption("model", Component.text("Model"), entries).build();
+        DialogInput customInput = DialogInput.text("custom", Component.text("Custom model id (optional)"))
+                .width(INPUT_WIDTH)
+                .maxLength(CUSTOM_MODEL_MAX_LENGTH)
+                .labelVisible(true)
+                .build();
+
+        String currentPrice = options.stream().filter(m -> m.id().equals(currentId)).findFirst()
+                .map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
+        List<DialogBody> body = List.of(
+                DialogBody.plainMessage(Component.text(
+                        "Current: " + currentId + " (" + currentPrice + ")", NamedTextColor.GRAY), BODY_WIDTH),
+                DialogBody.plainMessage(Component.text(
+                        "Spent this session: " + Style.fmtCost(sessionCostUsd), NamedTextColor.GRAY), BODY_WIDTH));
+
+        ActionButton use = ActionButton.builder(Component.text("Use"))
+                .action(mainThreadClick((view, audience) -> handleModelPick(options, view, audience, onPick)))
+                .build();
+        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
+
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text("Choose a model"))
+                        .body(body)
+                        .inputs(List.of(dropdown, customInput))
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.confirmation(use, cancel)));
+        show(p, dialog);
+    }
+
+    private void handleModelPick(List<ModelCatalog.ModelInfo> options, DialogResponseView view, Audience audience,
+                                  java.util.function.Consumer<String> onPick) {
+        if (!(audience instanceof Player player)) {
+            return;
+        }
+        String custom = view.getText("custom");
+        if (custom != null && !custom.isBlank()) {
+            onPick.accept(custom.trim());
+            return;
+        }
+        String picked = view.getText("model");
+        if (picked != null) {
+            for (int i = 0; i < options.size(); i++) {
+                if (inputKey("m" + i).equals(picked)) {
+                    onPick.accept(options.get(i).id());
+                    return;
+                }
+            }
+        }
+        player.sendMessage(Style.err("No model selected."));
     }
 
     // ---- fix confirm ----

@@ -19,6 +19,7 @@ import com.gijsm.vibemine.compile.CompileResult;
 import com.gijsm.vibemine.compile.InMemoryCompiler;
 import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.gen.ModGenerator;
+import com.gijsm.vibemine.llm.ModelCatalog;
 import com.gijsm.vibemine.llm.OpenRouterClient;
 import com.gijsm.vibemine.runtime.DebugEcho;
 import com.gijsm.vibemine.runtime.DynamicCommands;
@@ -56,6 +57,7 @@ public final class VibeMod extends JavaPlugin {
     private DebugEcho debugEcho;
     private ModGenerator generator;
     private OpenRouterClient client;
+    private ModelCatalog catalog;
     private InMemoryCompiler compiler;
     private Watchdog watchdog;
     private DynamicCommands dynamicCommands;
@@ -82,6 +84,8 @@ public final class VibeMod extends JavaPlugin {
                 getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"),
                 Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
+        catalog = new ModelCatalog();
+        catalog.refreshAsync();
 
         watchdog = new Watchdog(this, watchdogSingleMs(), perSecondBudgetMs());
         dynamicCommands = new DynamicCommands(this, getConfig().getBoolean("commands.allow-top-level", true));
@@ -120,6 +124,7 @@ public final class VibeMod extends JavaPlugin {
                 (player, mod, changes) -> editFromPrompt(player, mod, changes),
                 this::applyConfigValues);
         ModBrowserGui gui = new ModBrowserGui(this, registry, store, configs, modErrors, debugEcho,
+                catalog, client::sessionCostUsd,
                 new GuiCallbacks(
                         (player, mod) -> exportMod(player, mod, exporter),
                         this::applyStoredVersion,
@@ -131,13 +136,15 @@ public final class VibeMod extends JavaPlugin {
                         (player, mod) -> VirtualBooks.openErrors(player, mod, modErrors.recent(mod)),
                         this::reloadVibeConfig,
                         client::model,
-                        this::setModel));
+                        this::setModel,
+                        player -> dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
+                                client.sessionCostUsd(), model -> setModelAndNotify(player, model))));
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
             VibeCommand handler = new VibeCommand(this, generator, registry, store, configs,
-                    modErrors, debugEcho, exporter, gui, chatMode, dialogs, client::model,
-                    this::setModel, this::applyStoredVersion, this::reloadVibeConfig);
+                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, client::model,
+                    this::setModel, client::sessionCostUsd, this::applyStoredVersion, this::reloadVibeConfig);
             vibe.setExecutor(handler);
             vibe.setTabCompleter(handler);
         }
@@ -183,6 +190,7 @@ public final class VibeMod extends JavaPlugin {
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
+        catalog.refreshAsync();
         applyErrorLimits();
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
         getLogger().info("Config reloaded (model=" + client.model()
@@ -349,6 +357,13 @@ public final class VibeMod extends JavaPlugin {
         saveConfig();
     }
 
+    /** {@link #setModel} plus a chat confirmation naming the new model and its live price. */
+    private void setModelAndNotify(Player player, String model) {
+        setModel(model);
+        String price = catalog.find(model).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
+        player.sendMessage(Style.ok("Model set to " + model + " (" + price + ")"));
+    }
+
     /** Bridge a ModGenerator progress stream into a Progress UI. */
     public static ModGenerator.ProgressListener listenerFor(Progress progress) {
         return new ModGenerator.ProgressListener() {
@@ -368,14 +383,16 @@ public final class VibeMod extends JavaPlugin {
     private void finish(CommandSender viewer, Progress progress, ModGenerator.Result result) {
         Bukkit.getScheduler().runTask(this, () -> {
             if (result.success()) {
+                String costSuffix = result.costUsd() <= 0 ? "" : " · " + Style.fmtCost(result.costUsd());
                 progress.succeed("✔ " + result.modName() + " v" + result.version() + " installed"
-                        + (result.retries() > 0 ? " (self-healed ×" + result.retries() + ")" : ""));
+                        + (result.retries() > 0 ? " (self-healed ×" + result.retries() + ")" : "") + costSuffix);
                 ModStore.StoredMod mod = store.get(result.modName());
                 if (mod != null) {
                     viewer.sendMessage(InstallCard.build(mod, registry.get(mod.name())));
                 }
             } else {
-                progress.fail("✘ " + firstLine(result.message()));
+                String costNote = result.costUsd() > 0 ? " (spent " + Style.fmtCost(result.costUsd()) + ")" : "";
+                progress.fail("✘ " + firstLine(result.message()) + costNote);
             }
         });
     }

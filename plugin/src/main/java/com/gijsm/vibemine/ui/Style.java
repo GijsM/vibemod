@@ -72,6 +72,13 @@ public final class Style {
         return plain("●", color);
     }
 
+    /** {@code "$0.02"} normally, {@code "$0.0004"} (4 decimals) once the amount drops below a cent. */
+    public static String fmtCost(double costUsd) {
+        return costUsd < 0.01
+                ? String.format(java.util.Locale.ROOT, "$%.4f", costUsd)
+                : String.format(java.util.Locale.ROOT, "$%.2f", costUsd);
+    }
+
     private static Component line(NamedTextColor color, String msg) {
         return prefix().append(plain(msg, color));
     }

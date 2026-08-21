@@ -25,6 +25,7 @@ import org.bukkit.plugin.Plugin;
 
 import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.gen.ModGenerator;
+import com.gijsm.vibemine.llm.ModelCatalog;
 import com.gijsm.vibemine.runtime.DebugEcho;
 import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
@@ -61,9 +62,6 @@ public final class VibeCommand implements TabExecutor {
     private static final Set<String> MOD_ARG_SUBS = Set.of(
             "edit", "again", "source", "info", "manual", "config", "set", "book",
             "rollback", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug");
-    private static final List<String> KNOWN_MODELS = List.of(
-            "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic/claude-haiku-5",
-            "openai/gpt-5", "google/gemini-3-pro");
     private static final int FIX_ERROR_LINES = 8;
     private static final int CONSOLE_ERROR_LINES = 25;
 
@@ -74,20 +72,29 @@ public final class VibeCommand implements TabExecutor {
     private final ModConfigs configs;
     private final ModErrors errors;
     private final DebugEcho debug;
+    private final ModelCatalog catalog;
     private final JarExporter exporter;
     private final ModBrowserGui gui;
     private final ChatMode chatMode;
     private final Dialogs dialogs;
     private final Supplier<String> getModel;
     private final Consumer<String> setModel;
+    private final java.util.function.DoubleSupplier sessionCost;
     private final BiConsumer<CommandSender, String> applyVersion;
     private final Runnable reloadConfig;
 
+    /**
+     * {@code catalog} was added (dynamic model picker + cost visibility feature) right
+     * after {@code debug}, mirroring {@link ModBrowserGui}'s constructor; {@code
+     * sessionCost} was added right after {@code setModel} since it is model-related, like
+     * {@code getModel}/{@code setModel}.
+     */
     public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
-                        ModConfigs configs, ModErrors errors, DebugEcho debug, JarExporter exporter,
-                        ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs, Supplier<String> getModel,
-                        Consumer<String> setModel, BiConsumer<CommandSender, String> applyVersion,
-                        Runnable reloadConfig) {
+                        ModConfigs configs, ModErrors errors, DebugEcho debug, ModelCatalog catalog,
+                        JarExporter exporter, ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs,
+                        Supplier<String> getModel, Consumer<String> setModel,
+                        java.util.function.DoubleSupplier sessionCost,
+                        BiConsumer<CommandSender, String> applyVersion, Runnable reloadConfig) {
         this.plugin = plugin;
         this.generator = generator;
         this.registry = registry;
@@ -95,12 +102,14 @@ public final class VibeCommand implements TabExecutor {
         this.configs = configs;
         this.errors = errors;
         this.debug = debug;
+        this.catalog = catalog;
         this.exporter = exporter;
         this.gui = gui;
         this.chatMode = chatMode;
         this.dialogs = dialogs;
         this.getModel = getModel;
         this.setModel = setModel;
+        this.sessionCost = sessionCost;
         this.applyVersion = applyVersion;
         this.reloadConfig = reloadConfig;
     }
@@ -235,14 +244,17 @@ public final class VibeCommand implements TabExecutor {
             }
             if (result.success()) {
                 String retrySuffix = result.retries() > 0 ? " (self-healed x" + result.retries() + ")" : "";
-                progress.succeed("✔ " + result.modName() + " v" + result.version() + " installed" + retrySuffix);
+                String costSuffix = result.costUsd() <= 0 ? "" : " · " + Style.fmtCost(result.costUsd());
+                progress.succeed("✔ " + result.modName() + " v" + result.version() + " installed"
+                        + retrySuffix + costSuffix);
                 ModStore.StoredMod mod = result.modName() != null ? store.get(result.modName()) : null;
                 if (mod != null) {
                     ModHandle live = registry.get(mod.name());
                     sender.sendMessage(InstallCard.build(mod, live));
                 }
             } else {
-                progress.fail(result.message());
+                String costNote = result.costUsd() > 0 ? " (spent " + Style.fmtCost(result.costUsd()) + ")" : "";
+                progress.fail(result.message() + costNote);
             }
         });
     }
@@ -582,11 +594,30 @@ public final class VibeCommand implements TabExecutor {
 
     private void cmdModel(CommandSender sender, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(Style.info("Current model: " + getModel.get()));
+            if (sender instanceof Player player) {
+                dialogs.openModelPicker(player, catalog.featured(getModel.get()), getModel.get(),
+                        sessionCost.getAsDouble(), modelId -> applyModelSet(player, modelId));
+                return;
+            }
+            String current = getModel.get();
+            String price = catalog.find(current).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
+            sender.sendMessage(Style.info("Current model: " + current + " (" + price + ")"));
+            sender.sendMessage(Style.info("Session spent: " + Style.fmtCost(sessionCost.getAsDouble())));
             return;
         }
-        setModel.accept(args[0]);
-        sender.sendMessage(Style.ok("Model set to " + args[0]));
+        applyModelSet(sender, args[0]);
+    }
+
+    private void applyModelSet(CommandSender sender, String modelId) {
+        setModel.accept(modelId);
+        java.util.Optional<ModelCatalog.ModelInfo> info = catalog.find(modelId);
+        Component msg = Style.ok("Model set to " + modelId
+                + (info.isPresent() ? " (" + info.get().priceLabel() + ")" : ""));
+        if (info.isEmpty()) {
+            msg = msg.append(Component.text(
+                    " (unknown to the catalog - hope you know what you're doing)", NamedTextColor.GRAY));
+        }
+        sender.sendMessage(msg);
     }
 
     private void cmdChat(CommandSender sender) {
@@ -686,7 +717,11 @@ public final class VibeCommand implements TabExecutor {
                 return startsWithFilter(modNames(), args[1]);
             }
             if (sub.equals("model")) {
-                return startsWithFilter(KNOWN_MODELS, args[1]);
+                List<String> ids = new ArrayList<>();
+                for (ModelCatalog.ModelInfo m : catalog.featured(getModel.get())) {
+                    ids.add(m.id());
+                }
+                return startsWithFilter(ids, args[1]);
             }
         }
         if (args.length == 3 && sub.equals("do")) {

@@ -11,7 +11,10 @@ import org.bukkit.entity.Player;
  * back to the wiring layer: exporting a jar, reapplying a rolled-back
  * version (the per-mod [⟟ reload] button), opening the configure/edit/fix
  * dialogs, opening the manual/source/errors virtual books, reloading
- * {@code config.yml}, and reading/writing the active LLM model.
+ * {@code config.yml}, reading/writing the active LLM model, and (new in the
+ * dynamic model picker feature) opening the model-picker dialog itself -
+ * {@code pickModel} is declared right after {@code getModel}/{@code setModel}
+ * since it is model-related plumbing, same as those two.
  */
 public record GuiCallbacks(BiConsumer<Player, String> export,
                            BiConsumer<Player, String> applyVersion,
@@ -22,5 +25,6 @@ public record GuiCallbacks(BiConsumer<Player, String> export,
                            BiConsumer<Player, String> openSource,
                            BiConsumer<Player, String> openErrors,
                            Runnable reloadConfig,
-                           Supplier<String> getModel, Consumer<String> setModel) {
+                           Supplier<String> getModel, Consumer<String> setModel,
+                           Consumer<Player> pickModel) {
 }

@@ -43,8 +43,11 @@ public final class ModGenerator {
         void detail(String line);
     }
 
-    /** Outcome of one generation run. */
-    public record Result(boolean success, String modName, int version, int retries, String message) {
+    /** Outcome of one generation run. {@code costUsd} sums the real OpenRouter cost of every
+     * round in this run, including rounds that failed or were thrown away by a retry -
+     * burned money counts even when the run ultimately fails. */
+    public record Result(boolean success, String modName, int version, int retries, String message,
+                         double costUsd) {
     }
 
     private static final Pattern PACKAGE_DECL = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
@@ -82,7 +85,7 @@ public final class ModGenerator {
         return run(l, () -> {
             ModStore.StoredMod existing = store.get(modName);
             if (existing == null) {
-                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.");
+                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
             return pipeline(prompt, creator, existing.name(), baseProject(existing, sources),
@@ -99,7 +102,7 @@ public final class ModGenerator {
         return run(l, () -> {
             ModStore.StoredMod existing = store.get(modName);
             if (existing == null) {
-                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.");
+                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
             return pipeline("fix: " + errorHeadline(errorReport), creator, existing.name(),
@@ -125,7 +128,7 @@ public final class ModGenerator {
         return run(l, () -> {
             ModStore.StoredMod existing = store.get(modName);
             if (existing == null || existing.versions().isEmpty()) {
-                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.");
+                return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             String lastPrompt = existing.versions().get(existing.versions().size() - 1).prompt();
             return pipeline(lastPrompt, creator, existing.name(), null,
@@ -151,7 +154,7 @@ public final class ModGenerator {
                 out.complete(result);
             } catch (Throwable t) {
                 plugin.getLogger().warning("Generation failed: " + t);
-                out.complete(new Result(false, null, 0, 0, brief(t)));
+                out.complete(new Result(false, null, 0, 0, brief(t), 0.0));
             }
         });
         return out;
@@ -170,21 +173,28 @@ public final class ModGenerator {
         messages.add(new OpenRouterClient.ChatMessage("user", firstUserMessage));
         GeneratedProject current = base;
         int budget = Math.max(0, maxRetries.getAsInt());
+        double costUsd = 0.0; // burned money counts across every round, even failed ones
 
         int attempt = 0;
         while (true) {
             l.phase(attempt == 0 ? "Thinking" : "Thinking (repair " + attempt + ")");
             String response;
             try {
-                response = client.complete(PromptLibrary.systemPrompt(), messages)
+                OpenRouterClient.Completion completion = client.complete(PromptLibrary.systemPrompt(), messages)
                         .get(300, TimeUnit.SECONDS);
+                response = completion.content();
+                costUsd += completion.costUsd();
             } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException apiFail) {
                 // Truncated/empty/flaky API responses are retryable rounds, not run-killers.
-                String reason = brief(apiFail.getCause() != null ? apiFail.getCause() : apiFail);
+                Throwable cause = apiFail.getCause() != null ? apiFail.getCause() : apiFail;
+                if (cause instanceof OpenRouterClient.CostAwareException costAware) {
+                    costUsd += costAware.costUsd(); // the call was still billed even though it failed
+                }
+                String reason = brief(cause);
                 plugin.getLogger().warning("LLM round failed (" + reason + "), retrying");
                 if (attempt++ >= budget) {
                     return new Result(false, forcedName, 0, attempt - 1,
-                            "The model's response failed " + attempt + " time(s): " + reason);
+                            "The model's response failed " + attempt + " time(s): " + reason, costUsd);
                 }
                 l.detail("Model response failed (" + firstLineOf(reason) + "), retrying…");
                 // No assistant turn to append (nothing usable came back); steer the retry:
@@ -204,7 +214,7 @@ public final class ModGenerator {
                 plugin.getLogger().warning("Unusable model response: " + bad.getMessage());
                 if (attempt++ >= budget) {
                     return new Result(false, forcedName, 0, attempt - 1,
-                            "Model returned an unusable project: " + bad.getMessage());
+                            "Model returned an unusable project: " + bad.getMessage(), costUsd);
                 }
                 l.detail("Bad response (" + bad.getMessage() + "), retrying…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
@@ -221,7 +231,7 @@ public final class ModGenerator {
                 plugin.getLogger().warning("Mod compile round failed:\n" + compiled.diagnostics());
                 if (attempt++ >= budget) {
                     return new Result(false, name, 0, attempt - 1,
-                            "Compile failed after " + attempt + " attempt(s):\n" + compiled.diagnostics());
+                            "Compile failed after " + attempt + " attempt(s):\n" + compiled.diagnostics(), costUsd);
                 }
                 l.detail("javac errors, asking the model to fix them…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
@@ -241,13 +251,13 @@ public final class ModGenerator {
                         saved.description(), mainFqcn, compiled.classes(),
                         saved.config(), store.resolvedConfigValues(saved.name())));
                 return new Result(true, saved.name(), saved.currentVersion(), attempt,
-                        saved.name() + " v" + saved.currentVersion() + " is live");
+                        saved.name() + " v" + saved.currentVersion() + " is live", costUsd);
             } catch (Exception enableFail) {
                 // The code compiled but blew up on enable — worth one repair round too.
                 store.setEnabled(saved.name(), false);
                 if (attempt++ >= budget) {
                     return new Result(false, name, saved.currentVersion(), attempt - 1,
-                            "Mod failed to start: " + brief(enableFail));
+                            "Mod failed to start: " + brief(enableFail), costUsd);
                 }
                 l.detail("Mod crashed on enable, asking the model to fix it…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));

@@ -8,6 +8,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.DoubleAdder;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -29,10 +30,33 @@ public final class OpenRouterClient {
     public record ChatMessage(String role, String content) {
     }
 
+    /** One completion: the assistant message text plus its real {@code usage.cost} in USD (0 if absent). */
+    public record Completion(String content, double costUsd) {
+    }
+
+    /**
+     * A failed completion (truncated/empty response) that nonetheless carries a real,
+     * billed {@code usage.cost} - callers that must not lose track of burned money (see
+     * {@code ModGenerator}) can recover it from a failed future via this exception.
+     */
+    public static final class CostAwareException extends IOException {
+        private final double costUsd;
+
+        public CostAwareException(String message, double costUsd) {
+            super(message);
+            this.costUsd = costUsd;
+        }
+
+        public double costUsd() {
+            return costUsd;
+        }
+    }
+
     private final String apiKey;
     private volatile String model;
     private volatile Duration timeout;
     private volatile int maxTokens = 0; // <= 0: omit, OpenRouter uses the model's own ceiling
+    private final DoubleAdder sessionCost = new DoubleAdder();
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
         this.apiKey = apiKey;
@@ -45,8 +69,8 @@ public final class OpenRouterClient {
         this.maxTokens = Math.max(0, maxTokens); // 0 = omit the field entirely
     }
 
-    /** POST to the chat-completions endpoint; returns the assistant message text. */
-    public CompletableFuture<String> complete(String systemPrompt, List<ChatMessage> messages) {
+    /** POST to the chat-completions endpoint; returns the assistant message text plus its billed cost. */
+    public CompletableFuture<Completion> complete(String systemPrompt, List<ChatMessage> messages) {
         JsonObject body = new JsonObject();
         body.addProperty("model", model);
         if (maxTokens > 0) {
@@ -81,7 +105,7 @@ public final class OpenRouterClient {
                 .thenCompose(this::toResult);
     }
 
-    private CompletableFuture<String> toResult(HttpResponse<String> response) {
+    private CompletableFuture<Completion> toResult(HttpResponse<String> response) {
         String responseBody = response.body() == null ? "" : response.body();
         JsonObject json = null;
         try {
@@ -100,6 +124,7 @@ public final class OpenRouterClient {
                     new IOException("OpenRouter request failed: status=" + response.statusCode() + " body=" + snippet));
         }
 
+        double cost = extractCost(json);
         try {
             JsonArray choices = json.getAsJsonArray("choices");
             JsonObject first = choices.get(0).getAsJsonObject();
@@ -107,19 +132,41 @@ public final class OpenRouterClient {
                     ? first.get("finish_reason").getAsString() : "";
             String content = first.getAsJsonObject("message").get("content").getAsString();
             if ("length".equals(finishReason)) {
-                return CompletableFuture.failedFuture(new IOException(
-                        "response truncated: hit the max_tokens limit (" + maxTokens + ")"));
+                return CompletableFuture.failedFuture(new CostAwareException(
+                        "response truncated: hit the max_tokens limit (" + maxTokens + ")", cost));
             }
             if (content.isBlank()) {
-                return CompletableFuture.failedFuture(new IOException(
-                        "response had empty content (finish_reason=" + finishReason + ")"));
+                return CompletableFuture.failedFuture(new CostAwareException(
+                        "response had empty content (finish_reason=" + finishReason + ")", cost));
             }
-            return CompletableFuture.completedFuture(content);
+            sessionCost.add(cost);
+            return CompletableFuture.completedFuture(new Completion(content, cost));
         } catch (RuntimeException e) {
             String snippet = responseBody.length() > 500 ? responseBody.substring(0, 500) : responseBody;
             return CompletableFuture.failedFuture(
                     new IOException("OpenRouter response missing choices[0].message.content: " + snippet, e));
         }
+    }
+
+    /** Defensive extraction of {@code usage.cost}: absent/null/non-numeric -> 0.0, never throws. */
+    private static double extractCost(JsonObject json) {
+        if (json == null || !json.has("usage") || !json.get("usage").isJsonObject()) {
+            return 0.0;
+        }
+        JsonObject usage = json.getAsJsonObject("usage");
+        if (!usage.has("cost") || usage.get("cost").isJsonNull()) {
+            return 0.0;
+        }
+        try {
+            return usage.get("cost").getAsDouble();
+        } catch (RuntimeException notANumber) {
+            return 0.0;
+        }
+    }
+
+    /** Cumulative {@code usage.cost} across every successful request this client has made. */
+    public double sessionCostUsd() {
+        return sessionCost.sum();
     }
 
     public String model() {

@@ -24,6 +24,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
+import com.gijsm.vibemine.llm.ModelCatalog;
 import com.gijsm.vibemine.runtime.DebugEcho;
 import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
@@ -48,10 +49,6 @@ public final class ModBrowserGui implements Listener {
     private static final long DELETE_CONFIRM_MS = 5000L;
     private static final Component LIST_TITLE = Component.text("⬡ VibeMod");
     private static final Component SETTINGS_TITLE = Component.text("⬡ VibeMod Settings");
-
-    private static final List<String> KNOWN_MODELS = List.of(
-            "anthropic/claude-sonnet-5", "anthropic/claude-opus-5", "anthropic/claude-haiku-5",
-            "openai/gpt-5", "google/gemini-3-pro");
 
     private static final int DETAIL_SIZE = 54;
     private static final int SLOT_RELOAD = 10;
@@ -82,17 +79,27 @@ public final class ModBrowserGui implements Listener {
     private final ModConfigs configs;
     private final ModErrors errors;
     private final DebugEcho debug;
+    private final ModelCatalog catalog;
+    private final java.util.function.DoubleSupplier sessionCost;
     private final GuiCallbacks cb;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
 
+    /**
+     * {@code catalog} and {@code sessionCost} were added (dynamic model picker + cost
+     * visibility feature) right after {@code debug} - kept as their own params rather than
+     * folded into {@code cb} since they are read-only lookups, not callbacks.
+     */
     public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs,
-                          ModErrors errors, DebugEcho debug, GuiCallbacks cb) {
+                          ModErrors errors, DebugEcho debug, ModelCatalog catalog,
+                          java.util.function.DoubleSupplier sessionCost, GuiCallbacks cb) {
         this.plugin = plugin;
         this.registry = registry;
         this.store = store;
         this.configs = configs;
         this.errors = errors;
         this.debug = debug;
+        this.catalog = catalog;
+        this.sessionCost = sessionCost;
         this.cb = cb;
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
     }
@@ -530,10 +537,15 @@ public final class ModBrowserGui implements Listener {
     private void populateSettings(Inventory inv) {
         fillBorder(inv, SETTINGS_SIZE, anyDegradedLive());
 
+        String currentModel = cb.getModel().get();
+        String price = catalog.find(currentModel).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
         ItemStack model = new ItemStack(Material.NETHER_STAR);
         ItemMeta modelMeta = model.getItemMeta();
-        modelMeta.displayName(plain("Model: " + cb.getModel().get(), NamedTextColor.WHITE));
-        modelMeta.lore(List.of(plain("Click to cycle the LLM model", NamedTextColor.YELLOW)));
+        modelMeta.displayName(plain("Model: " + currentModel, NamedTextColor.WHITE));
+        modelMeta.lore(List.of(
+                plain(price, NamedTextColor.GRAY),
+                plain("Spent this session: " + Style.fmtCost(sessionCost.getAsDouble()), NamedTextColor.GRAY),
+                plain("Click to open the model picker", NamedTextColor.YELLOW)));
         model.setItemMeta(modelMeta);
         inv.setItem(SETTINGS_MODEL_SLOT, model);
 
@@ -567,11 +579,7 @@ public final class ModBrowserGui implements Listener {
         switch (slot) {
             case SETTINGS_MODEL_SLOT -> {
                 click(player);
-                String current = cb.getModel().get();
-                int idx = KNOWN_MODELS.indexOf(current);
-                String next = KNOWN_MODELS.get((idx + 1) % KNOWN_MODELS.size());
-                cb.setModel().accept(next);
-                populateSettings(session.inventory);
+                cb.pickModel().accept(player);
             }
             case SETTINGS_RELOAD_SLOT -> {
                 click(player);
