@@ -123,7 +123,7 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.WAIT_FOR_RESPONSE)
                         .build())
                 .type(DialogType.confirmation(create, cancel)));
-        p.showDialog(dialog);
+        show(p, dialog);
     }
 
     private void handlePromptSubmit(DialogResponseView view, Audience audience) {
@@ -162,7 +162,7 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.WAIT_FOR_RESPONSE)
                         .build())
                 .type(DialogType.confirmation(update, cancel)));
-        p.showDialog(dialog);
+        show(p, dialog);
     }
 
     private void handleEditSubmit(String mod, DialogResponseView view, Audience audience) {
@@ -217,7 +217,7 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(save, cancel)));
-        p.showDialog(dialog);
+        show(p, dialog);
     }
 
     private DialogInput buildKnobInput(Knob knob) {
@@ -226,7 +226,7 @@ public final class Dialogs {
         String current = knob.value();
         switch (type) {
             case "boolean":
-                return DialogInput.bool(knob.key(), label)
+                return DialogInput.bool(inputKey(knob.key()), label)
                         .initial(current != null && Boolean.parseBoolean(current.trim()))
                         .build();
             case "choice": {
@@ -234,9 +234,9 @@ public final class Dialogs {
                 List<SingleOptionDialogInput.OptionEntry> entries = new ArrayList<>();
                 for (String choice : choices) {
                     boolean initial = choice.equalsIgnoreCase(current);
-                    entries.add(SingleOptionDialogInput.OptionEntry.create(choice, Component.text(choice), initial));
+                    entries.add(SingleOptionDialogInput.OptionEntry.create(inputKey(choice), Component.text(choice), initial));
                 }
-                return DialogInput.singleOption(knob.key(), label, entries).build();
+                return DialogInput.singleOption(inputKey(knob.key()), label, entries).build();
             }
             case "integer":
             case "decimal": {
@@ -244,7 +244,7 @@ public final class Dialogs {
                 double max = knob.max() != null ? knob.max() : DEFAULT_MAX;
                 double step = knob.step() != null ? knob.step() : DEFAULT_STEP;
                 double initial = parseDouble(current, min);
-                return DialogInput.numberRange(knob.key(), label, (float) min, (float) max)
+                return DialogInput.numberRange(inputKey(knob.key()), label, (float) min, (float) max)
                         .labelFormat("%s: %s")
                         .initial((float) initial)
                         .step((float) step)
@@ -252,11 +252,28 @@ public final class Dialogs {
             }
             case "text":
             default:
-                return DialogInput.text(knob.key(), label)
+                return DialogInput.text(inputKey(knob.key()), label)
                         .maxLength(KNOB_TEXT_MAX_LENGTH)
                         .initial(current == null ? "" : current)
                         .build();
         }
+    }
+
+    /**
+     * Vanilla dialog input keys allow only letters, digits and underscores -
+     * knob keys like "chicken-count" must be sanitized on the way in and
+     * reverse-mapped on the way out.
+     */
+    private static String inputKey(String knobKey) {
+        return knobKey.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
+    }
+
+    /** Close any open container first, then show the dialog next tick. */
+    private void show(Player p, Dialog dialog) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            p.closeInventory();
+            show(p, dialog);
+        });
     }
 
     private static Component labelFor(Knob knob) {
@@ -290,21 +307,34 @@ public final class Dialogs {
         String type = knob.type() == null ? "text" : knob.type().toLowerCase(Locale.ROOT);
         switch (type) {
             case "boolean": {
-                Boolean b = view.getBoolean(knob.key());
+                Boolean b = view.getBoolean(inputKey(knob.key()));
                 return Boolean.toString(b != null && b);
             }
             case "integer":
             case "decimal": {
-                Float f = view.getFloat(knob.key());
+                Float f = view.getFloat(inputKey(knob.key()));
                 double raw = f == null ? 0.0 : f;
                 double step = knob.step() != null ? knob.step() : DEFAULT_STEP;
                 double rounded = roundToStep(raw, step);
                 return "integer".equals(type) ? Long.toString(Math.round(rounded)) : Double.toString(rounded);
             }
-            case "choice":
+            case "choice": {
+                String picked = view.getText(inputKey(knob.key()));
+                if (picked == null) {
+                    return "";
+                }
+                if (knob.choices() != null) {
+                    for (String choice : knob.choices()) {
+                        if (inputKey(choice).equals(picked)) {
+                            return choice; // reverse-map sanitized option id to the real value
+                        }
+                    }
+                }
+                return picked;
+            }
             case "text":
             default: {
-                String text = view.getText(knob.key());
+                String text = view.getText(inputKey(knob.key()));
                 return text == null ? "" : text;
             }
         }
@@ -360,7 +390,7 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(fix, notNow)));
-        p.showDialog(dialog);
+        show(p, dialog);
     }
 
     // ---- shared plumbing ----
