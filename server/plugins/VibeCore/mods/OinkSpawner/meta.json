@@ -1,0 +1,16 @@
+{
+  "name": "OinkSpawner",
+  "description": "Adds a /oink command that spawns a pig at 0 -58 0 in the overworld.",
+  "mainClass": "vibemod.oinkspawner.OinkSpawner",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "Rcon",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "add a command /oink that spawns a pig at coordinates 0 -58 0 in the overworld",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787318772391
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+name: VibeCore
+version: 0.1.0
+main: com.gijsm.vibemine.VibeCore
+api-version: '1.21'
+author: gijsm
+description: "Vibe-code gameplay mods from in-game prompts"
+
+commands:
+  vibe:
+    description: "Vibe-code gameplay mods from in-game prompts"
+    usage: /vibe help
+
+permissions:
+  vibe.use:
+    description: "Use read-only /vibe subcommands (list, source, help)"
+    default: op
+  vibe.admin:
+    description: "Full control of VibeMine: make, edit, enable/disable, export, panic, etc."
+    default: op

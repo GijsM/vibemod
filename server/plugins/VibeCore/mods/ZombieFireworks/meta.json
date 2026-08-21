@@ -1,0 +1,16 @@
+{
+  "name": "ZombieFireworks",
+  "description": "When a zombie dies it explodes into a colorful firework burst.",
+  "mainClass": "vibemod.zombiefireworks.ZombieFireworks",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "Rcon",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "zombies explode into a colorful firework when they die",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787319307055
+    }
+  ]
+}

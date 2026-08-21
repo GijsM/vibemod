@@ -1,0 +1,22 @@
+{
+  "name": "ChickenCreepers",
+  "description": "When a creeper dies it turns into two chickens with a puff of smoke.",
+  "mainClass": "vibemod.chickencreepers.ChickenCreepers",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "Rcon",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "when a creeper dies a chicken spawns at its location with a poof",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787318627582
+    },
+    {
+      "version": 2,
+      "prompt": "spawn exactly two chickens instead of one",
+      "model": "anthropic/claude-sonnet-5",
+      "createdAt": 1787318698305
+    }
+  ]
+}
