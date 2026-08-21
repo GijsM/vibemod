@@ -274,9 +274,11 @@ public final class ModBrowserGui implements Listener {
     }
 
     private static int idealListSize(int modCount, boolean reserveSettings) {
-        int needed = modCount + (reserveSettings ? 1 : 0) + 9; // reserve a border row
-        int rows = Math.max(3, (needed + 8) / 9);
-        return Math.min(54, rows * 9);
+        // Layout = top border row + N full-width content rows + bottom border row
+        // (the settings button lives IN the bottom border, costing no content slot).
+        int contentRows = Math.max(1, (modCount + 8) / 9);
+        int rows = Math.min(6, contentRows + 2);
+        return rows * 9;
     }
 
     private boolean anyDegradedLive() {
