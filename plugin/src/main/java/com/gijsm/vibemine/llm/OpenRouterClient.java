@@ -32,7 +32,7 @@ public final class OpenRouterClient {
     private final String apiKey;
     private volatile String model;
     private volatile Duration timeout;
-    private volatile int maxTokens = 32000;
+    private volatile int maxTokens = 0; // <= 0: omit, OpenRouter uses the model's own ceiling
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
         this.apiKey = apiKey;
@@ -42,14 +42,16 @@ public final class OpenRouterClient {
 
     /** Cap on completion tokens per request; big mods need headroom. */
     public void setMaxTokens(int maxTokens) {
-        this.maxTokens = Math.max(1000, maxTokens);
+        this.maxTokens = Math.max(0, maxTokens); // 0 = omit the field entirely
     }
 
     /** POST to the chat-completions endpoint; returns the assistant message text. */
     public CompletableFuture<String> complete(String systemPrompt, List<ChatMessage> messages) {
         JsonObject body = new JsonObject();
         body.addProperty("model", model);
-        body.addProperty("max_tokens", maxTokens);
+        if (maxTokens > 0) {
+            body.addProperty("max_tokens", maxTokens);
+        }
         body.addProperty("temperature", 0.4);
 
         JsonArray msgs = new JsonArray();

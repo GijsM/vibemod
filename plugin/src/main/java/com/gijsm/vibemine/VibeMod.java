@@ -81,7 +81,7 @@ public final class VibeMod extends JavaPlugin {
         client = new OpenRouterClient(apiKey == null ? "" : apiKey,
                 getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"),
                 Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
-        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 32000));
+        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
 
         watchdog = new Watchdog(this, watchdogSingleMs(), perSecondBudgetMs());
         dynamicCommands = new DynamicCommands(this, getConfig().getBoolean("commands.allow-top-level", true));
@@ -182,7 +182,7 @@ public final class VibeMod extends JavaPlugin {
         dynamicCommands.setAllowTopLevel(getConfig().getBoolean("commands.allow-top-level", true));
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
-        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 32000));
+        client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
         applyErrorLimits();
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
         getLogger().info("Config reloaded (model=" + client.model()
