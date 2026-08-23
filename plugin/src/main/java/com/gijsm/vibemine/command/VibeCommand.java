@@ -310,6 +310,13 @@ public final class VibeCommand implements TabExecutor {
     // ---- listing / source / info / manual ----
 
     private void cmdList(CommandSender sender) {
+        // Players get the native browser dialog (read-only navigation — the hub
+        // and its commands enforce their own permissions); console keeps the
+        // chat list below.
+        if (sender instanceof Player player) {
+            hub.openBrowser(player);
+            return;
+        }
         List<ModStore.StoredMod> mods = store.all();
         if (mods.isEmpty()) {
             sender.sendMessage(Style.info("No mods yet - try /vibe make <description>."));
@@ -884,7 +891,7 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe make [description]", "generate a new mod (no text: opens a dialog)"));
         sender.sendMessage(helpLine("/vibe edit <mod> [description]", "revise a mod (no text: opens a dialog)"));
         sender.sendMessage(helpLine("/vibe again <mod>", "rerun a mod's last prompt"));
-        sender.sendMessage(helpLine("/vibe list", "list stored mods"));
+        sender.sendMessage(helpLine("/vibe list", "browse your mods (console: text list)"));
         sender.sendMessage(helpLine("/vibe source <mod>", "view a mod's source"));
         sender.sendMessage(helpLine("/vibe info <mod>", "open the mod hub (console: install card)"));
         sender.sendMessage(helpLine("/vibe manual <mod>", "open the player manual"));

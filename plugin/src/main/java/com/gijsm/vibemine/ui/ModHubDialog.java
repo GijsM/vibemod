@@ -37,6 +37,14 @@ import com.gijsm.vibemine.store.ModStore;
  * for players, by clicking a mod in {@link ModBrowserGui}'s list, and by the
  * install card's {@code [open]} button.
  *
+ * <p>Also hosts {@link #openBrowser}, the native mod-browser dialog behind
+ * {@code /vibe list} for players — an experiment running alongside
+ * {@link ModBrowserGui}'s chest list ({@code /vibe gui}, unchanged) so both
+ * surfaces can be compared in-game. It lives here rather than in its own class
+ * because it needs the same live wiring (registry/store/errors, read fresh on
+ * every open) and it is the hub's natural sibling: every row navigates into
+ * the hub.
+ *
  * <p>Its own class rather than another method on {@link InfoDialogs} because
  * unlike the read-only viewers it needs live wiring (registry/store/errors/
  * debug are injected at construction and read fresh on every {@link #open},
@@ -51,6 +59,8 @@ public final class ModHubDialog {
 
     /** Prose bodies: same width as {@link InfoDialogs}' manual/errors viewers. */
     private static final int PROSE_WIDTH = 400;
+    /** Browser mod buttons: generous fixed width so names align ({@code InfoDialogs}' FILE_BUTTON_WIDTH idiom). */
+    private static final int MOD_BUTTON_WIDTH = 300;
 
     private final Plugin plugin;
     private final ModRegistry registry;
@@ -89,12 +99,105 @@ public final class ModHubDialog {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.multiAction(buildButtons(mod, enabled, degraded, admin))
+                        // Admins go back to the chest list, everyone else to the browser
+                        // dialog — the experiment keeps both surfaces side by side.
                         .exitAction(admin
                                 ? navButton("← Back to list", "/vibe gui", "Back to the mod browser")
-                                : doneButton())
+                                : navButton("← Back to list", "/vibe list", "Back to the mod browser"))
                         .columns(3)
                         .build()));
         show(p, dialog);
+    }
+
+    // ---- browser ----
+
+    /**
+     * Opens the native mod browser: one summary line plus one command-routed
+     * button per stored mod (store order, same as the chest list), each opening
+     * that mod's hub via {@code /vibe info} — stateless navigation, so the hub's
+     * own permission handling applies. Admins get a trailing ⚙ Settings button.
+     */
+    public void openBrowser(Player p) {
+        if (!p.isOnline()) {
+            return;
+        }
+        List<ModStore.StoredMod> mods = store.all();
+        boolean admin = p.hasPermission("vibe.admin");
+
+        List<DialogBody> body = new ArrayList<>();
+        List<ActionButton> buttons = new ArrayList<>();
+        if (mods.isEmpty()) {
+            body.add(DialogBody.plainMessage(Component.text(
+                    "No mods yet — /vibe make \"something wonderful\"", NamedTextColor.GRAY), PROSE_WIDTH));
+        } else {
+            int running = 0;
+            int degradedCount = 0;
+            for (ModStore.StoredMod mod : mods) {
+                // Live registry state wins over the stored flag (e.g. a watchdog trip).
+                ModHandle live = registry.get(mod.name());
+                boolean enabled = live != null ? live.enabled() : mod.enabled();
+                boolean degraded = live != null && live.degraded();
+                if (degraded) {
+                    degradedCount++;
+                } else if (enabled) {
+                    running++;
+                }
+                buttons.add(modButton(mod, enabled, degraded));
+            }
+            String summary = mods.size() + " mods · " + running + " running"
+                    + (degradedCount > 0 ? " · " + degradedCount + " degraded" : "");
+            body.add(DialogBody.plainMessage(Component.text(summary, NamedTextColor.GRAY), PROSE_WIDTH));
+        }
+        if (admin) {
+            buttons.add(navButton("⚙ Settings", "/vibe settings", "Open the plugin settings"));
+        }
+
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text("⬡ VibeMod"))
+                        .body(body)
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(buttons.isEmpty()
+                        ? DialogType.notice(doneButton())
+                        : DialogType.multiAction(buttons).exitAction(doneButton()).columns(1).build()));
+        show(p, dialog);
+    }
+
+    /**
+     * One browser row: {@code "● Name vN"} — dot and name colored by state (the
+     * same green/gold/gray as {@link #stateLine} and the chest list), version
+     * dark-gray; the tooltip carries the detail.
+     */
+    private ActionButton modButton(ModStore.StoredMod mod, boolean enabled, boolean degraded) {
+        NamedTextColor stateColor = degraded ? NamedTextColor.GOLD
+                : (enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY);
+        Component label = Component.text("● ", stateColor)
+                .append(Component.text(mod.name(), stateColor))
+                .append(Component.text(" v" + mod.currentVersion(), NamedTextColor.DARK_GRAY));
+        return ActionButton.builder(label)
+                .tooltip(modTooltip(mod, enabled, degraded))
+                .width(MOD_BUTTON_WIDTH)
+                .action(DialogAction.staticAction(ClickEvent.runCommand("/vibe info " + mod.name())))
+                .build();
+    }
+
+    /** Row tooltip: truncated description, then state · ("vN of M" when multi-version ·) knob count. */
+    private Component modTooltip(ModStore.StoredMod mod, boolean enabled, boolean degraded) {
+        String desc = mod.description() == null ? "" : mod.description();
+        if (desc.length() > 120) {
+            desc = desc.substring(0, 117) + "…";
+        }
+        List<String> meta = new ArrayList<>();
+        meta.add(degraded ? "degraded (" + errors.distinctCount(mod.name()) + " errors)"
+                : (enabled ? "running" : "off"));
+        if (mod.versions().size() > 1) {
+            meta.add("v" + mod.currentVersion() + " of " + mod.versions().size());
+        }
+        int knobs = mod.config().size();
+        meta.add(knobs == 0 ? "no config knobs" : knobs + " config knob(s)");
+        return Component.text(desc, NamedTextColor.GRAY)
+                .append(Component.newline())
+                .append(Component.text(String.join(" · ", meta), NamedTextColor.DARK_GRAY));
     }
 
     // ---- body ----
