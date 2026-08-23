@@ -8,14 +8,14 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 
 /**
- * Shared word-wrap helper for GUI lore and the install card. Wraps at spaces,
- * hard-splitting any single token longer than the target width, and never
- * emits italic text (chest GUI item names/lore render italic by default
- * otherwise, which reads as a bug rather than a style).
+ * Shared word-wrap helper for the install card and other chat-width text.
+ * Wraps at spaces, hard-splitting any single token longer than the target
+ * width, and never emits italic text (inherited italics elsewhere read as a
+ * bug rather than a style).
  */
 public final class Text {
 
-    /** Default wrap width in characters, tuned for chest-GUI lore lines. */
+    /** Default wrap width in characters, tuned for short chat/card lines. */
     public static final int DEFAULT_WIDTH = 38;
 
     private Text() {

@@ -26,8 +26,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 /**
- * The native plugin-settings dialog, replacing the old chest-GUI SETTINGS
- * screen in {@link ModBrowserGui}: every reloadable {@code config.yml} knob
+ * The native plugin-settings dialog: every reloadable {@code config.yml} knob
  * (thinking effort, streaming, timeout, max tokens, retries, concurrency,
  * watchdog budgets, debug echo default) as a real form input, plus buttons to
  * open the model picker, re-read config.yml from disk, or save.

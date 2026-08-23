@@ -16,6 +16,7 @@ import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
@@ -27,23 +28,21 @@ import com.gijsm.vibemine.runtime.ModRegistry;
 import com.gijsm.vibemine.store.ModStore;
 
 /**
- * The per-mod action hub: the native dialog that replaced the chest GUI's
- * DETAIL screen. One rich, permission-aware panel per mod — icon item,
- * description, live state, current version + changelog, creator, knob count,
- * lifetime generation cost — with every action routed through its real
- * {@code /vibe} subcommand via command-running buttons (the
+ * The per-mod action hub: one rich, permission-aware native dialog per mod —
+ * icon item, description, live state, current version + changelog, creator,
+ * knob count, lifetime generation cost — with every action routed through its
+ * real {@code /vibe} subcommand via command-running buttons (the
  * {@link InfoDialogs} navButton idiom), so permissions are re-checked per
  * action and every button re-fetches fresh data. Opened by {@code /vibe info}
- * for players, by clicking a mod in {@link ModBrowserGui}'s list, and by the
+ * for players, by clicking a mod in {@link #openBrowser}'s list, and by the
  * install card's {@code [open]} button.
  *
  * <p>Also hosts {@link #openBrowser}, the native mod-browser dialog behind
- * {@code /vibe list} for players — an experiment running alongside
- * {@link ModBrowserGui}'s chest list ({@code /vibe gui}, unchanged) so both
- * surfaces can be compared in-game. It lives here rather than in its own class
- * because it needs the same live wiring (registry/store/errors, read fresh on
- * every open) and it is the hub's natural sibling: every row navigates into
- * the hub.
+ * {@code /vibe list} (and bare {@code /vibe}) for players — the plugin's main
+ * surface: the entire UI is dialogs. It lives here rather than in its own
+ * class because it needs the same live wiring (registry/store/errors, read
+ * fresh on every open) and it is the hub's natural sibling: every row
+ * navigates into the hub.
  *
  * <p>Its own class rather than another method on {@link InfoDialogs} because
  * unlike the read-only viewers it needs live wiring (registry/store/errors/
@@ -99,11 +98,7 @@ public final class ModHubDialog {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.multiAction(buildButtons(mod, enabled, degraded, admin))
-                        // Admins go back to the chest list, everyone else to the browser
-                        // dialog — the experiment keeps both surfaces side by side.
-                        .exitAction(admin
-                                ? navButton("← Back to list", "/vibe gui", "Back to the mod browser")
-                                : navButton("← Back to list", "/vibe list", "Back to the mod browser"))
+                        .exitAction(navButton("← Back to list", "/vibe list", "Back to the mod browser"))
                         .columns(3)
                         .build()));
         show(p, dialog);
@@ -113,7 +108,7 @@ public final class ModHubDialog {
 
     /**
      * Opens the native mod browser: one summary line plus one command-routed
-     * button per stored mod (store order, same as the chest list), each opening
+     * button per stored mod (store order), each opening
      * that mod's hub via {@code /vibe info} — stateless navigation, so the hub's
      * own permission handling applies. Admins get a trailing ⚙ Settings button.
      */
@@ -165,8 +160,8 @@ public final class ModHubDialog {
 
     /**
      * One browser row: {@code "● Name vN"} — dot and name colored by state (the
-     * same green/gold/gray as {@link #stateLine} and the chest list), version
-     * dark-gray; the tooltip carries the detail.
+     * same green/gold/gray as {@link #stateLine}), version dark-gray; the
+     * tooltip carries the detail.
      */
     private ActionButton modButton(ModStore.StoredMod mod, boolean enabled, boolean degraded) {
         NamedTextColor stateColor = degraded ? NamedTextColor.GOLD
@@ -206,7 +201,7 @@ public final class ModHubDialog {
         NamedTextColor nameColor = degraded ? NamedTextColor.GOLD
                 : (enabled ? NamedTextColor.GREEN : NamedTextColor.GRAY);
         List<DialogBody> body = new ArrayList<>();
-        body.add(DialogBody.item(new ItemStack(ModBrowserGui.resolveIcon(mod.icon())))
+        body.add(DialogBody.item(new ItemStack(resolveIcon(mod.icon())))
                 .description(DialogBody.plainMessage(Component.text(mod.name(), nameColor)))
                 .build());
         body.add(DialogBody.plainMessage(Component.text(mod.description(), NamedTextColor.GRAY), PROSE_WIDTH));
@@ -224,6 +219,20 @@ public final class ModHubDialog {
                 NamedTextColor.DARK_GRAY), PROSE_WIDTH));
         body.add(DialogBody.plainMessage(Component.text(costLine(mod), NamedTextColor.DARK_GRAY), PROSE_WIDTH));
         return body;
+    }
+
+    /**
+     * Resolves a mod's icon Material from its stored {@code icon} name, falling back to
+     * {@link Material#PAPER} when the name is blank, unrecognized, or not a real item.
+     */
+    private static Material resolveIcon(String icon) {
+        if (icon != null && !icon.isBlank()) {
+            Material m = Material.matchMaterial(icon);
+            if (m != null && m.isItem()) {
+                return m;
+            }
+        }
+        return Material.PAPER;
     }
 
     /** {@code "● running" / "● degraded (n errors)" / "● off"} — same wording as the list items. */

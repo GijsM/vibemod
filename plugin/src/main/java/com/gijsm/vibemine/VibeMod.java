@@ -31,7 +31,6 @@ import com.gijsm.vibemine.store.ModStore;
 import com.gijsm.vibemine.ui.ChatMode;
 import com.gijsm.vibemine.ui.Dialogs;
 import com.gijsm.vibemine.ui.InstallCard;
-import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.ModHubDialog;
 import com.gijsm.vibemine.ui.Progress;
 import com.gijsm.vibemine.ui.SettingsDialog;
@@ -132,13 +131,11 @@ public final class VibeMod extends JavaPlugin {
         settingsDialog = new SettingsDialog(this, this::settingsSnapshot, this::applySettings,
                 this::openSettingsModelPicker, this::reloadVibeConfig);
         ModHubDialog hub = new ModHubDialog(this, registry, store, modErrors, debugEcho);
-        ModBrowserGui gui = new ModBrowserGui(this, registry, store, modErrors,
-                settingsDialog::open, hub::open);
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
             VibeCommand handler = new VibeCommand(this, generator, registry, store, configs,
-                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, settingsDialog, hub,
+                    modErrors, debugEcho, catalog, exporter, chatMode, dialogs, settingsDialog, hub,
                     client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
                     this::reloadVibeConfig);
             vibe.setExecutor(handler);

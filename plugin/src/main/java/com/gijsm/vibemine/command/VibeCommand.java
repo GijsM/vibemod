@@ -36,7 +36,6 @@ import com.gijsm.vibemine.ui.ChatMode;
 import com.gijsm.vibemine.ui.Dialogs;
 import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
-import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.ModHubDialog;
 import com.gijsm.vibemine.ui.Progress;
 import com.gijsm.vibemine.ui.SettingsDialog;
@@ -61,7 +60,7 @@ public final class VibeCommand implements TabExecutor {
     private static final List<String> SUBCOMMANDS = List.of(
             "make", "edit", "again", "list", "source", "info", "manual", "config", "set", "book",
             "rollback", "history", "enable", "disable", "delete", "export", "do", "model", "costs", "chat",
-            "gui", "settings", "reload", "panic", "errors", "fix", "debug", "help");
+            "settings", "reload", "panic", "errors", "fix", "debug", "help");
     private static final Set<String> READ_ONLY = Set.of(
             "list", "source", "info", "manual", "history", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
@@ -80,7 +79,6 @@ public final class VibeCommand implements TabExecutor {
     private final DebugEcho debug;
     private final ModelCatalog catalog;
     private final JarExporter exporter;
-    private final ModBrowserGui gui;
     private final ChatMode chatMode;
     private final Dialogs dialogs;
     private final SettingsDialog settingsDialog;
@@ -105,14 +103,14 @@ public final class VibeCommand implements TabExecutor {
 
     /**
      * {@code catalog} was added (dynamic model picker + cost visibility feature) right
-     * after {@code debug}, mirroring {@link ModBrowserGui}'s constructor; {@code
-     * sessionCost} was added right after {@code setModel} since it is model-related, like
-     * {@code getModel}/{@code setModel}; {@code hub} (mod hub dialog feature) sits right
-     * after {@code settingsDialog} since it is the next dialog surface.
+     * after {@code debug}; {@code sessionCost} was added right after {@code setModel}
+     * since it is model-related, like {@code getModel}/{@code setModel}; {@code hub}
+     * (mod hub dialog feature) sits right after {@code settingsDialog} since it is the
+     * next dialog surface.
      */
     public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
                         ModConfigs configs, ModErrors errors, DebugEcho debug, ModelCatalog catalog,
-                        JarExporter exporter, ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs,
+                        JarExporter exporter, ChatMode chatMode, Dialogs dialogs,
                         SettingsDialog settingsDialog, ModHubDialog hub,
                         Supplier<String> getModel, Consumer<String> setModel,
                         java.util.function.DoubleSupplier sessionCost,
@@ -126,7 +124,6 @@ public final class VibeCommand implements TabExecutor {
         this.debug = debug;
         this.catalog = catalog;
         this.exporter = exporter;
-        this.gui = gui;
         this.chatMode = chatMode;
         this.dialogs = dialogs;
         this.settingsDialog = settingsDialog;
@@ -142,7 +139,13 @@ public final class VibeCommand implements TabExecutor {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sendHelp(sender);
+            // Bare /vibe is the front door: players who may use the plugin get
+            // the mod browser; everyone else (and console) gets the help text.
+            if (sender instanceof Player player && player.hasPermission("vibe.use")) {
+                hub.openBrowser(player);
+            } else {
+                sendHelp(sender);
+            }
             return true;
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
@@ -179,7 +182,6 @@ public final class VibeCommand implements TabExecutor {
             case "model" -> cmdModel(sender, rest);
             case "costs" -> cmdCosts(sender);
             case "chat" -> cmdChat(sender);
-            case "gui" -> cmdGui(sender);
             case "settings" -> cmdSettings(sender);
             case "reload" -> cmdReload(sender, rest);
             case "panic" -> cmdPanic(sender);
@@ -827,14 +829,6 @@ public final class VibeCommand implements TabExecutor {
         }
     }
 
-    private void cmdGui(CommandSender sender) {
-        if (!(sender instanceof Player player)) {
-            error(sender, "Only players can open the mod browser.");
-            return;
-        }
-        gui.open(player);
-    }
-
     /** Players get the native settings form; console gets a plain dump of the current values. */
     private void cmdSettings(CommandSender sender) {
         if (sender instanceof Player player) {
@@ -911,7 +905,6 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe model [id]", "view/set the LLM model"));
         sender.sendMessage(helpLine("/vibe costs", "what generation has cost, per mod"));
         sender.sendMessage(helpLine("/vibe chat", "toggle chat-as-prompt mode"));
-        sender.sendMessage(helpLine("/vibe gui", "open the mod browser"));
         sender.sendMessage(helpLine("/vibe settings", "open the plugin settings"));
         sender.sendMessage(helpLine("/vibe reload [mod]", "re-read config.yml, or recompile one mod"));
         sender.sendMessage(helpLine("/vibe panic", "disable all mods"));
