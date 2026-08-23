@@ -10,7 +10,9 @@ import org.bukkit.entity.Player;
  * Actions the mod browser GUI cannot perform on its own and instead delegates
  * back to the wiring layer: exporting a jar, reapplying a rolled-back
  * version (the per-mod [⟟ reload] button), opening the configure/edit/fix
- * dialogs, opening the manual/source/errors viewer dialogs, reloading
+ * dialogs, opening the manual/source/errors/history viewer dialogs -
+ * {@code openHistory} (version timeline feature) is declared right after
+ * {@code openErrors} since it is the fourth viewer dialog - reloading
  * {@code config.yml}, reading/writing the active LLM model, and (new in the
  * dynamic model picker feature) opening the model-picker dialog itself -
  * {@code pickModel} is declared right after {@code getModel}/{@code setModel}
@@ -27,6 +29,7 @@ public record GuiCallbacks(BiConsumer<Player, String> export,
                            BiConsumer<Player, String> openManual,
                            BiConsumer<Player, String> openSource,
                            BiConsumer<Player, String> openErrors,
+                           BiConsumer<Player, String> openHistory,
                            Runnable reloadConfig,
                            Supplier<String> getModel, Consumer<String> setModel,
                            Consumer<Player> pickModel,

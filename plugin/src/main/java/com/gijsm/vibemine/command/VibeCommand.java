@@ -44,26 +44,28 @@ import com.gijsm.vibemine.ui.VirtualBooks;
 
 /**
  * The {@code /vibe} command: generate, edit, tune, and manage in-game mods.
- * Read-only subcommands (list/source/info/manual/errors/help) require
+ * Read-only subcommands (list/source/info/manual/history/errors/help) require
  * {@code vibe.use}; everything else requires {@code vibe.admin}.
  *
  * <p>Typing UX moved to native dialogs in v3: {@code make}/{@code edit} with
  * no free-text description, {@code config}, and {@code book} all open a
  * {@link Dialogs} popup for players (console/RCON keeps working exactly as
  * before by supplying the text inline). Reading ({@code manual}/{@code source}/
- * {@code errors}) opens native dialogs via {@link InfoDialogs} for players;
- * console gets the same content as {@link VirtualBooks} chat dumps.
+ * {@code errors}/{@code history}) opens native dialogs via {@link InfoDialogs}
+ * for players; console gets the same content as {@link VirtualBooks}-style
+ * chat dumps.
  */
 public final class VibeCommand implements TabExecutor {
 
     private static final List<String> SUBCOMMANDS = List.of(
             "make", "edit", "again", "list", "source", "info", "manual", "config", "set", "book",
-            "rollback", "enable", "disable", "delete", "export", "do", "model", "chat", "gui",
+            "rollback", "history", "enable", "disable", "delete", "export", "do", "model", "chat", "gui",
             "reload", "panic", "errors", "fix", "debug", "help");
-    private static final Set<String> READ_ONLY = Set.of("list", "source", "info", "manual", "errors", "help");
+    private static final Set<String> READ_ONLY = Set.of(
+            "list", "source", "info", "manual", "history", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
             "edit", "again", "source", "info", "manual", "config", "set", "book",
-            "rollback", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug");
+            "rollback", "history", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug");
     private static final int FIX_ERROR_LINES = 8;
     private static final int CONSOLE_ERROR_LINES = 25;
 
@@ -149,6 +151,7 @@ public final class VibeCommand implements TabExecutor {
             case "set" -> cmdSet(sender, rest);
             case "book" -> cmdBook(sender, rest);
             case "rollback" -> cmdRollback(sender, rest);
+            case "history" -> cmdHistory(sender, rest);
             case "enable" -> cmdEnable(sender, rest);
             case "disable" -> cmdDisable(sender, rest);
             case "delete" -> cmdDelete(sender, rest);
@@ -431,18 +434,99 @@ public final class VibeCommand implements TabExecutor {
 
     private void cmdRollback(CommandSender sender, String[] args) {
         if (args.length < 1) {
-            error(sender, "Usage: /vibe rollback <mod>");
+            error(sender, "Usage: /vibe rollback <mod> [version]");
             return;
         }
         String modName = args[0];
-        if (!store.rollback(modName)) {
-            error(sender, "Can't roll back " + modName + " (already at v1 or unknown).");
+        if (args.length == 1) {
+            // The classic one-step rollback, byte-identical in behavior.
+            if (!store.rollback(modName)) {
+                error(sender, "Can't roll back " + modName + " (already at v1 or unknown).");
+                return;
+            }
+            applyVersion.accept(sender, modName);
+            ModStore.StoredMod mod = store.get(modName);
+            int version = mod != null ? mod.currentVersion() : -1;
+            sender.sendMessage(Style.ok("Rolled back " + modName + " to v" + version + "."));
             return;
         }
-        applyVersion.accept(sender, modName);
         ModStore.StoredMod mod = store.get(modName);
-        int version = mod != null ? mod.currentVersion() : -1;
-        sender.sendMessage(Style.ok("Rolled back " + modName + " to v" + version + "."));
+        if (mod == null) {
+            error(sender, "Unknown mod: " + modName);
+            return;
+        }
+        int version;
+        try {
+            version = Integer.parseInt(args[1]);
+        } catch (NumberFormatException bad) {
+            error(sender, "Usage: /vibe rollback <mod> [version]");
+            return;
+        }
+        ModStore.StoredVersion target = null;
+        for (ModStore.StoredVersion v : mod.versions()) {
+            if (v.version() == version) {
+                target = v;
+            }
+        }
+        if (target == null) {
+            error(sender, mod.name() + " has no v" + version + ".");
+            return;
+        }
+        if (version == mod.currentVersion()) {
+            sender.sendMessage(Style.info(mod.name() + " v" + version + " is already active."));
+            return;
+        }
+        if (!store.versionsOnDisk(mod.name()).contains(version)) {
+            error(sender, mod.name() + " v" + version + "'s sources are missing on disk.");
+            return;
+        }
+        boolean confirmed = args.length >= 3 && args[2].equalsIgnoreCase("confirm");
+        if (sender instanceof Player player && !confirmed) {
+            String changelog = !target.changelog().isBlank() ? target.changelog() : target.prompt();
+            dialogs.openRollbackConfirm(player, mod.name(), version, changelog);
+            return;
+        }
+        store.setCurrentVersion(mod.name(), version);
+        applyVersion.accept(sender, modName);
+        sender.sendMessage(Style.ok("Activated " + mod.name() + " v" + version + "."));
+    }
+
+    private void cmdHistory(CommandSender sender, String[] args) {
+        if (args.length < 1) {
+            error(sender, "Usage: /vibe history <mod>");
+            return;
+        }
+        String modName = args[0];
+        ModStore.StoredMod mod = store.get(modName);
+        if (mod == null) {
+            error(sender, "Unknown mod: " + modName);
+            return;
+        }
+        if (sender instanceof Player player) {
+            infoDialogs.openHistory(player, mod, store.versionsOnDisk(mod.name()));
+            return;
+        }
+        sender.sendMessage(Component.text(mod.name() + " — " + mod.versions().size()
+                + " version(s), v" + mod.currentVersion() + " active:", NamedTextColor.GOLD));
+        List<ModStore.StoredVersion> versions = mod.versions();
+        for (int i = versions.size() - 1; i >= 0; i--) {
+            ModStore.StoredVersion v = versions.get(i);
+            List<String> segments = new ArrayList<>();
+            segments.add((v.version() == mod.currentVersion() ? "● " : "") + "v" + v.version());
+            if (!v.kind().isBlank()) {
+                segments.add(v.kind());
+            }
+            segments.add(InfoDialogs.relativeTime(v.createdAt()));
+            if (v.costUsd() > 0) {
+                segments.add(Style.fmtCost(v.costUsd()));
+            }
+            if (!v.requester().isBlank()) {
+                segments.add("by " + v.requester());
+            }
+            String changelog = !v.changelog().isBlank() ? v.changelog() : v.prompt();
+            sender.sendMessage(Component.text(String.join(" · ", segments) + " — " + changelog,
+                    NamedTextColor.GRAY));
+        }
     }
 
     private void cmdEnable(CommandSender sender, String[] args) {
@@ -690,7 +774,9 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe errors <mod>", "view a mod's deduped error log"));
         sender.sendMessage(helpLine("/vibe fix <mod>", "send recent errors to the model for a repair round"));
         sender.sendMessage(helpLine("/vibe debug <mod> [on|off]", "toggle live ctx.log()/exception echo to ops"));
-        sender.sendMessage(helpLine("/vibe rollback <mod>", "revert to the previous version"));
+        sender.sendMessage(helpLine("/vibe rollback <mod> [version]",
+                "revert one version back, or activate a specific one"));
+        sender.sendMessage(helpLine("/vibe history <mod>", "browse and activate previous versions"));
         sender.sendMessage(helpLine("/vibe enable|disable <mod>", "toggle a mod"));
         sender.sendMessage(helpLine("/vibe delete <mod>", "permanently remove a mod"));
         sender.sendMessage(helpLine("/vibe export <mod>", "export a standalone plugin jar"));
@@ -746,6 +832,19 @@ public final class VibeCommand implements TabExecutor {
                 }
                 return startsWithFilter(ids, args[1]);
             }
+        }
+        if (args.length == 3 && sub.equals("rollback")) {
+            List<String> versions = new ArrayList<>();
+            ModStore.StoredMod mod = store.get(args[1]);
+            if (mod != null) {
+                for (ModStore.StoredVersion v : mod.versions()) {
+                    versions.add(Integer.toString(v.version()));
+                }
+            }
+            return startsWithFilter(versions, args[2]);
+        }
+        if (args.length == 4 && sub.equals("rollback")) {
+            return startsWithFilter(List.of("confirm"), args[3]);
         }
         if (args.length == 3 && sub.equals("do")) {
             ModHandle handle = registry.get(args[1]);

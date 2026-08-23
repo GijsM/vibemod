@@ -3,6 +3,7 @@ package com.gijsm.vibemine.ui;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -29,20 +30,22 @@ import com.gijsm.vibemine.runtime.ModHandle;
 import com.gijsm.vibemine.store.ModStore;
 
 /**
- * Native dialog reading surfaces: the player-facing manual, source, and
- * recent-errors viewers, replacing the virtual books {@link VirtualBooks}
- * used to open ({@code VirtualBooks} keeps only its console {@code dump*}
- * role). Dialog bodies scroll, so there is no pagination here — the manual
- * renders its Markdown via {@link MarkdownMini}, source files render whole.
+ * Native dialog reading surfaces: the player-facing manual, source,
+ * recent-errors, and version-history viewers, replacing the virtual books
+ * {@link VirtualBooks} used to open ({@code VirtualBooks} keeps only its
+ * console {@code dump*} role). Dialog bodies scroll, so there is no pagination
+ * here — the manual renders its Markdown via {@link MarkdownMini}, source
+ * files render whole.
  *
  * <p>Same experimental-API and threading posture as {@link Dialogs}:
  * {@code UnstableApiUsage} suppressed file-wide, every dialog shown on the
  * main thread, every callback hops back to the main thread and never lets an
  * exception escape into Bukkit.
  *
- * <p>Cross-navigation between the three viewers (and Back from a source file
- * to the file index) runs the corresponding read-only {@code /vibe}
- * subcommand via {@link DialogAction#staticAction} — the same idiom as
+ * <p>Cross-navigation between the four viewers (and Back from a source file
+ * to the file index, or from a version detail to the timeline) runs the
+ * corresponding read-only {@code /vibe} subcommand via
+ * {@link DialogAction#staticAction} — the same idiom as
  * {@link Dialogs#openFixConfirm} — so the viewers need no data suppliers of
  * their own beyond what each call passes in.
  */
@@ -220,8 +223,12 @@ public final class InfoDialogs {
         show(p, dialog);
     }
 
-    /** Coarse "Ns/Nm/Nh/Nd ago" relative-time formatting for a {@code lastSeen} epoch millis. */
-    private static String relativeTime(long epochMillis) {
+    /**
+     * Coarse "Ns/Nm/Nh/Nd ago" relative-time formatting for an epoch millis (error
+     * records' {@code lastSeen}, version entries' {@code createdAt}). Public so
+     * {@code VibeCommand}'s console history dump can reuse it.
+     */
+    public static String relativeTime(long epochMillis) {
         long deltaMs = System.currentTimeMillis() - epochMillis;
         if (deltaMs < 0) {
             deltaMs = 0;
@@ -240,6 +247,147 @@ public final class InfoDialogs {
         }
         long days = hours / 24;
         return days + "d ago";
+    }
+
+    // ---- history ----
+
+    /**
+     * Opens {@code mod}'s version timeline: one button per stored version, newest
+     * first, ● marking the active version; clicking a row opens that version's
+     * detail dialog with an Activate flow. {@code onDisk} holds the version
+     * numbers whose {@code v<N>/} sources still exist, gating Activate.
+     */
+    public void openHistory(Player p, ModStore.StoredMod mod, Set<Integer> onDisk) {
+        List<ModStore.StoredVersion> versions = mod.versions();
+        List<ActionButton> buttons = new ArrayList<>();
+        for (int i = versions.size() - 1; i >= 0; i--) {
+            ModStore.StoredVersion v = versions.get(i);
+            boolean active = v.version() == mod.currentVersion();
+            StringBuilder label = new StringBuilder(active ? "● " : "").append("v").append(v.version());
+            if (v.kind() != null && !v.kind().isBlank()) {
+                label.append(" · ").append(v.kind());
+            }
+            label.append(" · ").append(relativeTime(v.createdAt()));
+            buttons.add(ActionButton.builder(Component.text(label.toString()))
+                    .tooltip(versionTooltip(v, onDisk.contains(v.version())))
+                    .width(FILE_BUTTON_WIDTH)
+                    .action(openVersionAction(mod, v, active, onDisk.contains(v.version())))
+                    .build());
+        }
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text(mod.name() + " — history"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                versions.size() + " versions · v" + mod.currentVersion() + " active",
+                                NamedTextColor.GRAY))))
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.multiAction(buttons).exitAction(doneButton()).columns(1).build()));
+        show(p, dialog);
+    }
+
+    /** Timeline row tooltip: changelog (fallback: truncated prompt) plus blank-safe metadata. */
+    private static Component versionTooltip(ModStore.StoredVersion v, boolean onDisk) {
+        Component tip = Component.text(changelogOrPrompt(v), NamedTextColor.GRAY);
+        String meta = joinedMeta(v, false);
+        if (!meta.isEmpty()) {
+            tip = tip.append(Component.newline())
+                    .append(Component.text(meta, NamedTextColor.DARK_GRAY));
+        }
+        if (!onDisk) {
+            tip = tip.append(Component.newline())
+                    .append(Component.text("(sources missing on disk)", NamedTextColor.RED));
+        }
+        return tip;
+    }
+
+    /** Click action for one timeline row: hop to the main thread and open that version's detail. */
+    private DialogAction openVersionAction(ModStore.StoredMod mod, ModStore.StoredVersion v,
+                                            boolean active, boolean onDisk) {
+        return DialogAction.customClick((view, audience) ->
+                        Bukkit.getScheduler().runTask(plugin, () -> {
+                            if (!(audience instanceof Player player)) {
+                                return;
+                            }
+                            try {
+                                player.showDialog(versionDialog(mod, v, active, onDisk));
+                            } catch (Exception e) {
+                                LOG.log(Level.WARNING, "Version dialog failed", e);
+                                player.sendMessage(Style.err("Could not open v" + v.version() + ": "
+                                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
+                            }
+                        }),
+                ClickCallback.Options.builder().uses(1).build());
+    }
+
+    /**
+     * One version's detail: changelog, prompt, and joined metadata as body blocks;
+     * {@code ⚡ Activate} routes through {@code /vibe rollback <mod> <n>} (confirm
+     * dialog + permission check included) and is omitted when the version is
+     * already active or its sources are gone.
+     */
+    private static Dialog versionDialog(ModStore.StoredMod mod, ModStore.StoredVersion v,
+                                         boolean active, boolean onDisk) {
+        List<DialogBody> body = new ArrayList<>();
+        body.add(DialogBody.plainMessage(Component.text(changelogOrPrompt(v), NamedTextColor.GRAY), PROSE_WIDTH));
+        if (v.prompt() != null && !v.prompt().isBlank()) {
+            body.add(DialogBody.plainMessage(
+                    Component.text("Prompt: " + v.prompt(), NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+        }
+        String meta = joinedMeta(v, true);
+        if (!onDisk) {
+            meta = meta.isEmpty() ? "(sources missing on disk)" : meta + " · (sources missing on disk)";
+        }
+        if (!meta.isEmpty()) {
+            body.add(DialogBody.plainMessage(Component.text(meta, NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+        }
+
+        List<ActionButton> nav = new ArrayList<>();
+        if (!active && onDisk) {
+            nav.add(navButton("⚡ Activate", "/vibe rollback " + mod.name() + " " + v.version(),
+                    "Recompile and hot-load this version (asks to confirm)"));
+        }
+        nav.add(navButton("← Back", "/vibe history " + mod.name(), "Back to the version timeline"));
+        return Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text(mod.name() + " — v" + v.version()
+                                + (active ? " (active)" : "")))
+                        .body(body)
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.multiAction(nav).exitAction(doneButton()).columns(nav.size()).build()));
+    }
+
+    /** The version's changelog, or its stored prompt (truncated to one line) for pre-changelog entries. */
+    private static String changelogOrPrompt(ModStore.StoredVersion v) {
+        if (v.changelog() != null && !v.changelog().isBlank()) {
+            return v.changelog();
+        }
+        String prompt = v.prompt() == null ? "" : v.prompt().replace('\n', ' ').trim();
+        return prompt.length() <= 100 ? prompt : prompt.substring(0, 97) + "…";
+    }
+
+    /**
+     * " · "-joined blank-safe metadata for one version: kind and relative time only when
+     * {@code full} (the tooltip's row label already shows those), then model, cost when
+     * paid, requester when known.
+     */
+    private static String joinedMeta(ModStore.StoredVersion v, boolean full) {
+        List<String> meta = new ArrayList<>();
+        if (full && v.kind() != null && !v.kind().isBlank()) {
+            meta.add(v.kind());
+        }
+        if (v.model() != null && !v.model().isBlank()) {
+            meta.add(v.model());
+        }
+        if (full) {
+            meta.add(relativeTime(v.createdAt()));
+        }
+        if (v.costUsd() > 0) {
+            meta.add(Style.fmtCost(v.costUsd()));
+        }
+        if (v.requester() != null && !v.requester().isBlank()) {
+            meta.add("by " + v.requester());
+        }
+        return String.join(" · ", meta);
     }
 
     // ---- shared plumbing ----

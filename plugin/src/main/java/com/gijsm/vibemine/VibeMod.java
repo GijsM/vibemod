@@ -139,6 +139,7 @@ public final class VibeMod extends JavaPlugin {
                         (player, mod) -> openManual(player, mod),
                         (player, mod) -> openSource(player, mod),
                         (player, mod) -> infoDialogs.openErrors(player, mod, modErrors.recent(mod)),
+                        this::openHistory,
                         this::reloadVibeConfig,
                         client::model,
                         this::setModel,
@@ -340,6 +341,15 @@ public final class VibeMod extends JavaPlugin {
         }
         infoDialogs.openSource(player, mod.name(), mod.currentVersion(),
                 store.sources(mod.name(), mod.currentVersion()));
+    }
+
+    private void openHistory(Player player, String modName) {
+        ModStore.StoredMod mod = store.get(modName);
+        if (mod == null) {
+            player.sendMessage(Style.err("Unknown mod: " + modName));
+            return;
+        }
+        infoDialogs.openHistory(player, mod, store.versionsOnDisk(mod.name()));
     }
 
     private void exportMod(Player player, String modName, JarExporter exporter) {

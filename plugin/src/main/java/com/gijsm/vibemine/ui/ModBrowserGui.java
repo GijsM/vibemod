@@ -340,8 +340,8 @@ public final class ModBrowserGui implements Listener {
         inv.setItem(SLOT_MANUAL, button(Material.BOOK, "[📖 manual]", Style.ACTION, "Open the manual"));
         inv.setItem(SLOT_SOURCE, button(Material.PAPER, "[<> source]", Style.ACTION, "Open the source"));
         inv.setItem(SLOT_ERRORS, button(Material.OBSERVER, "[⚠ errors]", Style.WARN, "Open the error log"));
-        inv.setItem(SLOT_ROLLBACK, button(Material.CLOCK, "[rollback]", NamedTextColor.YELLOW,
-                "Revert to the previous version"));
+        inv.setItem(SLOT_ROLLBACK, button(Material.CLOCK, "[history]", NamedTextColor.YELLOW,
+                "Browse and activate previous versions"));
         inv.setItem(SLOT_EXPORT, button(Material.CHEST, "[export]", Style.ACTION, "Export a standalone plugin jar"));
         inv.setItem(SLOT_DELETE, deleteButton(session));
         inv.setItem(SLOT_BACK, button(Material.ARROW, "[← back]", NamedTextColor.GRAY, "Back to the mod list"));
@@ -361,7 +361,9 @@ public final class ModBrowserGui implements Listener {
             lore.addAll(Text.wrap("Try: " + mod.usage(), Text.DEFAULT_WIDTH, NamedTextColor.YELLOW));
         }
         lore.add(stateDotLine(enabled, degraded, live));
-        lore.add(plain("v" + mod.currentVersion(), NamedTextColor.DARK_GRAY));
+        lore.add(plain(mod.versions().size() > 1
+                ? "v" + mod.currentVersion() + " of " + mod.versions().size()
+                : "v" + mod.currentVersion(), NamedTextColor.DARK_GRAY));
         lore.add(plain("by " + mod.creator(), NamedTextColor.DARK_GRAY));
         int knobs = configs.schema(mod.name()).size();
         lore.add(plain(knobs == 0 ? "No configurable settings" : knobs + " config knob(s)", NamedTextColor.DARK_GRAY));
@@ -447,9 +449,9 @@ public final class ModBrowserGui implements Listener {
                 cb.openErrors().accept(player, modName);
             }
             case SLOT_ROLLBACK -> {
+                // No refreshDetail: the history dialog replaces this screen.
                 click(player);
-                rollback(player, modName);
-                refreshDetail(player);
+                cb.openHistory().accept(player, modName);
             }
             case SLOT_EXPORT -> {
                 click(player);
@@ -519,18 +521,6 @@ public final class ModBrowserGui implements Listener {
             store.setEnabled(modName, true);
             info(player, modName + " enabled.");
         }
-    }
-
-    private void rollback(Player player, String modName) {
-        boolean ok = store.rollback(modName);
-        if (!ok) {
-            warn(player, "Can't roll back " + modName + " (already at v1 or unknown).");
-            return;
-        }
-        cb.applyVersion().accept(player, modName);
-        ModStore.StoredMod mod = store.get(modName);
-        int version = mod != null ? mod.currentVersion() : -1;
-        info(player, "Rolled back " + modName + " to v" + version + ".");
     }
 
     // ---- SETTINGS screen ----

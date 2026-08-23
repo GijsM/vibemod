@@ -32,8 +32,10 @@ import com.gijsm.vibemine.gen.GeneratedProject.ConfigKnob;
  * called both from the async generation pipeline and from the main thread.
  *
  * v1-shaped {@code meta.json} files (written before {@code usage}/{@code manual}/
- * {@code config}/{@code configValues} existed) deserialize with those fields
- * null; every read of a {@link StoredMod} out of this class is normalized so
+ * {@code config}/{@code configValues} existed, or before {@code versions[]}
+ * entries carried {@code changelog}/{@code kind}/{@code costUsd}/{@code requester})
+ * deserialize with those fields null (Gson defaults a missing double to 0.0);
+ * every read of a {@link StoredMod} out of this class is normalized so
  * callers never see a null where an empty string/list/map belongs.
  */
 public final class ModStore {
@@ -44,8 +46,15 @@ public final class ModStore {
 
     private final Path modsDir;
 
-    /** One stored version's generation metadata. */
-    public record StoredVersion(int version, String prompt, String model, long createdAt) {
+    /**
+     * One stored version's generation metadata. {@code changelog} is one player-facing
+     * line describing what this version changed, {@code kind} the change type
+     * (create/edit/fix/again), {@code costUsd} the real generation cost of this version,
+     * and {@code requester} who asked for it — all four normalized to {@code ""}/0.0 for
+     * entries written before they existed.
+     */
+    public record StoredVersion(int version, String prompt, String model, long createdAt,
+                                 String changelog, String kind, double costUsd, String requester) {
     }
 
     /**
@@ -102,9 +111,12 @@ public final class ModStore {
      * '..', must end in {@code .java}. {@code usage}/{@code manual}/{@code config}
      * are taken from {@code project}; any previously stored config values whose
      * key still appears in the new schema are carried forward, others dropped.
+     * {@code changelog}/{@code kind}/{@code costUsd}/{@code requester} are recorded
+     * on the new version entry (null strings become {@code ""}).
      */
     public synchronized StoredMod saveNewVersion(String name, String description, String mainClass, String creator,
-                                                  String prompt, String model, GeneratedProject project) {
+                                                  String prompt, String model, String changelog, String kind,
+                                                  double costUsd, String requester, GeneratedProject project) {
         Path dir = resolveDir(name);
         StoredMod existing = dir == null ? null : readMeta(dir);
         if (dir == null) {
@@ -125,7 +137,8 @@ public final class ModStore {
         }
 
         List<StoredVersion> versions = existing == null ? new ArrayList<>() : new ArrayList<>(existing.versions());
-        versions.add(new StoredVersion(nextVersion, prompt, model, System.currentTimeMillis()));
+        versions.add(new StoredVersion(nextVersion, prompt, model, System.currentTimeMillis(),
+                nullToEmpty(changelog), nullToEmpty(kind), costUsd, nullToEmpty(requester)));
 
         String effectiveCreator = existing == null ? nullToEmpty(creator) : existing.creator();
 
@@ -193,6 +206,25 @@ public final class ModStore {
                 mod.mainClass(), version, mod.enabled(), mod.creator(), mod.versions(), mod.config(),
                 mod.configValues());
         writeMeta(dir, updated);
+    }
+
+    /**
+     * Version numbers whose {@code v<N>/} sources directory still exists on disk.
+     * Guards activating a version whose sources were pruned or lost.
+     */
+    public synchronized Set<Integer> versionsOnDisk(String name) {
+        Set<Integer> result = new HashSet<>();
+        Path dir = resolveDir(name);
+        StoredMod mod = dir == null ? null : readMeta(dir);
+        if (mod == null) {
+            return result;
+        }
+        for (StoredVersion v : mod.versions()) {
+            if (Files.isDirectory(dir.resolve("v" + v.version()))) {
+                result.add(v.version());
+            }
+        }
+        return result;
     }
 
     /** Enables or disables a mod without touching its version history. */
@@ -462,9 +494,11 @@ public final class ModStore {
     /**
      * Normalizes a {@link StoredMod} straight off disk: null {@code usage}/{@code manual}/
      * {@code icon}/{@code creator} become {@code ""}, null {@code versions}/{@code config}
-     * become {@code List.of()}, and a null {@code configValues} becomes {@code Map.of()}.
-     * This is the single point where old, v1-shaped {@code meta.json} files (which predate
-     * these fields) are made safe for every caller.
+     * become {@code List.of()}, a null {@code configValues} becomes {@code Map.of()}, and
+     * version entries written before {@code changelog}/{@code kind}/{@code requester}
+     * existed get those normalized to {@code ""} (Gson already defaults a missing
+     * {@code costUsd} to 0.0). This is the single point where old-shaped {@code meta.json}
+     * files (which predate these fields) are made safe for every caller.
      */
     private static StoredMod normalize(StoredMod mod) {
         if (mod == null) {
@@ -480,9 +514,37 @@ public final class ModStore {
                 mod.currentVersion(),
                 mod.enabled(),
                 nullToEmpty(mod.creator()),
-                mod.versions() == null ? List.of() : mod.versions(),
+                normalizeVersions(mod.versions()),
                 mod.config() == null ? List.of() : mod.config(),
                 mod.configValues() == null ? Map.of() : mod.configValues());
+    }
+
+    /**
+     * Rebuilds version entries whose post-v1 String fields ({@code changelog}/{@code kind}/
+     * {@code requester}) are null so they read as {@code ""}; the list is only reallocated
+     * when something actually needed fixing.
+     */
+    private static List<StoredVersion> normalizeVersions(List<StoredVersion> versions) {
+        if (versions == null) {
+            return List.of();
+        }
+        boolean needsFix = false;
+        for (StoredVersion v : versions) {
+            if (v.changelog() == null || v.kind() == null || v.requester() == null) {
+                needsFix = true;
+                break;
+            }
+        }
+        if (!needsFix) {
+            return versions;
+        }
+        List<StoredVersion> fixed = new ArrayList<>(versions.size());
+        for (StoredVersion v : versions) {
+            fixed.add(new StoredVersion(v.version(), v.prompt(), v.model(), v.createdAt(),
+                    nullToEmpty(v.changelog()), nullToEmpty(v.kind()), v.costUsd(),
+                    nullToEmpty(v.requester())));
+        }
+        return fixed;
     }
 
     private static String nullToEmpty(String s) {

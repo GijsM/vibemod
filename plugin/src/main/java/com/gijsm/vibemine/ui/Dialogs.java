@@ -35,8 +35,8 @@ import com.gijsm.vibemine.llm.ModelCatalog;
 /**
  * Native Minecraft Dialog UI ({@code io.papermc.paper.dialog}, Paper 1.21.8)
  * replacing the retired book-and-quill flows: a multiline prompt dialog for
- * {@code /vibe make}, an edit-request dialog, a per-knob config dialog, and a
- * fix confirmation.
+ * {@code /vibe make}, an edit-request dialog, a per-knob config dialog, a
+ * fix confirmation, and a rollback/activate confirmation.
  *
  * <p>The dialog API is {@code @Experimental} on this Paper version; those
  * warnings are suppressed file-wide (there is no {@code -Werror} anywhere in
@@ -50,12 +50,13 @@ import com.gijsm.vibemine.llm.ModelCatalog;
  * callback is ever allowed to propagate into Bukkit: it is caught, logged,
  * and reported to the player via {@link Style#err}.
  *
- * <p>{@link #openFixConfirm} has no injected "run the fix" callback (the
- * constructor below is the frozen v3 surface and only carries the make/edit/
- * config callbacks reused from the old book flows) - its confirm button
- * instead runs {@code /vibe fix <mod> confirm} as a real command, which
+ * <p>{@link #openFixConfirm} and {@link #openRollbackConfirm} have no injected
+ * "run it" callbacks (the constructor below is the frozen v3 surface and only
+ * carries the make/edit/config callbacks reused from the old book flows) -
+ * their confirm buttons instead run {@code /vibe fix <mod> confirm} /
+ * {@code /vibe rollback <mod> <version> confirm} as real commands, which
  * {@code VibeCommand} treats as "already confirmed, run it now" instead of
- * reopening this same dialog.
+ * reopening the same dialog.
  */
 @SuppressWarnings("UnstableApiUsage")
 public final class Dialogs {
@@ -481,6 +482,34 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(fix, notNow)));
+        show(p, dialog);
+    }
+
+    // ---- rollback confirm ----
+
+    /**
+     * Confirms activating an older stored version of {@code mod}. Same idiom as
+     * {@link #openFixConfirm}: the confirm button runs
+     * {@code /vibe rollback <mod> <version> confirm} as a real command rather than
+     * calling back into this class, which {@code VibeCommand} treats as "already
+     * confirmed, activate it now" instead of reopening this same dialog.
+     */
+    public void openRollbackConfirm(Player p, String mod, int version, String changelog) {
+        String summary = (changelog == null || changelog.isBlank()) ? "(no changelog)" : changelog;
+        ActionButton activate = ActionButton.builder(Component.text("Activate v" + version + " ⚡"))
+                .action(DialogAction.staticAction(ClickEvent.runCommand(
+                        "/vibe rollback " + mod + " " + version + " confirm")))
+                .build();
+        ActionButton notNow = ActionButton.builder(Component.text("Not now")).action(noOp()).build();
+
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text("Activate " + mod + " v" + version + "?"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Recompile and hot-load this stored version?\n\n" + summary,
+                                NamedTextColor.GRAY))))
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.confirmation(activate, notNow)));
         show(p, dialog);
     }
 

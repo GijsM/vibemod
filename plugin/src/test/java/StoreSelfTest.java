@@ -16,8 +16,10 @@ import com.gijsm.vibemine.store.ModStore;
 
 /**
  * Standalone self-test (no test framework) proving ModStore, ModConfigs and
- * JarExporter work end-to-end: disk round-trip of versions/metadata, FQCN
- * derivation, rollback semantics, path-traversal rejection, v1 meta.json
+ * JarExporter work end-to-end: disk round-trip of versions/metadata (including
+ * the per-version changelog/kind/costUsd/requester), FQCN derivation, rollback
+ * semantics, arbitrary setCurrentVersion, versionsOnDisk, path-traversal
+ * rejection, v1 meta.json
  * null-normalization, config knob validation/overlay/preservation, live
  * config caching, and a real compile + jar export (with an embedded
  * config.yml for knobbed mods) whose contents are verified with
@@ -36,6 +38,7 @@ public class StoreSelfTest {
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
         testNullFieldMetaJsonNormalized();
+        testVersionMetadataAndVersionsOnDisk();
         testIconRoundTripAndNormalization();
         testSetConfigValueValidationMatrix();
         testResolvedConfigValuesOverlay();
@@ -57,7 +60,7 @@ public class StoreSelfTest {
         ModStore store = new ModStore(modsDir);
 
         GeneratedProject project1 = new GeneratedProject("TestMod", "does a thing", "try /vibe do TestMod poke",
-                "Punch things to see what happens.", "TORCH", "TestMod", List.of(
+                "Punch things to see what happens.", null, "TORCH", "TestMod", List.of(
                 new GeneratedProject.GeneratedFile("TestMod.java",
                         "package vibemod.testmod;\n\npublic class TestMod {}\n"),
                 new GeneratedProject.GeneratedFile("Helper.java",
@@ -67,7 +70,7 @@ public class StoreSelfTest {
                 List.of(), null);
 
         ModStore.StoredMod saved = store.saveNewVersion("TestMod", "does a thing", "TestMod", "gijs",
-                "make a test mod", "model-x", project1);
+                "make a test mod", "model-x", null, null, 0.0, null, project1);
         check("saveNewVersion returns version 1", saved.currentVersion() == 1);
         check("saveNewVersion enabled true", saved.enabled());
         check("saveNewVersion has 1 version entry", saved.versions().size() == 1);
@@ -98,12 +101,12 @@ public class StoreSelfTest {
                 srcs.get("vibemod.testmod.TestMod").contains("public class TestMod"));
 
         GeneratedProject project2 = new GeneratedProject("TestMod", "does a thing v2", "usage v2", "manual v2",
-                "TORCH", "TestMod", List.of(
+                null, "TORCH", "TestMod", List.of(
                 new GeneratedProject.GeneratedFile("TestMod.java",
                         "package vibemod.testmod;\n\npublic class TestMod { void v2() {} }\n")),
                 List.of(), null);
         ModStore.StoredMod saved2 = store.saveNewVersion("TestMod", "does a thing v2", "TestMod", "someone-else",
-                "edit test mod", "model-y", project2);
+                "edit test mod", "model-y", null, null, 0.0, null, project2);
         check("saveNewVersion v2 returns version 2", saved2.currentVersion() == 2);
         check("v2 has 2 version entries", saved2.versions().size() == 2);
         check("creator preserved from original creation, not overwritten by edit call",
@@ -159,12 +162,12 @@ public class StoreSelfTest {
     }
 
     private static boolean rejectsFile(ModStore store, String name, String path) {
-        GeneratedProject bad = new GeneratedProject(name, "desc", null, null, null, name,
+        GeneratedProject bad = new GeneratedProject(name, "desc", null, null, null, null, name,
                 List.of(new GeneratedProject.GeneratedFile(path, "package vibemod." + name.toLowerCase() + ";\n"
                         + "public class " + name + " {}\n")),
                 List.of(), null);
         try {
-            store.saveNewVersion(name, "desc", name, "gijs", "p", "m", bad);
+            store.saveNewVersion(name, "desc", name, "gijs", "p", "m", null, null, 0.0, null, bad);
             return false;
         } catch (IllegalArgumentException e) {
             return true;
@@ -202,6 +205,17 @@ public class StoreSelfTest {
         check("v1 meta.json null configValues normalized to Map.of()",
                 mod.configValues() != null && mod.configValues().isEmpty());
 
+        // Version entries written before changelog/kind/costUsd/requester existed
+        // (the 21 live mods) must read back with ""/0.0 defaults, never null.
+        ModStore.StoredVersion oldVersion = mod.versions().get(0);
+        check("old-shaped version entry null changelog normalized to \"\"", "".equals(oldVersion.changelog()));
+        check("old-shaped version entry null kind normalized to \"\"", "".equals(oldVersion.kind()));
+        check("old-shaped version entry missing costUsd defaults to 0.0", oldVersion.costUsd() == 0.0);
+        check("old-shaped version entry null requester normalized to \"\"", "".equals(oldVersion.requester()));
+        check("old-shaped version entry keeps its pre-existing fields",
+                oldVersion.version() == 1 && "make an old mod".equals(oldVersion.prompt())
+                        && "model-z".equals(oldVersion.model()) && oldVersion.createdAt() == 123);
+
         // all() must normalize too.
         ModStore.StoredMod fromAll = store.all().get(0);
         check("all() also normalizes v1-shaped meta.json", "".equals(fromAll.usage())
@@ -210,26 +224,72 @@ public class StoreSelfTest {
         System.out.println("PASS: v1-shaped meta.json degrades to normalized empty fields");
     }
 
+    /**
+     * The post-v1 version metadata (changelog/kind/costUsd/requester) round-trips
+     * through disk, setCurrentVersion jumps to any (non-adjacent) stored version,
+     * and versionsOnDisk() reflects a version whose sources directory was deleted.
+     */
+    private static void testVersionMetadataAndVersionsOnDisk() throws Exception {
+        Path modsDir = tempDir("modstore-version-meta");
+        ModStore store = new ModStore(modsDir);
+
+        for (int i = 1; i <= 3; i++) {
+            GeneratedProject project = new GeneratedProject("Timeline", "desc v" + i, null, null, null, null,
+                    "Timeline", List.of(new GeneratedProject.GeneratedFile("Timeline.java",
+                            "package vibemod.timeline;\n\npublic class Timeline { /* v" + i + " */ }\n")),
+                    List.of(), null);
+            store.saveNewVersion("Timeline", "desc v" + i, "Timeline", "gijs",
+                    "prompt v" + i, "model-x", "changelog v" + i, i == 1 ? "create" : "edit",
+                    0.01 * i, "steve", project);
+        }
+
+        // New fields round-trip from disk (get() goes through readMeta every time).
+        ModStore.StoredVersion v2 = store.get("Timeline").versions().get(1);
+        check("changelog round-trips from disk", "changelog v2".equals(v2.changelog()));
+        check("kind round-trips from disk", "edit".equals(v2.kind()));
+        check("costUsd round-trips from disk", v2.costUsd() == 0.02);
+        check("requester round-trips from disk", "steve".equals(v2.requester()));
+
+        // Arbitrary, non-adjacent version pointer: v3 -> v1 persists.
+        check("fresh save leaves currentVersion at 3", store.get("Timeline").currentVersion() == 3);
+        store.setCurrentVersion("Timeline", 1);
+        check("setCurrentVersion jumps non-adjacently from v3 to v1",
+                store.get("Timeline").currentVersion() == 1);
+        check("non-adjacent setCurrentVersion leaves the version log untouched",
+                store.get("Timeline").versions().size() == 3);
+
+        check("versionsOnDisk sees all three version dirs",
+                store.versionsOnDisk("Timeline").equals(java.util.Set.of(1, 2, 3)));
+        Path v1Dir = modsDir.resolve("Timeline").resolve("v1");
+        Files.delete(v1Dir.resolve("Timeline.java"));
+        Files.delete(v1Dir);
+        check("versionsOnDisk drops a version whose v<N>/ dir was deleted",
+                store.versionsOnDisk("Timeline").equals(java.util.Set.of(2, 3)));
+        check("versionsOnDisk of an unknown mod is empty", store.versionsOnDisk("NoSuchMod").isEmpty());
+
+        System.out.println("PASS: version metadata round-trip, non-adjacent setCurrentVersion, versionsOnDisk");
+    }
+
     /** A stored icon round-trips verbatim; a project with no icon normalizes to "". */
     private static void testIconRoundTripAndNormalization() throws Exception {
         Path modsDir = tempDir("modstore-icon");
         ModStore store = new ModStore(modsDir);
 
-        GeneratedProject withIcon = new GeneratedProject("IconMod", "has an icon", null, null, "CHICKEN", "IconMod",
+        GeneratedProject withIcon = new GeneratedProject("IconMod", "has an icon", null, null, null, "CHICKEN", "IconMod",
                 List.of(new GeneratedProject.GeneratedFile("IconMod.java",
                         "package vibemod.iconmod;\n\npublic class IconMod {}\n")),
                 List.of(), null);
         ModStore.StoredMod saved = store.saveNewVersion("IconMod", "has an icon", "IconMod", "gijs",
-                "make icon mod", "model-x", withIcon);
+                "make icon mod", "model-x", null, null, 0.0, null, withIcon);
         check("saveNewVersion carries icon from project", "CHICKEN".equals(saved.icon()));
         check("get() round-trips icon from disk", "CHICKEN".equals(store.get("IconMod").icon()));
 
-        GeneratedProject noIcon = new GeneratedProject("NoIconMod", "no icon here", null, null, null, "NoIconMod",
+        GeneratedProject noIcon = new GeneratedProject("NoIconMod", "no icon here", null, null, null, null, "NoIconMod",
                 List.of(new GeneratedProject.GeneratedFile("NoIconMod.java",
                         "package vibemod.noiconmod;\n\npublic class NoIconMod {}\n")),
                 List.of(), null);
         ModStore.StoredMod savedNoIcon = store.saveNewVersion("NoIconMod", "no icon here", "NoIconMod", "gijs",
-                "make no-icon mod", "model-x", noIcon);
+                "make no-icon mod", "model-x", null, null, 0.0, null, noIcon);
         check("saveNewVersion normalizes a missing icon to \"\"", "".equals(savedNoIcon.icon()));
         check("get() round-trips normalized empty icon", "".equals(store.get("NoIconMod").icon()));
 
@@ -238,11 +298,12 @@ public class StoreSelfTest {
 
     private static ModStore.StoredMod saveModWithConfig(ModStore store, String name, List<ConfigKnob> config)
             throws Exception {
-        GeneratedProject project = new GeneratedProject(name, "a configurable mod", "usage", "manual", null, name,
+        GeneratedProject project = new GeneratedProject(name, "a configurable mod", "usage", "manual", null, null, name,
                 List.of(new GeneratedProject.GeneratedFile(name + ".java",
                         "package vibemod." + name.toLowerCase() + ";\n\npublic class " + name + " {}\n")),
                 config, null);
-        return store.saveNewVersion(name, "a configurable mod", name, "gijs", "make it", "model-x", project);
+        return store.saveNewVersion(name, "a configurable mod", name, "gijs", "make it", "model-x",
+                null, null, 0.0, null, project);
     }
 
     private static List<ConfigKnob> baseSchema() {
@@ -398,7 +459,7 @@ public class StoreSelfTest {
 
         ModStore.StoredMod mod = new ModStore.StoredMod("Trivial", "A trivial export test mod", "", "", "",
                 "TrivialMod", 1, true, "gijs", List.of(new ModStore.StoredVersion(1, "make a trivial mod", "model-x",
-                        System.currentTimeMillis())), List.of(), Map.of());
+                        System.currentTimeMillis(), "", "", 0.0, "")), List.of(), Map.of());
 
         Path outDir = tempDir("jarexport-out");
         JarExporter exporter = new JarExporter(new InMemoryCompiler());
@@ -476,7 +537,8 @@ public class StoreSelfTest {
 
         ModStore.StoredMod mod = new ModStore.StoredMod("Knobby", "A configurable export test mod", "", "", "",
                 "KnobbyMod", 1, true, "gijs",
-                List.of(new ModStore.StoredVersion(1, "make a knobby mod", "model-x", System.currentTimeMillis())),
+                List.of(new ModStore.StoredVersion(1, "make a knobby mod", "model-x", System.currentTimeMillis(),
+                        "", "", 0.0, "")),
                 config, configValues);
 
         Path outDir = tempDir("jarexport-config-out");

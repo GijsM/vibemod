@@ -36,6 +36,7 @@ public class LlmSelfTest {
         testParseNeitherShapeThrows();
         testConfigKnobParsing();
         testParseIconMapping();
+        testParseChangelogMapping();
         testSystemPromptContent();
         testPromptBuilders();
         testFewShotPlansMatchFiles();
@@ -71,6 +72,7 @@ public class LlmSelfTest {
             check("clean JSON: not an edit response", !p.isEditResponse());
             check("clean JSON: usage null when absent", p.usage() == null);
             check("clean JSON: manual null when absent", p.manual() == null);
+            check("clean JSON: changelog null when absent", p.changelog() == null);
             check("clean JSON: icon null when absent", p.icon() == null);
             check("clean JSON: config null when absent", p.config() == null);
             check("clean JSON: edits null on full shape", p.edits() == null);
@@ -255,6 +257,48 @@ public class LlmSelfTest {
         }
     }
 
+    private static void testParseChangelogMapping() {
+        String withChangelog = "{\"name\":\"Foo\",\"description\":\"d\",\"changelog\":\"Now with bats.\","
+                + "\"mainClass\":\"Foo\","
+                + "\"files\":[{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"}]}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(withChangelog);
+            check("changelog: full shape maps changelog", "Now with bats.".equals(p.changelog()));
+            System.out.println("PASS: parse() maps \"changelog\" on the full project shape");
+        } catch (Exception e) {
+            fail("changelog mapping (full shape) threw: " + e);
+        }
+
+        String withoutChangelog = "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\","
+                + "\"files\":[{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"}]}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(withoutChangelog);
+            check("changelog: absent -> null (lenient, never throws)", p.changelog() == null);
+            System.out.println("PASS: parse() maps missing \"changelog\" to null");
+        } catch (Exception e) {
+            fail("changelog mapping (absent) threw: " + e);
+        }
+
+        String editWithChangelog = "{\"edits\":[{\"path\":\"Foo.java\",\"find\":\"a\",\"replace\":\"b\"}],"
+                + "\"changelog\":\"Bats spawn faster.\"}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(editWithChangelog);
+            check("changelog: edit shape maps changelog", "Bats spawn faster.".equals(p.changelog()));
+            System.out.println("PASS: parse() maps \"changelog\" on the edit shape");
+        } catch (Exception e) {
+            fail("changelog mapping (edit shape) threw: " + e);
+        }
+
+        String editWithoutChangelog = "{\"edits\":[{\"path\":\"Foo.java\",\"find\":\"a\",\"replace\":\"b\"}]}";
+        try {
+            GeneratedProject p = PromptLibrary.parse(editWithoutChangelog);
+            check("changelog: edit shape absent -> null (lenient, never throws)", p.changelog() == null);
+            System.out.println("PASS: parse() maps missing \"changelog\" to null on the edit shape");
+        } catch (Exception e) {
+            fail("changelog mapping (edit shape, absent) threw: " + e);
+        }
+    }
+
     private static void testSystemPromptContent() {
         String prompt = PromptLibrary.systemPrompt();
         System.out.println("systemPrompt() length = " + prompt.length() + " chars");
@@ -263,6 +307,7 @@ public class LlmSelfTest {
         check("systemPrompt contains 'config'", prompt.contains("config"));
         check("systemPrompt contains 'manual'", prompt.contains("manual"));
         check("systemPrompt contains 'usage'", prompt.contains("usage"));
+        check("systemPrompt contains 'changelog'", prompt.contains("\"changelog\""));
         check("systemPrompt contains 'icon'", prompt.contains("\"icon\""));
         check("systemPrompt contains example 1 mod name 'ChickenCreepers'", prompt.contains("ChickenCreepers"));
         check("systemPrompt contains example 2 mod name 'SpeedPulse'", prompt.contains("SpeedPulse"));

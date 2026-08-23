@@ -94,7 +94,7 @@ public final class ModGenerator {
 
     /** Create a brand-new mod from a prompt. */
     public CompletableFuture<Result> make(String prompt, String creator, ProgressListener l) {
-        return run(l, () -> pipeline(prompt, creator, null, null,
+        return run(l, () -> pipeline(prompt, creator, "create", null, null,
                 PromptLibrary.makePrompt(prompt, creator), l));
     }
 
@@ -106,7 +106,7 @@ public final class ModGenerator {
                 return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
-            return pipeline(prompt, creator, existing.name(), baseProject(existing, sources),
+            return pipeline(prompt, creator, "edit", existing.name(), baseProject(existing, sources),
                     PromptLibrary.editPrompt(prompt, sources, existing.config(),
                             store.resolvedConfigValues(existing.name())), l);
         });
@@ -123,7 +123,7 @@ public final class ModGenerator {
                 return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
-            return pipeline("fix: " + errorHeadline(errorReport), creator, existing.name(),
+            return pipeline("fix: " + errorHeadline(errorReport), creator, "fix", existing.name(),
                     baseProject(existing, sources),
                     PromptLibrary.fixPrompt(errorReport, sources, existing.config(),
                             store.resolvedConfigValues(existing.name())), l);
@@ -149,7 +149,7 @@ public final class ModGenerator {
                 return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             String lastPrompt = existing.versions().get(existing.versions().size() - 1).prompt();
-            return pipeline(lastPrompt, creator, existing.name(), null,
+            return pipeline(lastPrompt, creator, "again", existing.name(), null,
                     PromptLibrary.makePrompt(lastPrompt, creator), l);
         });
     }
@@ -181,10 +181,11 @@ public final class ModGenerator {
     /**
      * The generate -> compile -> load loop with self-healing retries.
      * {@code base} is the current project state edits apply against (non-null
-     * for /vibe edit); {@code forcedName} keeps edits/remakes attached to the
-     * existing mod.
+     * for /vibe edit); {@code kind} is the change type recorded on the saved
+     * version (create/edit/fix/again); {@code forcedName} keeps edits/remakes
+     * attached to the existing mod.
      */
-    private Result pipeline(String originalPrompt, String creator, String forcedName,
+    private Result pipeline(String originalPrompt, String creator, String kind, String forcedName,
                             GeneratedProject base, String firstUserMessage,
                             ProgressListener l) throws Exception {
         List<OpenRouterClient.ChatMessage> messages = new ArrayList<>();
@@ -192,6 +193,7 @@ public final class ModGenerator {
         GeneratedProject current = base;
         int budget = Math.max(0, maxRetries.getAsInt());
         double costUsd = 0.0; // burned money counts across every round, even failed ones
+        double costAtLastSave = 0.0; // an enable-crash can save twice in one run: each save stores its delta
 
         int attempt = 0;
         while (true) {
@@ -263,8 +265,12 @@ public final class ModGenerator {
             }
 
             String mainFqcn = resolveMainFqcn(project, sources);
+            double versionCost = costUsd - costAtLastSave;
+            costAtLastSave = costUsd;
             ModStore.StoredMod saved = store.saveNewVersion(name, project.description(), mainFqcn,
-                    creator, originalPrompt, client.model(), project);
+                    creator, originalPrompt, client.model(),
+                    firstNonBlank(project.changelog(), deriveChangelog(kind, originalPrompt)),
+                    kind, versionCost, creator, project);
 
             l.phase("Loading");
             try {
@@ -325,6 +331,9 @@ public final class ModGenerator {
                 firstNonBlank(editResponse.description(), current.description()),
                 firstNonBlank(editResponse.usage(), current.usage()),
                 firstNonBlank(editResponse.manual(), current.manual()),
+                // Reversed preference: the run's first changelog wins so a later repair
+                // round's "fixed the compile error" line never overwrites it.
+                firstNonBlank(current.changelog(), editResponse.changelog()),
                 firstNonBlank(editResponse.icon(), current.icon()),
                 current.mainClass(), files,
                 editResponse.config() != null && !editResponse.config().isEmpty()
@@ -341,6 +350,8 @@ public final class ModGenerator {
                 firstNonBlank(full.description(), previous.description()),
                 firstNonBlank(full.usage(), previous.usage()),
                 firstNonBlank(full.manual(), previous.manual()),
+                // Reversed preference: the run's first changelog wins (see applyEdits).
+                firstNonBlank(previous.changelog(), full.changelog()),
                 firstNonBlank(full.icon(), previous.icon()),
                 full.mainClass(), full.files(),
                 full.config() != null && !full.config().isEmpty() ? full.config() : previous.config(),
@@ -352,8 +363,10 @@ public final class ModGenerator {
         List<GeneratedProject.GeneratedFile> files = sources.entrySet().stream()
                 .map(e -> new GeneratedProject.GeneratedFile(simpleName(e.getKey()) + ".java", e.getValue()))
                 .toList();
+        // changelog is null on purpose: a stored mod's old state must never seed a
+        // fresh run's changelog — the first response of the run supplies it instead.
         return new GeneratedProject(mod.name(), mod.description(), mod.usage(), mod.manual(),
-                mod.icon(), simpleName(mod.mainClass()), files, mod.config(), List.of());
+                null, mod.icon(), simpleName(mod.mainClass()), files, mod.config(), List.of());
     }
 
     /** Derive FQCN -> source, trusting each file's own package declaration. */
@@ -458,6 +471,16 @@ public final class ModGenerator {
 
     private static String firstNonBlank(String preferred, String fallback) {
         return preferred != null && !preferred.isBlank() ? preferred : fallback;
+    }
+
+    /**
+     * Fallback changelog when the model omitted one: the run's prompt, flattened and
+     * truncated to one short line. {@code kind} needs no prefix of its own — it is stored
+     * separately, and fix prompts already read {@code "fix: <headline>"}.
+     */
+    private static String deriveChangelog(String kind, String prompt) {
+        String line = prompt == null ? "" : prompt.replace('\n', ' ').trim();
+        return line.length() <= 100 ? line : line.substring(0, 97) + "…";
     }
 
     private static String firstLineOf(String s) {
