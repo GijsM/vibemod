@@ -19,29 +19,35 @@ import org.bukkit.scheduler.BukkitTask;
 
 /**
  * Visual + chat feedback for one in-flight generation, with vibe-coding
- * energy: the boss bar animates like a coding-agent spinner — whimsical
- * cycling verbs per phase ("Conjuring…", "Forging bytecode…"), a sparkle
- * glyph that twinkles, animated ellipsis, and a warm purple→pink→orange
- * color shimmer — while chat gets exactly one line per phase (no spam).
- * Console viewers get the plain chat lines only.
+ * energy — and, since v3.1, actual knowledge of what is being built: the
+ * model streams its output and declares a plan manifest up front, so the bar
+ * names the mod within seconds ("Conjuring MazeHedge…"), advances file-by-file
+ * against the plan, and an action-bar ticker shows the file currently being
+ * written with live volume ("✍ CourseManager.java · 3/5 · 6.2k chars").
  *
- * <p>Public surface is unchanged from v1: {@code phase/detail/succeed/fail}.
- * All Bukkit/Adventure mutations hop to the main thread.
+ * <p>Progress is mapped onto honest spans: Thinking 0→.05, the streamed
+ * Writing span .05→.70 (plan-fraction when a plan exists, char-asymptote
+ * otherwise), Compiling .70→.90, Loading .90→1. Repair rounds restart the
+ * Writing span under repair verbs. Without streaming (config off, fallback,
+ * or console viewers) everything degrades to the previous behavior.
+ *
+ * <p>{@code streamStats} is volatile-write only (called from HTTP threads at
+ * up to ~4/s); the animator task — main thread, every 6 ticks — is the single
+ * renderer for bar and action bar. Chat receives only milestones.
  */
 public final class Progress {
 
-    private static final float STEP = 0.25f;
     private static final long ANIMATION_PERIOD_TICKS = 6;
-    private static final int TICKS_PER_VERB = 8;      // in animation frames: ~2.4s per verb
-    private static final long MAX_ANIMATION_TICKS = 20 * 60 * 5; // stop after 5 minutes
+    private static final int TICKS_PER_VERB = 8;
+    private static final long MAX_ANIMATION_TICKS = 20 * 60 * 10; // 10 minutes
 
     /** Claude-ish warm shimmer for the label text. */
     private static final List<TextColor> SHIMMER = List.of(
-            TextColor.color(0xC084FC),  // lavender
-            TextColor.color(0xE879F9),  // orchid
-            TextColor.color(0xF472B6),  // pink
-            TextColor.color(0xFB7185),  // rose
-            TextColor.color(0xFB923C),  // amber
+            TextColor.color(0xC084FC),
+            TextColor.color(0xE879F9),
+            TextColor.color(0xF472B6),
+            TextColor.color(0xFB7185),
+            TextColor.color(0xFB923C),
             TextColor.color(0xF472B6),
             TextColor.color(0xE879F9));
 
@@ -70,11 +76,22 @@ public final class Progress {
     private final Player player;
     private BossBar bossBar;
     private BukkitTask animator;
-    private float progress = 0f;
     private long frame = 0;
     private int verbOffset = 0;
     private List<String> verbs = THINKING;
     private boolean finished = false;
+
+    // span model (main-thread reads/writes via phase())
+    private float phaseFloor = 0f;
+    private float phaseCeil = 0.05f;
+    private boolean streamedSpan = false;
+
+    // live stream state (written from HTTP threads / runOnMain; read by the animator)
+    private volatile String planName;
+    private volatile String currentFile;
+    private volatile int plannedTotal = -1;
+    private volatile int filesStarted = 0;
+    private volatile int streamChars = 0;
 
     public Progress(Plugin plugin, CommandSender viewer, String title) {
         this.plugin = plugin;
@@ -83,22 +100,20 @@ public final class Progress {
         this.player = (viewer instanceof Player p) ? p : null;
     }
 
-    /** Advance to a new phase: the bar animation switches verb pools, chat gets one line. */
+    /** Advance to a new phase: verb pool + honest progress span switch, one chat line. */
     public void phase(String label) {
         runOnMain(() -> {
             if (finished) {
                 return;
             }
-            progress = Math.min(1f, progress + STEP);
             verbs = verbPool(label);
             verbOffset = ThreadLocalRandom.current().nextInt(verbs.size());
-            String verb = verbs.get(verbOffset);
+            applySpan(label);
             if (player != null) {
                 ensureBossBar();
                 startAnimation();
-                bossBar.progress(progress);
             }
-            chat(Style.prefix().append(Component.text(verb + "… ", SHIMMER.get(0)))
+            chat(Style.prefix().append(Component.text(verbs.get(verbOffset) + "… ", SHIMMER.get(0)))
                     .append(Component.text("(" + title + ")", NamedTextColor.DARK_GRAY)));
         });
     }
@@ -108,15 +123,43 @@ public final class Progress {
         runOnMain(() -> chat(Style.info(line)));
     }
 
+    /** The model declared what it will build: name + planned files, in order. */
+    public void planReady(String name, List<String> files) {
+        runOnMain(() -> {
+            if (finished) {
+                return;
+            }
+            this.planName = name;
+            this.plannedTotal = files.size();
+            chat(Style.info("Plan: " + (name == null ? title : name) + " — " + files.size()
+                    + (files.size() == 1 ? " file" : " files")));
+        });
+    }
+
+    /** A planned file started streaming ({@code total} <= 0 = plan unknown). */
+    public void fileStarted(String path, int index, int total) {
+        this.currentFile = path;
+        this.filesStarted = total > 0 ? Math.min(index, total) : index;
+        if (player == null) {
+            // Console narration: one bounded line per file, no char ticks.
+            runOnMain(() -> chat(Style.info("→ [" + index + (total > 0 ? "/" + total : "") + "] " + path)));
+        }
+    }
+
+    /** Rolling stream volume — volatile write only; the animator renders it. */
+    public void streamStats(int chars, int approxTokens) {
+        this.streamChars = chars;
+    }
+
     /** Complete successfully: color-flash finale, full green bar, sound + firework, then hide. */
     public void succeed(String message) {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
+            clearActionBar();
             if (player != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
-                // three-frame celebration flash before settling on green
                 BossBar.Color[] flash = {BossBar.Color.PINK, BossBar.Color.YELLOW, BossBar.Color.GREEN};
                 for (int i = 0; i < flash.length; i++) {
                     BossBar.Color c = flash[i];
@@ -141,6 +184,7 @@ public final class Progress {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
+            clearActionBar();
             if (player != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
@@ -151,6 +195,50 @@ public final class Progress {
             }
             chat(Style.err(message));
         });
+    }
+
+    // ---- span model ----
+
+    private void applySpan(String label) {
+        streamedSpan = false;
+        if (label == null) {
+            phaseFloor = 0f;
+            phaseCeil = 0.05f;
+            return;
+        }
+        if (label.startsWith("Thinking")) {
+            // New round (initial or repair): the streamed span restarts honestly.
+            phaseFloor = 0f;
+            phaseCeil = 0.05f;
+            currentFile = null;
+            filesStarted = 0;
+            streamChars = 0;
+        } else if (label.equals("Writing")) {
+            phaseFloor = 0.05f;
+            phaseCeil = 0.70f;
+            streamedSpan = true;
+        } else if (label.equals("Compiling")) {
+            phaseFloor = 0.70f;
+            phaseCeil = 0.90f;
+        } else if (label.equals("Loading")) {
+            phaseFloor = 0.90f;
+            phaseCeil = 1.0f;
+        }
+    }
+
+    /** Real progress inside the current span; monotone, clamped, never backward. */
+    private float spanProgress() {
+        if (!streamedSpan) {
+            return phaseFloor + (phaseCeil - phaseFloor) * 0.5f;
+        }
+        int total = plannedTotal;
+        float fraction;
+        if (total > 0) {
+            fraction = Math.max(0f, Math.min(1f, (filesStarted - 0.5f) / total));
+        } else {
+            fraction = (float) (1.0 - Math.exp(-streamChars / 20000.0));
+        }
+        return phaseFloor + (phaseCeil - phaseFloor) * fraction;
     }
 
     // ---- animation ----
@@ -177,15 +265,31 @@ public final class Progress {
         String verb = verbs.get((int) ((verbOffset + frame / TICKS_PER_VERB) % verbs.size()));
         TextColor color = SHIMMER.get((int) (frame % SHIMMER.size()));
 
+        // The plan name becomes the verb's object the moment we know it.
+        String object = planName != null ? " " + planName : "";
         bossBar.name(Component.text(sparkle + " ", SHIMMER.get((int) ((frame + 3) % SHIMMER.size())))
-                .append(Component.text(verb + dots, color))
+                .append(Component.text(verb + object + dots, color))
                 .append(Component.text("  ⬡ " + title, NamedTextColor.DARK_GRAY)));
         if (frame % 5 == 0) {
             bossBar.color(BAR_CYCLE.get((int) ((frame / 5) % BAR_CYCLE.size())));
         }
-        // subtle breathing on the progress bar around the phase's true progress
-        float wobble = (float) (Math.sin(frame / 3.0) * 0.02);
-        bossBar.progress(Math.max(0f, Math.min(1f, progress + wobble)));
+        float base = spanProgress();
+        float wobble = (float) (Math.sin(frame / 3.0) * 0.015);
+        bossBar.progress(Math.max(phaseFloor, Math.min(phaseCeil, base + wobble)));
+
+        // Action-bar ticker during the streamed span (6 ticks ≈ the 4/s throttle).
+        if (streamedSpan && player != null) {
+            StringBuilder line = new StringBuilder("✍ ");
+            if (currentFile != null) {
+                line.append(currentFile);
+                if (plannedTotal > 0) {
+                    line.append(" · ").append(filesStarted).append('/').append(plannedTotal);
+                }
+                line.append(" · ");
+            }
+            line.append(fmtK(streamChars)).append(" chars");
+            player.sendActionBar(Component.text(line.toString(), color));
+        }
     }
 
     private void stopAnimation() {
@@ -193,6 +297,16 @@ public final class Progress {
             animator.cancel();
             animator = null;
         }
+    }
+
+    private void clearActionBar() {
+        if (player != null) {
+            player.sendActionBar(Component.empty());
+        }
+    }
+
+    private static String fmtK(int chars) {
+        return chars >= 1000 ? String.format("%.1fk", chars / 1000.0) : String.valueOf(chars);
     }
 
     private static List<String> verbPool(String label) {
@@ -213,7 +327,7 @@ public final class Progress {
 
     private void ensureBossBar() {
         if (bossBar == null) {
-            bossBar = BossBar.bossBar(Component.text(title), progress,
+            bossBar = BossBar.bossBar(Component.text(title), phaseFloor,
                     BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
             player.showBossBar(bossBar);
         }

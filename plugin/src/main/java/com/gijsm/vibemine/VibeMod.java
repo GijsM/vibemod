@@ -115,7 +115,8 @@ public final class VibeMod extends JavaPlugin {
         });
 
         generator = new ModGenerator(this, client, compiler, store, registry,
-                () -> getConfig().getInt("generation.max-retries", 3));
+                () -> getConfig().getInt("generation.max-retries", 3),
+                () -> getConfig().getBoolean("openrouter.streaming", true));
         JarExporter exporter = new JarExporter(compiler);
 
         ChatMode chatMode = new ChatMode(this, this::generateFromPrompt);
@@ -375,6 +376,21 @@ public final class VibeMod extends JavaPlugin {
             @Override
             public void detail(String line) {
                 progress.detail(line);
+            }
+
+            @Override
+            public void planReady(String name, java.util.List<String> files) {
+                progress.planReady(name, files);
+            }
+
+            @Override
+            public void fileStarted(String path, int index, int total) {
+                progress.fileStarted(path, index, total);
+            }
+
+            @Override
+            public void streamStats(int chars, int approxTokens) {
+                progress.streamStats(chars, approxTokens);
             }
         };
     }

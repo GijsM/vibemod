@@ -11,6 +11,8 @@ openrouter:
   model: anthropic/claude-sonnet-5
   # How long to wait for a single LLM completion before giving up.
   timeout-seconds: 120
+  # SSE streaming: live plan/file progress on the boss bar. false = single-shot requests.
+  streaming: true
   # Completion-token cap per request. 0 (default) = no cap: the model's own ceiling applies.
   max-tokens: 0
 

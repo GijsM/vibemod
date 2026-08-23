@@ -233,6 +233,21 @@ public final class VibeCommand implements TabExecutor {
             public void detail(String line) {
                 progress.detail(line);
             }
+
+            @Override
+            public void planReady(String name, java.util.List<String> files) {
+                progress.planReady(name, files);
+            }
+
+            @Override
+            public void fileStarted(String path, int index, int total) {
+                progress.fileStarted(path, index, total);
+            }
+
+            @Override
+            public void streamStats(int chars, int approxTokens) {
+                progress.streamStats(chars, approxTokens);
+            }
         };
     }
 

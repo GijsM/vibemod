@@ -2,11 +2,18 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
 import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.llm.PromptLibrary;
+import com.gijsm.vibemine.llm.StreamScanner;
 
 /**
  * Standalone self-test (no test framework, no network) proving PromptLibrary's
@@ -31,6 +38,12 @@ public class LlmSelfTest {
         testParseIconMapping();
         testSystemPromptContent();
         testPromptBuilders();
+        testFewShotPlansMatchFiles();
+        testStreamScannerFullShapeWithDecoy();
+        testStreamScannerOneCharAtATimeEquivalence();
+        testStreamScannerEditShape();
+        testStreamScannerPlanAbsent();
+        testStreamScannerPlanSplitAcrossFeeds();
 
         if (args.length > 0) {
             testEmbeddedApiSourcesMatchDisk(args[0]);
@@ -264,6 +277,9 @@ public class LlmSelfTest {
                 !prompt.contains("implements VibeMod"));
         check("systemPrompt never embeds the deprecated VibeMod bridge source",
                 !prompt.contains("api/VibeMod.java") && !prompt.contains("interface VibeMod"));
+        check("systemPrompt contains \"plan\"", prompt.contains("\"plan\""));
+        check("systemPrompt states the plan-is-first-key rule",
+                prompt.contains("\"plan\" MUST be the FIRST key"));
         if (failures == 0) {
             System.out.println("PASS: systemPrompt() contains all required markers");
         }
@@ -430,6 +446,230 @@ public class LlmSelfTest {
             sb.append(trimmed).append('\n');
         }
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Contract: "plan" is the first key, and both few-shots' plan.files
+    // match their actual files[] paths in emission order.
+    // ------------------------------------------------------------------
+
+    private static void testFewShotPlansMatchFiles() {
+        String prompt = PromptLibrary.systemPrompt();
+        checkFewShotPlanMatchesFiles(prompt, "--- Example 1 ---", "example 1 (ChickenCreepers)");
+        checkFewShotPlanMatchesFiles(prompt, "--- Example 2 ---", "example 2 (SpeedPulse)");
+    }
+
+    private static void checkFewShotPlanMatchesFiles(String prompt, String marker, String label) {
+        try {
+            int markerIdx = prompt.indexOf(marker);
+            check(label + ": marker found", markerIdx >= 0);
+            int assistantIdx = prompt.indexOf("Assistant: ", markerIdx);
+            check(label + ": 'Assistant: ' found", assistantIdx >= 0);
+            int jsonStart = assistantIdx + "Assistant: ".length();
+            int jsonEnd = prompt.indexOf('\n', jsonStart);
+            String json = prompt.substring(jsonStart, jsonEnd);
+
+            JsonElement parsed = JsonParser.parseString(json);
+            check(label + ": parses as JSON", parsed.isJsonObject());
+            JsonObject obj = parsed.getAsJsonObject();
+
+            check(label + ": has object \"plan\"", obj.has("plan") && obj.get("plan").isJsonObject());
+            JsonObject plan = obj.getAsJsonObject("plan");
+            check(label + ": plan has \"name\"", plan.has("name"));
+            check(label + ": plan name matches top-level name",
+                    plan.get("name").getAsString().equals(obj.get("name").getAsString()));
+
+            List<String> planFiles = new ArrayList<>();
+            for (JsonElement el : plan.getAsJsonArray("files")) {
+                planFiles.add(el.getAsJsonObject().get("path").getAsString());
+            }
+            List<String> actualFiles = new ArrayList<>();
+            for (JsonElement el : obj.getAsJsonArray("files")) {
+                actualFiles.add(el.getAsJsonObject().get("path").getAsString());
+            }
+            check(label + ": plan.files paths match files[] paths in the same order",
+                    planFiles.equals(actualFiles));
+            System.out.println("PASS: " + label + " few-shot plan.files == files[] paths: " + planFiles);
+        } catch (Exception e) {
+            fail(label + " plan/files consistency check threw: " + e);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // StreamScanner suite (plan/decoy fixtures used by several tests below).
+    // ------------------------------------------------------------------
+
+    /**
+     * Full-shape response. The plan's own "files" list re-mentions Foo.java/Bar.java (must
+     * NOT fire FileStarted). Bar.java's "content" carries an escaped-quotes decoy that, once
+     * JSON-decoded, reads literally {@code "path":"Decoy.java"} - it must stay completely
+     * inert since the lexer never leaves the surrounding content string for it.
+     */
+    private static final String FULL_SHAPE_SAMPLE =
+            "{\"plan\":{\"name\":\"Foo\",\"files\":[{\"path\":\"Foo.java\",\"purpose\":\"p1\"},"
+            + "{\"path\":\"Bar.java\",\"purpose\":\"p2\"}]},"
+            + "\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\","
+            + "\"files\":[{\"path\":\"Foo.java\",\"content\":\"class Foo {}\"},"
+            + "{\"path\":\"Bar.java\",\"content\":\"class Bar { String s = "
+            + "\\\"path\\\":\\\"Decoy.java\\\"; }\"}]}";
+
+    private static final String EDIT_SHAPE_SAMPLE =
+            "{\"edits\":[{\"path\":\"Foo.java\",\"find\":\"a\",\"replace\":\"b\"},"
+            + "{\"path\":\"Bar.java\",\"find\":\"c\",\"replace\":\"d\"}]}";
+
+    private static final String PLAN_ABSENT_SAMPLE =
+            "{\"name\":\"Baz\",\"files\":[{\"path\":\"Baz.java\",\"content\":\"class Baz {}\"}]}";
+
+    private static final String SPLIT_SAMPLE =
+            "{\"plan\":{\"name\":\"SplitMod\",\"files\":[{\"path\":\"A.java\",\"purpose\":\"first\"},"
+            + "{\"path\":\"B.java\",\"purpose\":\"second\"}]},"
+            + "\"name\":\"SplitMod\","
+            + "\"files\":[{\"path\":\"A.java\",\"content\":\"x\"},{\"path\":\"B.java\",\"content\":\"y\"}]}";
+
+    private static void testStreamScannerFullShapeWithDecoy() {
+        try {
+            StreamScanner scanner = new StreamScanner();
+            List<StreamScanner.Event> events = scanner.feed(FULL_SHAPE_SAMPLE);
+
+            List<StreamScanner.PlanReady> plans = new ArrayList<>();
+            List<StreamScanner.FileStarted> files = new ArrayList<>();
+            for (StreamScanner.Event e : events) {
+                if (e instanceof StreamScanner.PlanReady p) {
+                    plans.add(p);
+                } else if (e instanceof StreamScanner.FileStarted f) {
+                    files.add(f);
+                }
+            }
+
+            check("decoy: exactly one PlanReady", plans.size() == 1);
+            if (!plans.isEmpty()) {
+                check("decoy: plan name", "Foo".equals(plans.get(0).name()));
+                check("decoy: plan files", List.of("Foo.java", "Bar.java").equals(plans.get(0).files()));
+            }
+
+            check("decoy: exactly two FileStarted events (the decoy must not add a third)", files.size() == 2);
+            if (files.size() == 2) {
+                check("decoy: FileStarted[0] is Foo.java index 1",
+                        "Foo.java".equals(files.get(0).path()) && files.get(0).index() == 1);
+                check("decoy: FileStarted[1] is Bar.java index 2",
+                        "Bar.java".equals(files.get(1).path()) && files.get(1).index() == 2);
+            }
+            for (StreamScanner.FileStarted f : files) {
+                check("decoy: no FileStarted fired for the in-content decoy \"Decoy.java\"",
+                        !"Decoy.java".equals(f.path()));
+            }
+            System.out.println("PASS: StreamScanner ignores an escaped \"path\":\"Decoy.java\" decoy in file content, "
+                    + "events=" + events.size());
+        } catch (Exception e) {
+            fail("StreamScanner decoy test threw: " + e);
+        }
+    }
+
+    private static void testStreamScannerOneCharAtATimeEquivalence() {
+        try {
+            StreamScanner whole = new StreamScanner();
+            List<StreamScanner.Event> wholeEvents = whole.feed(FULL_SHAPE_SAMPLE);
+
+            StreamScanner perChar = new StreamScanner();
+            List<StreamScanner.Event> perCharEvents = new ArrayList<>();
+            for (int i = 0; i < FULL_SHAPE_SAMPLE.length(); i++) {
+                perCharEvents.addAll(perChar.feed(String.valueOf(FULL_SHAPE_SAMPLE.charAt(i))));
+            }
+
+            check("one-char-at-a-time feed produces the identical event sequence as one whole feed()",
+                    wholeEvents.equals(perCharEvents));
+            check("one-char-at-a-time totalChars() matches whole-feed totalChars()",
+                    perChar.totalChars() == whole.totalChars());
+            System.out.println("PASS: StreamScanner one-char-at-a-time feeding == whole-string feeding ("
+                    + wholeEvents.size() + " events)");
+        } catch (Exception e) {
+            fail("StreamScanner one-char-at-a-time equivalence test threw: " + e);
+        }
+    }
+
+    private static void testStreamScannerEditShape() {
+        try {
+            StreamScanner scanner = new StreamScanner();
+            List<StreamScanner.Event> events = scanner.feed(EDIT_SHAPE_SAMPLE);
+            List<StreamScanner.FileStarted> files = new ArrayList<>();
+            for (StreamScanner.Event e : events) {
+                check("edit-shape: no PlanReady (none present in this sample)",
+                        !(e instanceof StreamScanner.PlanReady));
+                if (e instanceof StreamScanner.FileStarted f) {
+                    files.add(f);
+                }
+            }
+            check("edit-shape: two FileStarted events", files.size() == 2);
+            if (files.size() == 2) {
+                check("edit-shape: FileStarted[0] Foo.java index 1",
+                        "Foo.java".equals(files.get(0).path()) && files.get(0).index() == 1);
+                check("edit-shape: FileStarted[1] Bar.java index 2",
+                        "Bar.java".equals(files.get(1).path()) && files.get(1).index() == 2);
+            }
+            System.out.println("PASS: StreamScanner fires FileStarted per edits[].path");
+        } catch (Exception e) {
+            fail("StreamScanner edit-shape test threw: " + e);
+        }
+    }
+
+    private static void testStreamScannerPlanAbsent() {
+        try {
+            StreamScanner scanner = new StreamScanner();
+            List<StreamScanner.Event> events = scanner.feed(PLAN_ABSENT_SAMPLE);
+            boolean sawPlan = events.stream().anyMatch(e -> e instanceof StreamScanner.PlanReady);
+            check("plan-absent: no PlanReady event", !sawPlan);
+
+            List<StreamScanner.FileStarted> files = new ArrayList<>();
+            for (StreamScanner.Event e : events) {
+                if (e instanceof StreamScanner.FileStarted f) {
+                    files.add(f);
+                }
+            }
+            check("plan-absent: FileStarted still fires", files.size() == 1);
+            if (!files.isEmpty()) {
+                check("plan-absent: FileStarted path/index",
+                        "Baz.java".equals(files.get(0).path()) && files.get(0).index() == 1);
+            }
+            System.out.println("PASS: StreamScanner fires FileStarted with no plan present");
+        } catch (Exception e) {
+            fail("StreamScanner plan-absent test threw: " + e);
+        }
+    }
+
+    private static void testStreamScannerPlanSplitAcrossFeeds() {
+        try {
+            int keyIdx = SPLIT_SAMPLE.indexOf("\"plan\":") + 3; // splits the "plan" KEY as "pl" | "an"
+            int stringIdx = SPLIT_SAMPLE.indexOf("A.java") + 2; // splits "A.java" as "A." | "java" INSIDE the plan
+            check("split-test: split points are well-ordered inside the sample",
+                    keyIdx > 0 && stringIdx > keyIdx && stringIdx < SPLIT_SAMPLE.length());
+
+            StreamScanner scanner = new StreamScanner();
+            List<StreamScanner.Event> events = new ArrayList<>();
+            events.addAll(scanner.feed(SPLIT_SAMPLE.substring(0, keyIdx)));
+            events.addAll(scanner.feed(SPLIT_SAMPLE.substring(keyIdx, stringIdx)));
+            events.addAll(scanner.feed(SPLIT_SAMPLE.substring(stringIdx)));
+
+            List<StreamScanner.PlanReady> plans = new ArrayList<>();
+            List<StreamScanner.FileStarted> files = new ArrayList<>();
+            for (StreamScanner.Event e : events) {
+                if (e instanceof StreamScanner.PlanReady p) {
+                    plans.add(p);
+                } else if (e instanceof StreamScanner.FileStarted f) {
+                    files.add(f);
+                }
+            }
+            check("split-test: plan still parses despite a mid-key + mid-string split across feed() calls",
+                    plans.size() == 1);
+            if (!plans.isEmpty()) {
+                check("split-test: plan name", "SplitMod".equals(plans.get(0).name()));
+                check("split-test: plan files", List.of("A.java", "B.java").equals(plans.get(0).files()));
+            }
+            check("split-test: FileStarted still fires for the real files[] (not the plan's own list)",
+                    files.size() == 2);
+            System.out.println("PASS: StreamScanner parses a plan object split mid-key and mid-string across feed()");
+        } catch (Exception e) {
+            fail("StreamScanner plan-split test threw: " + e);
+        }
     }
 
     private static void check(String label, boolean condition) {

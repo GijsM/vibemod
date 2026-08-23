@@ -41,6 +41,21 @@ public final class ModGenerator {
         void phase(String label);
 
         void detail(String line);
+
+        // ---- streaming callbacks (defaults so existing bridges keep compiling) ----
+        // May be invoked from HTTP threads; implementations own any main-thread hop.
+
+        /** The model declared its plan manifest: mod name + files it will emit, in order. */
+        default void planReady(String name, List<String> files) {
+        }
+
+        /** A planned (or edit-touched) file started streaming. {@code total} <= 0 = unknown. */
+        default void fileStarted(String path, int index, int total) {
+        }
+
+        /** Rolling stream volume; throttled by the caller. */
+        default void streamStats(int chars, int approxTokens) {
+        }
     }
 
     /** Outcome of one generation run. {@code costUsd} sums the real OpenRouter cost of every
@@ -58,6 +73,7 @@ public final class ModGenerator {
     private final ModStore store;
     private final ModRegistry registry;
     private final IntSupplier maxRetries;
+    private final java.util.function.BooleanSupplier streamingEnabled;
     private final ExecutorService executor = Executors.newFixedThreadPool(2, r -> {
         Thread t = new Thread(r, "VibeMine-generator");
         t.setDaemon(true);
@@ -65,13 +81,15 @@ public final class ModGenerator {
     });
 
     public ModGenerator(Plugin plugin, OpenRouterClient client, InMemoryCompiler compiler,
-                        ModStore store, ModRegistry registry, IntSupplier maxRetries) {
+                        ModStore store, ModRegistry registry, IntSupplier maxRetries,
+                        java.util.function.BooleanSupplier streamingEnabled) {
         this.plugin = plugin;
         this.client = client;
         this.compiler = compiler;
         this.store = store;
         this.registry = registry;
         this.maxRetries = maxRetries;
+        this.streamingEnabled = streamingEnabled;
     }
 
     /** Create a brand-new mod from a prompt. */
@@ -180,8 +198,11 @@ public final class ModGenerator {
             l.phase(attempt == 0 ? "Thinking" : "Thinking (repair " + attempt + ")");
             String response;
             try {
-                OpenRouterClient.Completion completion = client.complete(PromptLibrary.systemPrompt(), messages)
-                        .get(300, TimeUnit.SECONDS);
+                OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(), messages,
+                                new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
+                        : client.complete(PromptLibrary.systemPrompt(), messages)
+                                .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();
             } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException apiFail) {
@@ -378,6 +399,53 @@ public final class ModGenerator {
 
     private interface ThrowingRunnable {
         void run() throws Exception;
+    }
+
+    /**
+     * Bridges raw SSE deltas into ProgressListener events: incremental scanner
+     * for plan/file markers, throttled volume stats. Runs on the HTTP thread -
+     * listener implementations own any main-thread hop.
+     */
+    private static final class StreamProgressAdapter implements OpenRouterClient.StreamObserver {
+
+        private static final long STATS_THROTTLE_NANOS = 250_000_000L;
+
+        private final ProgressListener listener;
+        private final com.gijsm.vibemine.llm.StreamScanner scanner = new com.gijsm.vibemine.llm.StreamScanner();
+        private boolean firstDelta = true;
+        private int plannedTotal = -1;
+        private long lastStatsNanos = 0;
+
+        private StreamProgressAdapter(ProgressListener listener) {
+            this.listener = listener;
+        }
+
+        @Override
+        public void onDelta(String delta, int totalChars) {
+            try {
+                if (firstDelta) {
+                    firstDelta = false;
+                    listener.phase("Writing");
+                }
+                boolean eventFired = false;
+                for (com.gijsm.vibemine.llm.StreamScanner.Event event : scanner.feed(delta)) {
+                    eventFired = true;
+                    if (event instanceof com.gijsm.vibemine.llm.StreamScanner.PlanReady plan) {
+                        plannedTotal = plan.files().size();
+                        listener.planReady(plan.name(), plan.files());
+                    } else if (event instanceof com.gijsm.vibemine.llm.StreamScanner.FileStarted file) {
+                        listener.fileStarted(file.path(), file.index(), plannedTotal);
+                    }
+                }
+                long now = System.nanoTime();
+                if (eventFired || now - lastStatsNanos >= STATS_THROTTLE_NANOS) {
+                    lastStatsNanos = now;
+                    listener.streamStats(totalChars, totalChars / 4);
+                }
+            } catch (Throwable t) {
+                // Progress narration must never break a generation.
+            }
+        }
     }
 
     private static String fileName(String path) {
