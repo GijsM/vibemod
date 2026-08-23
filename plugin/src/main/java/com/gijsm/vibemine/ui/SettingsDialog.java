@@ -3,7 +3,6 @@ package com.gijsm.vibemine.ui;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import io.papermc.paper.dialog.Dialog;
@@ -18,10 +17,9 @@ import io.papermc.paper.registry.data.dialog.type.DialogType;
 
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
 
-import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
@@ -62,10 +60,6 @@ public final class SettingsDialog {
         void save(Player p, Values values);
     }
 
-    /** Same widths as {@link Dialogs}: wide inputs + body lines so labels/values do not clip. */
-    private static final int INPUT_WIDTH = 350;
-    private static final int BODY_WIDTH = 400;
-
     private static final List<String> EFFORTS = List.of("off", "low", "medium", "high");
 
     private static final float TIMEOUT_MIN = 30, TIMEOUT_MAX = 600, TIMEOUT_STEP = 15;
@@ -104,12 +98,15 @@ public final class SettingsDialog {
         Values v = snapshot.get();
 
         List<DialogBody> body = List.of(
+                DialogKit.iconBody(Material.COMPARATOR,
+                        Component.text("Generation & runtime settings", Style.INFO)),
                 DialogBody.plainMessage(Component.text(
-                        "Model: " + v.model() + " (" + v.modelPriceLabel() + ")", NamedTextColor.GRAY), BODY_WIDTH),
+                        "Model: " + v.model() + " (" + v.modelPriceLabel() + ")", Style.INFO), DialogKit.BODY),
+                DialogBody.plainMessage(Component.text("Spent this session: ", Style.INFO)
+                        .append(Component.text(Style.fmtCost(v.sessionCostUsd()), NamedTextColor.WHITE)),
+                        DialogKit.BODY),
                 DialogBody.plainMessage(Component.text(
-                        "Spent this session: " + Style.fmtCost(v.sessionCostUsd()), NamedTextColor.GRAY), BODY_WIDTH),
-                DialogBody.plainMessage(Component.text(
-                        "API key and error-storm limits live in config.yml", NamedTextColor.GRAY), BODY_WIDTH));
+                        "API key and error-storm limits live in config.yml", Style.META), DialogKit.BODY));
 
         List<DialogInput> inputs = List.of(
                 effortInput(v.effort()),
@@ -135,17 +132,20 @@ public final class SettingsDialog {
                         .initial(v.debugEcho())
                         .build());
 
-        ActionButton save = ActionButton.builder(Component.text("Save"))
+        ActionButton save = ActionButton.builder(Component.text("Save", Style.OK))
+                .tooltip(Component.text("Persist and apply", Style.INFO))
                 .action(mainThreadClick(this::handleSave))
                 .build();
         ActionButton model = ActionButton.builder(Component.text("Model…"))
+                .tooltip(Component.text("Pick from the live OpenRouter catalog", Style.INFO))
                 .action(mainThreadClick((view, audience) -> {
                     if (audience instanceof Player player) {
                         pickModel.accept(player);
                     }
                 }))
                 .build();
-        ActionButton reload = ActionButton.builder(Component.text("Reload from disk"))
+        ActionButton reload = ActionButton.builder(Component.text("⟳ Reload from disk"))
+                .tooltip(Component.text("Re-read config.yml", Style.INFO))
                 .action(mainThreadClick((view, audience) -> {
                     if (audience instanceof Player player) {
                         reloadConfig.run();
@@ -154,16 +154,15 @@ public final class SettingsDialog {
                     }
                 }))
                 .build();
-        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("VibeMod settings"))
+                .base(DialogBase.builder(DialogKit.title("VibeMod — settings"))
                         .body(body)
                         .inputs(inputs)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.multiAction(List.of(save, model, reload))
-                        .exitAction(cancel)
+                        .exitAction(DialogKit.cancelButton())
                         .columns(3)
                         .build()));
         show(p, dialog);
@@ -176,13 +175,15 @@ public final class SettingsDialog {
         List<SingleOptionDialogInput.OptionEntry> entries = EFFORTS.stream()
                 .map(e -> SingleOptionDialogInput.OptionEntry.create(e, Component.text(e), e.equals(initial)))
                 .toList();
-        return DialogInput.singleOption("thinking", Component.text("Thinking effort"), entries).build();
+        return DialogInput.singleOption("thinking", Component.text("Thinking effort"), entries)
+                .width(DialogKit.INPUT)
+                .build();
     }
 
     private static DialogInput number(String key, String label, String labelFormat,
                                       float min, float max, float step, double current) {
         return DialogInput.numberRange(key, Component.text(label), min, max)
-                .width(INPUT_WIDTH)
+                .width(DialogKit.INPUT)
                 .labelFormat(labelFormat)
                 .initial((float) clamp(current, min, max))
                 .step(step)
@@ -230,39 +231,15 @@ public final class SettingsDialog {
         return Math.max(min, Math.min(max, value));
     }
 
-    // ---- shared plumbing (same idioms as Dialogs) ----
+    // ---- shared plumbing (thin wrappers over DialogKit with this class's plugin/logger) ----
 
-    /** Show next tick (never inside an inventory-click handler); see {@link Dialogs}. */
+    /** See {@link DialogKit#show}. */
     private void show(Player p, Dialog dialog) {
-        Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
+        DialogKit.show(plugin, p, dialog);
     }
 
-    /** A no-op click action for buttons (e.g. Cancel) that should just close the dialog. */
-    private static DialogAction noOp() {
-        return DialogAction.customClick((view, audience) -> {
-        }, ClickCallback.Options.builder().uses(1).build());
-    }
-
-    /**
-     * Wraps a dialog callback so it always hops to the main thread before running, and never lets
-     * an exception escape into Bukkit - it is logged and reported to the player instead.
-     */
+    /** See {@link DialogKit#mainThreadClick}. */
     private DialogAction mainThreadClick(java.util.function.BiConsumer<DialogResponseView, Audience> body) {
-        return DialogAction.customClick((view, audience) ->
-                        Bukkit.getScheduler().runTask(plugin, () -> runSafely(view, audience, body)),
-                ClickCallback.Options.builder().uses(1).build());
-    }
-
-    private static void runSafely(DialogResponseView view, Audience audience,
-                                   java.util.function.BiConsumer<DialogResponseView, Audience> body) {
-        try {
-            body.accept(view, audience);
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Settings dialog callback failed", e);
-            if (audience instanceof Player player) {
-                player.sendMessage(Style.err("Something went wrong: "
-                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
-            }
-        }
+        return DialogKit.mainThreadClick(plugin, LOG, body);
     }
 }

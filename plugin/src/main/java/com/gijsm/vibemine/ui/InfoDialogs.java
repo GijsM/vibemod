@@ -15,13 +15,12 @@ import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 
-import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickCallback;
-import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
@@ -54,15 +53,6 @@ public final class InfoDialogs {
 
     private static final Logger LOG = Logger.getLogger(InfoDialogs.class.getName());
 
-    /** Prose bodies (manual, errors): wider than the 200px default so sentences breathe. */
-    private static final int PROSE_WIDTH = 400;
-    /** Source bodies: wider still so code lines rarely wrap (vanilla caps a body at 1024px). */
-    private static final int SOURCE_WIDTH = 600;
-    /** File buttons on the source index: room for long class names. */
-    private static final int FILE_BUTTON_WIDTH = 250;
-    /** Vanilla's "Force Unicode" font: uniform glyph sizing reads better for code. */
-    private static final Key UNIFORM_FONT = Key.key("minecraft", "uniform");
-
     private final Plugin plugin;
 
     public InfoDialogs(Plugin plugin) {
@@ -74,23 +64,29 @@ public final class InfoDialogs {
     /** Opens {@code mod}'s manual: Markdown prose, verified facts, and the config table. */
     public void openManual(Player p, ModStore.StoredMod mod, ModHandle liveOrNull, Map<String, String> values) {
         List<DialogBody> body = new ArrayList<>();
+        body.add(DialogKit.iconBody(DialogKit.iconItem(mod.icon(), false),
+                Component.text(mod.name(), NamedTextColor.WHITE)));
         String manual = mod.manual() == null || mod.manual().isBlank() ? mod.description() : mod.manual();
-        for (Component block : MarkdownMini.render(manual, NamedTextColor.GRAY)) {
-            body.add(DialogBody.plainMessage(block, PROSE_WIDTH));
+        for (Component block : MarkdownMini.render(manual, Style.INFO)) {
+            body.add(DialogBody.plainMessage(block, DialogKit.BODY));
         }
-        body.add(DialogBody.plainMessage(Component.text("Verified facts", NamedTextColor.DARK_AQUA), PROSE_WIDTH));
+        body.add(DialogBody.plainMessage(Style.heading("Verified facts"), DialogKit.BODY));
         body.add(DialogBody.plainMessage(
-                joined(InstallCard.verifiedFactLines(mod, liveOrNull, values)), PROSE_WIDTH));
-        body.add(DialogBody.plainMessage(Component.text("Config", NamedTextColor.GOLD), PROSE_WIDTH));
-        body.add(DialogBody.plainMessage(joined(configTableLines(values)), PROSE_WIDTH));
+                DialogKit.joined(InstallCard.verifiedFactLines(mod, liveOrNull, values), Style.INFO),
+                DialogKit.BODY));
+        body.add(DialogBody.plainMessage(Style.heading("Config"), DialogKit.BODY));
+        body.add(DialogBody.plainMessage(
+                DialogKit.joined(configTableLines(values), Style.INFO).font(DialogKit.UNIFORM_FONT),
+                DialogKit.BODY));
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(mod.name() + " — manual"))
+                .base(DialogBase.builder(DialogKit.title(mod.name() + " — manual"))
                         .body(body)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(List.of(sourceButton(mod.name()), errorsButton(mod.name())))
-                        .exitAction(doneButton())
+                .type(DialogType.multiAction(List.of(
+                                DialogKit.sourceButton(mod.name()), DialogKit.errorsButton(mod.name())))
+                        .exitAction(DialogKit.backToHubButton(mod.name()))
                         .columns(2)
                         .build()));
         show(p, dialog);
@@ -123,7 +119,7 @@ public final class InfoDialogs {
         if (sources.size() == 1) {
             Map.Entry<String, String> only = sources.entrySet().iterator().next();
             show(p, fileDialog(name, version, only.getKey(), only.getValue(),
-                    List.of(manualButton(name), errorsButton(name))));
+                    List.of(DialogKit.manualButton(name), DialogKit.errorsButton(name))));
             return;
         }
         show(p, indexDialog(name, version, sources));
@@ -137,20 +133,25 @@ public final class InfoDialogs {
             String source = entry.getValue();
             int lineCount = source.split("\n", -1).length;
             buttons.add(ActionButton.builder(Component.text(simpleName(fqcn)))
-                    .tooltip(Component.text(fqcn + " — " + lineCount + " lines", NamedTextColor.GRAY))
-                    .width(FILE_BUTTON_WIDTH)
+                    .tooltip(Component.text(fqcn, Style.INFO)
+                            .append(Component.newline())
+                            .append(Component.text(lineCount + " lines", Style.META)))
+                    .width(DialogKit.ROW)
                     .action(openFileAction(name, version, fqcn, source))
                     .build());
         }
-        buttons.add(manualButton(name));
-        buttons.add(errorsButton(name));
+        buttons.add(DialogKit.manualButton(name));
+        buttons.add(DialogKit.errorsButton(name));
         return Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(name + " — source v" + version))
+                .base(DialogBase.builder(DialogKit.title(name + " — source v" + version))
                         .body(List.of(DialogBody.plainMessage(Component.text(
-                                sources.size() + " files — pick one to read.", NamedTextColor.GRAY))))
+                                sources.size() + " files — pick one to read.", Style.INFO), DialogKit.BODY)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(buttons).exitAction(doneButton()).columns(1).build()));
+                .type(DialogType.multiAction(buttons)
+                        .exitAction(DialogKit.backToHubButton(name))
+                        .columns(1)
+                        .build()));
     }
 
     /** Click action for one index button: hop to the main thread and open that file's dialog. */
@@ -162,7 +163,8 @@ public final class InfoDialogs {
                             }
                             try {
                                 player.showDialog(fileDialog(name, version, fqcn, source,
-                                        List.of(backToIndexButton(name))));
+                                        List.of(DialogKit.navButton("← Back to files", "/vibe source " + name,
+                                                "Back to the file list"))));
                             } catch (Exception e) {
                                 LOG.log(Level.WARNING, "Source dialog failed", e);
                                 player.sendMessage(Style.err("Could not open " + simpleName(fqcn) + ": "
@@ -175,15 +177,19 @@ public final class InfoDialogs {
     /** One source file, whole, in the uniform font; {@code nav} supplies Back or cross-navigation. */
     private static Dialog fileDialog(String name, int version, String fqcn, String source, List<ActionButton> nav) {
         return Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(name + " — source v" + version))
+                .base(DialogBase.builder(DialogKit.title(name + " — source v" + version))
                         .body(List.of(
-                                DialogBody.plainMessage(Component.text("// " + fqcn, NamedTextColor.DARK_GRAY),
-                                        SOURCE_WIDTH),
-                                DialogBody.plainMessage(Component.text(source, NamedTextColor.GRAY).font(UNIFORM_FONT),
-                                        SOURCE_WIDTH)))
+                                DialogBody.plainMessage(Component.text("// " + fqcn, Style.META),
+                                        DialogKit.WIDE),
+                                DialogBody.plainMessage(
+                                        Component.text(source, Style.INFO).font(DialogKit.UNIFORM_FONT),
+                                        DialogKit.WIDE)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(nav).exitAction(doneButton()).columns(nav.size()).build()));
+                .type(DialogType.multiAction(nav)
+                        .exitAction(DialogKit.backToHubButton(name))
+                        .columns(nav.size())
+                        .build()));
     }
 
     private static String simpleName(String fqcn) {
@@ -197,28 +203,30 @@ public final class InfoDialogs {
     public void openErrors(Player p, String name, List<ModErrors.ErrorRecord> records) {
         List<DialogBody> body = new ArrayList<>();
         if (records == null || records.isEmpty()) {
-            body.add(DialogBody.plainMessage(Component.text("No recent errors.", NamedTextColor.GRAY), PROSE_WIDTH));
+            body.add(DialogBody.plainMessage(Component.text("No recent errors.", Style.INFO), DialogKit.BODY));
         }
         for (ModErrors.ErrorRecord r : records == null ? List.<ModErrors.ErrorRecord>of() : records) {
             Component block = Component.text(r.count() + "× " + r.exceptionClass() + ": " + r.message(),
-                            NamedTextColor.RED)
+                            Style.ERROR)
                     .append(Component.newline())
                     .append(Component.text("at " + r.topFrame() + " (" + r.where()
-                            + ", last " + relativeTime(r.lastSeen()) + ")", NamedTextColor.GRAY));
+                            + ", last " + relativeTime(r.lastSeen()) + ")", Style.INFO));
             for (String frame : r.stack() == null ? List.<String>of() : r.stack()) {
                 block = block.append(Component.newline())
-                        .append(Component.text("  " + frame, NamedTextColor.DARK_GRAY));
+                        .append(Component.text("  " + frame, Style.META));
             }
-            body.add(DialogBody.plainMessage(block, PROSE_WIDTH));
+            body.add(DialogBody.plainMessage(block, DialogKit.BODY));
         }
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(name + " — recent errors"))
+                .base(DialogBase.builder(DialogKit.title(name + " — errors"))
                         .body(body)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(List.of(manualButton(name), sourceButton(name)))
-                        .exitAction(doneButton())
-                        .columns(2)
+                .type(DialogType.multiAction(List.of(
+                                DialogKit.manualButton(name), DialogKit.sourceButton(name),
+                                DialogKit.historyButton(name)))
+                        .exitAction(DialogKit.backToHubButton(name))
+                        .columns(3)
                         .build()));
         show(p, dialog);
     }
@@ -263,39 +271,74 @@ public final class InfoDialogs {
         for (int i = versions.size() - 1; i >= 0; i--) {
             ModStore.StoredVersion v = versions.get(i);
             boolean active = v.version() == mod.currentVersion();
-            StringBuilder label = new StringBuilder(active ? "● " : "").append("v").append(v.version());
-            if (v.kind() != null && !v.kind().isBlank()) {
-                label.append(" · ").append(v.kind());
-            }
-            label.append(" · ").append(relativeTime(v.createdAt()));
-            buttons.add(ActionButton.builder(Component.text(label.toString()))
+            buttons.add(ActionButton.builder(historyRowLabel(v, active))
                     .tooltip(versionTooltip(v, onDisk.contains(v.version())))
-                    .width(FILE_BUTTON_WIDTH)
+                    .width(DialogKit.ROW)
                     .action(openVersionAction(mod, v, active, onDisk.contains(v.version())))
                     .build());
         }
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(mod.name() + " — history"))
+                .base(DialogBase.builder(DialogKit.title(mod.name() + " — history"))
                         .body(List.of(DialogBody.plainMessage(Component.text(
                                 versions.size() + " versions · v" + mod.currentVersion() + " active",
-                                NamedTextColor.GRAY))))
+                                Style.INFO), DialogKit.BODY)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(buttons).exitAction(doneButton()).columns(1).build()));
+                .type(DialogType.multiAction(buttons)
+                        .exitAction(DialogKit.backToHubButton(mod.name()))
+                        .columns(1)
+                        .build()));
         show(p, dialog);
+    }
+
+    /**
+     * One timeline row: {@code "● ✨ v1 · create · 3d ago"} — the active row's dot green and
+     * text white, inactive rows metadata-gray; the kind rendered glyph-first
+     * (✨ create · ✎ edit · 🔧 fix · ⟳ again).
+     */
+    private static Component historyRowLabel(ModStore.StoredVersion v, boolean active) {
+        StringBuilder text = new StringBuilder();
+        String glyph = kindGlyph(v.kind());
+        if (!glyph.isEmpty()) {
+            text.append(glyph).append(' ');
+        }
+        text.append('v').append(v.version());
+        if (v.kind() != null && !v.kind().isBlank()) {
+            text.append(" · ").append(v.kind());
+        }
+        text.append(" · ").append(relativeTime(v.createdAt()));
+        if (active) {
+            return Component.text("● ", Style.OK)
+                    .append(Component.text(text.toString(), NamedTextColor.WHITE));
+        }
+        return Component.text(text.toString(), Style.META);
+    }
+
+    /** The canonical glyph for a stored version's kind ("" for pre-tracking/unknown kinds). */
+    private static String kindGlyph(String kind) {
+        if (kind == null) {
+            return "";
+        }
+        return switch (kind) {
+            case "create" -> "✨";
+            case "edit" -> "✎";
+            case "fix" -> "🔧";
+            case "again" -> "⟳";
+            default -> "";
+        };
     }
 
     /** Timeline row tooltip: changelog (fallback: truncated prompt) plus blank-safe metadata. */
     private static Component versionTooltip(ModStore.StoredVersion v, boolean onDisk) {
-        Component tip = Component.text(changelogOrPrompt(v), NamedTextColor.GRAY);
+        Component tip = Component.text(changelogOrPrompt(v), Style.INFO);
         String meta = joinedMeta(v, false);
         if (!meta.isEmpty()) {
             tip = tip.append(Component.newline())
-                    .append(Component.text(meta, NamedTextColor.DARK_GRAY));
+                    .append(Component.text(meta, Style.META));
         }
         if (!onDisk) {
             tip = tip.append(Component.newline())
-                    .append(Component.text("(sources missing on disk)", NamedTextColor.RED));
+                    .append(Component.text("(sources missing on disk)", Style.ERROR));
         }
         return tip;
     }
@@ -328,32 +371,36 @@ public final class InfoDialogs {
     private static Dialog versionDialog(ModStore.StoredMod mod, ModStore.StoredVersion v,
                                          boolean active, boolean onDisk) {
         List<DialogBody> body = new ArrayList<>();
-        body.add(DialogBody.plainMessage(Component.text(changelogOrPrompt(v), NamedTextColor.GRAY), PROSE_WIDTH));
+        body.add(DialogBody.plainMessage(Component.text(changelogOrPrompt(v), Style.INFO), DialogKit.BODY));
         if (v.prompt() != null && !v.prompt().isBlank()) {
             body.add(DialogBody.plainMessage(
-                    Component.text("Prompt: " + v.prompt(), NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+                    Component.text("Prompt: " + v.prompt(), Style.META), DialogKit.BODY));
         }
         String meta = joinedMeta(v, true);
         if (!onDisk) {
             meta = meta.isEmpty() ? "(sources missing on disk)" : meta + " · (sources missing on disk)";
         }
         if (!meta.isEmpty()) {
-            body.add(DialogBody.plainMessage(Component.text(meta, NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+            body.add(DialogBody.plainMessage(Component.text(meta, Style.META), DialogKit.BODY));
         }
 
         List<ActionButton> nav = new ArrayList<>();
         if (!active && onDisk) {
-            nav.add(navButton("⚡ Activate", "/vibe rollback " + mod.name() + " " + v.version(),
+            nav.add(DialogKit.navButton("⚡ Activate…", "/vibe rollback " + mod.name() + " " + v.version(),
                     "Recompile and hot-load this version (asks to confirm)"));
         }
-        nav.add(navButton("← Back", "/vibe history " + mod.name(), "Back to the version timeline"));
+        nav.add(DialogKit.navButton("← Back to history", "/vibe history " + mod.name(),
+                "Back to the version timeline"));
         return Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(mod.name() + " — v" + v.version()
+                .base(DialogBase.builder(DialogKit.title(mod.name() + " — v" + v.version()
                                 + (active ? " (active)" : "")))
                         .body(body)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.multiAction(nav).exitAction(doneButton()).columns(nav.size()).build()));
+                .type(DialogType.multiAction(nav)
+                        .exitAction(DialogKit.backToHubButton(mod.name()))
+                        .columns(nav.size())
+                        .build()));
     }
 
     /**
@@ -426,8 +473,9 @@ public final class InfoDialogs {
      */
     public void openCosts(Player p, double sessionCostUsd, List<ModCost> rows) {
         List<DialogBody> body = new ArrayList<>();
-        body.add(DialogBody.plainMessage(Component.text(
-                "Session spend: " + Style.fmtCost(sessionCostUsd), NamedTextColor.GOLD), PROSE_WIDTH));
+        body.add(DialogKit.iconBody(Material.GOLD_INGOT,
+                Component.text("Session spend: ", Style.INFO)
+                        .append(Component.text(Style.fmtCost(sessionCostUsd), NamedTextColor.WHITE))));
         List<String> lines = new ArrayList<>();
         int zeroMods = 0;
         boolean anyPreTracking = false;
@@ -440,25 +488,26 @@ public final class InfoDialogs {
             lines.add(costLine(row));
         }
         if (lines.isEmpty()) {
-            body.add(DialogBody.plainMessage(Component.text("No paid generations yet.", NamedTextColor.GRAY),
-                    PROSE_WIDTH));
+            body.add(DialogBody.plainMessage(Component.text("No paid generations yet.", Style.INFO),
+                    DialogKit.BODY));
         } else {
-            body.add(DialogBody.plainMessage(joined(lines), PROSE_WIDTH));
+            body.add(DialogBody.plainMessage(
+                    DialogKit.joined(lines, Style.INFO).font(DialogKit.UNIFORM_FONT), DialogKit.BODY));
         }
         if (zeroMods > 0) {
             body.add(DialogBody.plainMessage(Component.text(
-                    zeroMods + " mod(s) at $0 not shown", NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+                    zeroMods + " mod(s) at $0 not shown", Style.META), DialogKit.BODY));
         }
         if (anyPreTracking) {
             body.add(DialogBody.plainMessage(Component.text(
-                    "versions from before cost tracking count as $0", NamedTextColor.GRAY), PROSE_WIDTH));
+                    "versions from before cost tracking count as $0", Style.META), DialogKit.BODY));
         }
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("VibeMod — costs"))
+                .base(DialogBase.builder(DialogKit.title("VibeMod — costs"))
                         .body(body)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.notice(doneButton())));
+                .type(DialogType.notice(DialogKit.doneButton())));
         show(p, dialog);
     }
 
@@ -476,60 +525,10 @@ public final class InfoDialogs {
         return line.toString();
     }
 
-    // ---- shared plumbing ----
+    // ---- shared plumbing (thin wrapper over DialogKit with this class's plugin) ----
 
-    private static ActionButton manualButton(String mod) {
-        return navButton("📖 Manual", "/vibe manual " + mod, "Open the player manual");
-    }
-
-    private static ActionButton sourceButton(String mod) {
-        return navButton("⌨ Source", "/vibe source " + mod, "Read the generated source");
-    }
-
-    private static ActionButton errorsButton(String mod) {
-        return navButton("⚠ Errors", "/vibe errors " + mod, "View recent error records");
-    }
-
-    private static ActionButton backToIndexButton(String mod) {
-        return navButton("← Back", "/vibe source " + mod, "Back to the file list");
-    }
-
-    /**
-     * A button that runs a read-only {@code /vibe} subcommand, which reopens the
-     * target viewer with freshly assembled data (see the class javadoc).
-     */
-    private static ActionButton navButton(String label, String command, String tooltip) {
-        return ActionButton.builder(Component.text(label))
-                .tooltip(Component.text(tooltip, NamedTextColor.GRAY))
-                .action(DialogAction.staticAction(ClickEvent.runCommand(command)))
-                .build();
-    }
-
-    /** A no-op close button, mirroring {@link Dialogs}' Cancel. */
-    private static ActionButton doneButton() {
-        return ActionButton.builder(Component.text("Done"))
-                .action(DialogAction.customClick((view, audience) -> {
-                }, ClickCallback.Options.builder().uses(1).build()))
-                .build();
-    }
-
-    /** Gray, one Component with newlines between {@code lines}. */
-    private static Component joined(List<String> lines) {
-        Component out = Component.empty().color(NamedTextColor.GRAY);
-        for (int i = 0; i < lines.size(); i++) {
-            if (i > 0) {
-                out = out.append(Component.newline());
-            }
-            out = out.append(Component.text(lines.get(i)));
-        }
-        return out;
-    }
-
-    /**
-     * Show next tick (never inside an inventory-click handler); same rationale
-     * as {@link Dialogs}: showDialog replaces the client screen on its own.
-     */
+    /** See {@link DialogKit#show}. */
     private void show(Player p, Dialog dialog) {
-        Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
+        DialogKit.show(plugin, p, dialog);
     }
 }

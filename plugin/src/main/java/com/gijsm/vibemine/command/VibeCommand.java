@@ -532,7 +532,8 @@ public final class VibeCommand implements TabExecutor {
         }
         boolean confirmed = args.length >= 3 && args[2].equalsIgnoreCase("confirm");
         if (sender instanceof Player player && !confirmed) {
-            dialogs.openRollbackConfirm(player, mod.name(), version, InfoDialogs.changelogOrPrompt(target));
+            dialogs.openRollbackConfirm(player, mod.name(), mod.icon(), version,
+                    InfoDialogs.changelogOrPrompt(target));
             return;
         }
         store.setCurrentVersion(mod.name(), version);
@@ -630,7 +631,7 @@ public final class VibeCommand implements TabExecutor {
         }
         boolean confirmed = args.length >= 2 && args[1].equalsIgnoreCase("confirm");
         if (sender instanceof Player player && !confirmed) {
-            dialogs.openDeleteConfirm(player, mod.name(), mod.versions().size());
+            dialogs.openDeleteConfirm(player, mod.name(), mod.icon(), mod.versions().size());
             return;
         }
         registry.unload(modName);
@@ -701,7 +702,9 @@ public final class VibeCommand implements TabExecutor {
         String modName = args[0];
         boolean confirmed = args.length >= 2 && args[1].equalsIgnoreCase("confirm");
         if (sender instanceof Player player && !confirmed) {
-            dialogs.openFixConfirm(player, modName, lastErrorSummary(modName));
+            ModStore.StoredMod stored = store.get(modName);
+            dialogs.openFixConfirm(player, modName, stored == null ? null : stored.icon(),
+                    lastErrorSummary(modName));
             return;
         }
         String report = errors.report(modName, FIX_ERROR_LINES);

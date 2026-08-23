@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.BiConsumer;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import io.papermc.paper.dialog.Dialog;
@@ -22,11 +21,10 @@ import io.papermc.paper.registry.data.dialog.type.DialogType;
 
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 
-import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
@@ -84,9 +82,6 @@ public final class Dialogs {
     }
 
     private static final int PROMPT_MAX_LENGTH = 2000;
-    /** Wider inputs + body lines so labels/values do not clip. */
-    private static final int INPUT_WIDTH = 350;
-    private static final int BODY_WIDTH = 400;
 
     private static final int KNOB_TEXT_MAX_LENGTH = 256;
     private static final int NAME_HINT_MAX_LENGTH = 32;
@@ -113,27 +108,29 @@ public final class Dialogs {
     /** Opens the "make a new mod" dialog: a multiline prompt plus an optional name hint. */
     public void openPrompt(Player p) {
         DialogInput textInput = DialogInput.text("prompt", Component.text("What should the mod do?"))
+                .width(DialogKit.INPUT)
                 .maxLength(PROMPT_MAX_LENGTH)
                 .multiline(TextDialogInput.MultilineOptions.create(null, MULTILINE_HEIGHT))
                 .build();
         DialogInput nameInput = DialogInput.text("name", Component.text("Name hint (optional)"))
+                .width(DialogKit.INPUT)
                 .maxLength(NAME_HINT_MAX_LENGTH)
                 .labelVisible(true)
                 .build();
 
-        ActionButton create = ActionButton.builder(Component.text("Create ✨"))
+        ActionButton create = ActionButton.builder(Component.text("✨ Create", Style.OK))
+                .tooltip(Component.text("Generate the mod with the model", Style.INFO))
                 .action(mainThreadClick(this::handlePromptSubmit))
                 .build();
-        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Make a mod"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Describe what the mod should do. Be specific.", NamedTextColor.GRAY))))
+                .base(DialogBase.builder(DialogKit.title("Make a mod"))
+                        .body(List.of(DialogKit.iconBody(Material.CRAFTING_TABLE, Component.text(
+                                "Describe what the mod should do. Be specific.", Style.INFO))))
                         .inputs(List.of(textInput, nameInput))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(create, cancel)));
+                .type(DialogType.confirmation(create, DialogKit.cancelButton("Close without creating anything"))));
         show(p, dialog);
     }
 
@@ -157,22 +154,24 @@ public final class Dialogs {
     public void openEdit(Player p, String mod, String manualSummary) {
         String summary = (manualSummary == null || manualSummary.isBlank()) ? "(no manual available)" : manualSummary;
         DialogInput changeInput = DialogInput.text("change", Component.text("What should change?"))
+                .width(DialogKit.INPUT)
                 .maxLength(PROMPT_MAX_LENGTH)
                 .multiline(TextDialogInput.MultilineOptions.create(null, MULTILINE_HEIGHT))
                 .build();
 
-        ActionButton update = ActionButton.builder(Component.text("Update"))
+        ActionButton update = ActionButton.builder(Component.text("Update", Style.OK))
+                .tooltip(Component.text("Send the change request to the model", Style.INFO))
                 .action(mainThreadClick((view, audience) -> handleEditSubmit(mod, view, audience)))
                 .build();
-        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Edit " + mod))
-                        .body(List.of(DialogBody.plainMessage(Component.text(summary, NamedTextColor.GRAY))))
+                .base(DialogBase.builder(DialogKit.title("Edit " + mod))
+                        .body(List.of(DialogBody.plainMessage(Component.text(summary, Style.INFO),
+                                DialogKit.BODY)))
                         .inputs(List.of(changeInput))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(update, cancel)));
+                .type(DialogType.confirmation(update, DialogKit.cancelButton("Close without changing anything"))));
         show(p, dialog);
     }
 
@@ -207,7 +206,7 @@ public final class Dialogs {
         }
         List<DialogBody> body = new ArrayList<>();
         if (errorMessage != null && !errorMessage.isBlank()) {
-            body.add(DialogBody.plainMessage(Component.text(errorMessage, NamedTextColor.RED)));
+            body.add(DialogBody.plainMessage(Component.text(errorMessage, Style.ERROR), DialogKit.BODY));
         }
         // Inputs get short key-only labels (long text clips inside sliders/fields);
         // the descriptions live up here as one readable block instead.
@@ -215,9 +214,9 @@ public final class Dialogs {
             String desc = knob.description();
             if (desc != null && !desc.isBlank()) {
                 body.add(DialogBody.plainMessage(
-                        Component.text(knob.key(), NamedTextColor.AQUA)
-                                .append(Component.text(" — " + desc, NamedTextColor.GRAY)),
-                        BODY_WIDTH));
+                        Component.text(knob.key(), Style.ACTION)
+                                .append(Component.text(" — " + desc, Style.INFO)),
+                        DialogKit.BODY));
             }
         }
 
@@ -226,18 +225,18 @@ public final class Dialogs {
             inputs.add(buildKnobInput(knob));
         }
 
-        ActionButton save = ActionButton.builder(Component.text("Save"))
+        ActionButton save = ActionButton.builder(Component.text("Save", Style.OK))
+                .tooltip(Component.text("Apply and persist these values", Style.INFO))
                 .action(mainThreadClick((view, audience) -> handleConfigSubmit(mod, knobs, view, audience)))
                 .build();
-        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Configure " + mod))
+                .base(DialogBase.builder(DialogKit.title("Configure " + mod))
                         .body(body)
                         .inputs(inputs)
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(save, cancel)));
+                .type(DialogType.confirmation(save, DialogKit.cancelButton())));
         show(p, dialog);
     }
 
@@ -257,7 +256,9 @@ public final class Dialogs {
                     boolean initial = choice.equalsIgnoreCase(current);
                     entries.add(SingleOptionDialogInput.OptionEntry.create(inputKey(choice), Component.text(choice), initial));
                 }
-                return DialogInput.singleOption(inputKey(knob.key()), label, entries).build();
+                return DialogInput.singleOption(inputKey(knob.key()), label, entries)
+                        .width(DialogKit.INPUT)
+                        .build();
             }
             case "integer":
             case "decimal": {
@@ -266,7 +267,7 @@ public final class Dialogs {
                 double step = knob.step() != null ? knob.step() : DEFAULT_STEP;
                 double initial = parseDouble(current, min);
                 return DialogInput.numberRange(inputKey(knob.key()), label, (float) min, (float) max)
-                        .width(INPUT_WIDTH)
+                        .width(DialogKit.INPUT)
                         .labelFormat("%s: %s")
                         .initial((float) initial)
                         .step((float) step)
@@ -275,7 +276,7 @@ public final class Dialogs {
             case "text":
             default:
                 return DialogInput.text(inputKey(knob.key()), label)
-                        .width(INPUT_WIDTH)
+                        .width(DialogKit.INPUT)
                         .maxLength(KNOB_TEXT_MAX_LENGTH)
                         .initial(current == null ? "" : current)
                         .build();
@@ -289,15 +290,6 @@ public final class Dialogs {
      */
     private static String inputKey(String knobKey) {
         return knobKey.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
-    }
-
-    /**
-     * Show next tick (never inside an inventory-click handler). Deliberately no
-     * closeInventory(): showDialog replaces the client screen on its own, and a
-     * close-container packet from here has stalled the main thread before.
-     */
-    private void show(Player p, Dialog dialog) {
-        Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
     }
 
     /** Short label only — full descriptions render in the dialog body above the inputs. */
@@ -411,9 +403,11 @@ public final class Dialogs {
             entries.add(SingleOptionDialogInput.OptionEntry.create(
                     inputKey("m" + i), Component.text(m.id() + " — " + m.priceLabel()), initial));
         }
-        DialogInput dropdown = DialogInput.singleOption("model", Component.text("Model"), entries).build();
+        DialogInput dropdown = DialogInput.singleOption("model", Component.text("Model"), entries)
+                .width(DialogKit.INPUT)
+                .build();
         DialogInput customInput = DialogInput.text("custom", Component.text("Custom model id (optional)"))
-                .width(INPUT_WIDTH)
+                .width(DialogKit.INPUT)
                 .maxLength(CUSTOM_MODEL_MAX_LENGTH)
                 .labelVisible(true)
                 .build();
@@ -422,22 +416,23 @@ public final class Dialogs {
                 .map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
         List<DialogBody> body = List.of(
                 DialogBody.plainMessage(Component.text(
-                        "Current: " + currentId + " (" + currentPrice + ")", NamedTextColor.GRAY), BODY_WIDTH),
-                DialogBody.plainMessage(Component.text(
-                        "Spent this session: " + Style.fmtCost(sessionCostUsd), NamedTextColor.GRAY), BODY_WIDTH));
+                        "Current: " + currentId + " (" + currentPrice + ")", Style.INFO), DialogKit.BODY),
+                DialogBody.plainMessage(Component.text("Spent this session: ", Style.INFO)
+                        .append(Component.text(Style.fmtCost(sessionCostUsd), NamedTextColor.WHITE)),
+                        DialogKit.BODY));
 
-        ActionButton use = ActionButton.builder(Component.text("Use"))
+        ActionButton use = ActionButton.builder(Component.text("Use", Style.OK))
+                .tooltip(Component.text("Switch generation to the selected model", Style.INFO))
                 .action(mainThreadClick((view, audience) -> handleModelPick(options, view, audience, onPick)))
                 .build();
-        ActionButton cancel = ActionButton.builder(Component.text("Cancel")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Choose a model"))
+                .base(DialogBase.builder(DialogKit.title("Choose a model"))
                         .body(body)
                         .inputs(List.of(dropdown, customInput))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(use, cancel)));
+                .type(DialogType.confirmation(use, DialogKit.cancelButton("Keep the current model"))));
         show(p, dialog);
     }
 
@@ -468,23 +463,29 @@ public final class Dialogs {
     /**
      * Confirms sending {@code mod}'s recent errors to the model for a repair round. The confirm
      * button runs {@code /vibe fix <mod> confirm} rather than calling back into this class, since
-     * this class carries no fix callback (see the class javadoc).
+     * this class carries no fix callback (see the class javadoc). {@code icon} is the mod's stored
+     * icon name (blank-safe), shown so the player instantly recognizes what they are acting on.
      */
-    public void openFixConfirm(Player p, String mod, String lastError) {
+    public void openFixConfirm(Player p, String mod, String icon, String lastError) {
         String summary = (lastError == null || lastError.isBlank()) ? "(no error recorded)" : lastError;
-        ActionButton fix = ActionButton.builder(Component.text("Fix it 🔧"))
+        ActionButton fix = ActionButton.builder(Component.text("🔧 Fix it", Style.WARN))
+                .tooltip(Component.text("Send the recent errors to the model for a repair round", Style.INFO))
                 .action(DialogAction.staticAction(ClickEvent.runCommand("/vibe fix " + mod + " confirm")))
                 .build();
-        ActionButton notNow = ActionButton.builder(Component.text("Not now")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text(mod + " is degraded"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Send the recent errors to the model to attempt a fix?\n\n" + summary,
-                                NamedTextColor.GRAY))))
+                .base(DialogBase.builder(DialogKit.title("Fix " + mod + "?"))
+                        .body(List.of(
+                                DialogKit.iconBody(DialogKit.iconItem(icon, false),
+                                        Component.text(mod, NamedTextColor.WHITE)
+                                                .append(Component.text(" is degraded", Style.WARN))),
+                                DialogBody.plainMessage(Component.text(
+                                        "Send the recent errors to the model to attempt a fix?",
+                                        Style.INFO), DialogKit.BODY),
+                                DialogBody.plainMessage(Component.text(summary, Style.META), DialogKit.BODY)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(fix, notNow)));
+                .type(DialogType.confirmation(fix, DialogKit.cancelButton("Leave it as it is for now"))));
         show(p, dialog);
     }
 
@@ -497,22 +498,26 @@ public final class Dialogs {
      * calling back into this class, which {@code VibeCommand} treats as "already
      * confirmed, activate it now" instead of reopening this same dialog.
      */
-    public void openRollbackConfirm(Player p, String mod, int version, String changelog) {
+    public void openRollbackConfirm(Player p, String mod, String icon, int version, String changelog) {
         String summary = (changelog == null || changelog.isBlank()) ? "(no changelog)" : changelog;
-        ActionButton activate = ActionButton.builder(Component.text("Activate v" + version + " ⚡"))
+        ActionButton activate = ActionButton.builder(Component.text("⚡ Activate v" + version, Style.OK))
+                .tooltip(Component.text("Recompile and hot-load v" + version, Style.INFO))
                 .action(DialogAction.staticAction(ClickEvent.runCommand(
                         "/vibe rollback " + mod + " " + version + " confirm")))
                 .build();
-        ActionButton notNow = ActionButton.builder(Component.text("Not now")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Activate " + mod + " v" + version + "?"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Recompile and hot-load this stored version?\n\n" + summary,
-                                NamedTextColor.GRAY))))
+                .base(DialogBase.builder(DialogKit.title("Activate " + mod + " v" + version + "?"))
+                        .body(List.of(
+                                DialogKit.iconBody(DialogKit.iconItem(icon, false),
+                                        Component.text(mod + " v" + version, NamedTextColor.WHITE)),
+                                DialogBody.plainMessage(Component.text(
+                                        "Recompile and hot-load this stored version?",
+                                        Style.INFO), DialogKit.BODY),
+                                DialogBody.plainMessage(Component.text(summary, Style.META), DialogKit.BODY)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(activate, notNow)));
+                .type(DialogType.confirmation(activate, DialogKit.cancelButton("Keep the active version"))));
         show(p, dialog);
     }
 
@@ -524,52 +529,37 @@ public final class Dialogs {
      * a real command rather than calling back into this class, which {@code VibeCommand}
      * treats as "already confirmed, delete it now" instead of reopening this same dialog.
      */
-    public void openDeleteConfirm(Player p, String mod, int versionCount) {
-        ActionButton delete = ActionButton.builder(Component.text("Delete ✖"))
+    public void openDeleteConfirm(Player p, String mod, String icon, int versionCount) {
+        ActionButton delete = ActionButton.builder(Component.text("✖ Delete forever", Style.ERROR))
+                .tooltip(Component.text("Permanently delete this mod", Style.INFO))
                 .action(DialogAction.staticAction(ClickEvent.runCommand("/vibe delete " + mod + " confirm")))
                 .build();
-        ActionButton keep = ActionButton.builder(Component.text("Keep it")).action(noOp()).build();
 
         Dialog dialog = Dialog.create(b -> b.empty()
-                .base(DialogBase.builder(Component.text("Delete " + mod + "?"))
-                        .body(List.of(DialogBody.plainMessage(Component.text(
-                                "Permanently delete " + mod + " and its " + versionCount
-                                        + " stored version(s)? This cannot be undone.",
-                                NamedTextColor.GRAY))))
+                .base(DialogBase.builder(DialogKit.title("Delete " + mod + "?"))
+                        .body(List.of(
+                                DialogKit.iconBody(DialogKit.iconItem(icon, false),
+                                        Component.text(mod, NamedTextColor.WHITE)),
+                                DialogBody.plainMessage(Component.text(
+                                        "This permanently deletes " + mod + " and its " + versionCount
+                                                + " stored version" + (versionCount == 1 ? "" : "s")
+                                                + ". This cannot be undone.",
+                                        Style.ERROR), DialogKit.BODY)))
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
-                .type(DialogType.confirmation(delete, keep)));
+                .type(DialogType.confirmation(delete, DialogKit.cancelButton("Keep the mod"))));
         show(p, dialog);
     }
 
-    // ---- shared plumbing ----
+    // ---- shared plumbing (thin wrappers over DialogKit with this class's plugin/logger) ----
 
-    /** A no-op click action for buttons (e.g. Cancel) that should just close the dialog. */
-    private static DialogAction noOp() {
-        return DialogAction.customClick((view, audience) -> {
-        }, ClickCallback.Options.builder().uses(1).build());
+    /** See {@link DialogKit#show}. */
+    private void show(Player p, Dialog dialog) {
+        DialogKit.show(plugin, p, dialog);
     }
 
-    /**
-     * Wraps a dialog callback so it always hops to the main thread before running, and never lets
-     * an exception escape into Bukkit - it is logged and reported to the player instead.
-     */
+    /** See {@link DialogKit#mainThreadClick}. */
     private DialogAction mainThreadClick(java.util.function.BiConsumer<DialogResponseView, Audience> body) {
-        return DialogAction.customClick((view, audience) ->
-                        Bukkit.getScheduler().runTask(plugin, () -> runSafely(view, audience, body)),
-                ClickCallback.Options.builder().uses(1).build());
-    }
-
-    private static void runSafely(DialogResponseView view, Audience audience,
-                                   java.util.function.BiConsumer<DialogResponseView, Audience> body) {
-        try {
-            body.accept(view, audience);
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "Dialog callback failed", e);
-            if (audience instanceof Player player) {
-                player.sendMessage(Style.err("Something went wrong: "
-                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())));
-            }
-        }
+        return DialogKit.mainThreadClick(plugin, LOG, body);
     }
 }

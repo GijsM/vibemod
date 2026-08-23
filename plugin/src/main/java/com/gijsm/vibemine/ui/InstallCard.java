@@ -31,7 +31,7 @@ public final class InstallCard {
     public static Component build(ModStore.StoredMod mod, ModHandle liveOrNull) {
         boolean enabled = liveOrNull != null ? liveOrNull.enabled() : mod.enabled();
         boolean degraded = liveOrNull != null && liveOrNull.degraded();
-        NamedTextColor stateColor = degraded ? Style.WARN : (enabled ? Style.OK : NamedTextColor.GRAY);
+        NamedTextColor stateColor = Style.stateColor(enabled, degraded);
         String stateText = degraded ? "[DEGRADED" + errorSuffix(liveOrNull) + "]" : (enabled ? "[ON]" : "[OFF]");
 
         Component out = Style.prefix()

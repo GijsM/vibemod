@@ -13,7 +13,7 @@ import net.kyori.adventure.text.format.TextDecoration;
  * written in (see the manual rules in {@code llm/PromptLibrary}):
  *
  * <ul>
- *   <li>line-based: {@code "## "} headings (bold, {@link Style#WARN gold}),
+ *   <li>line-based: {@code "## "} headings (bold, {@link Style#HEADING dark aqua}),
  *       {@code "### "} subheadings (bold white), {@code "- "}/{@code "* "}
  *       bullets (rendered as {@code " • "}), and blank lines as paragraph
  *       breaks;</li>
@@ -53,7 +53,7 @@ public final class MarkdownMini {
             }
             if (line.startsWith("## ")) {
                 current = flush(blocks, current);
-                blocks.add(inline(line.substring(3).strip(), Style.WARN)
+                blocks.add(inline(line.substring(3).strip(), Style.HEADING)
                         .decoration(TextDecoration.BOLD, true));
                 continue;
             }

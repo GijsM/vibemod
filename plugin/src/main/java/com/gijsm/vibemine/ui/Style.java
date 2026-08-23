@@ -7,26 +7,54 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 
 /**
- * Unified chat styling for VibeMod: a two-tone {@code ⬡ vibe} prefix plus the
- * semantic color scheme every user-facing line in {@code ui/} and
- * {@code command/} routes through - green for success, gold for
- * degraded/warnings, red for errors, aqua for clickable actions, gray for
- * plain information.
+ * The single source of truth for VibeMod's palette — every user-facing line
+ * in {@code ui/} and {@code command/} routes through these semantic colors,
+ * one meaning per color:
+ *
+ * <ul>
+ *   <li>{@link #OK} green — running / success / positive confirm buttons</li>
+ *   <li>{@link #WARN} gold — degraded state and warnings ONLY</li>
+ *   <li>{@link #ERROR} red — errors, destructive consequences, destructive
+ *       confirm buttons</li>
+ *   <li>{@link #ACTION} aqua — interactive accents and inline code</li>
+ *   <li>{@link #INFO} gray — prose</li>
+ *   <li>{@link #HEADING} dark aqua (+bold via {@link #heading}) — all
+ *       section headings</li>
+ *   <li>{@link #META} dark gray — metadata: versions, creator, cost lines,
+ *       tooltip second lines</li>
+ *   <li>{@link #HINT} yellow — "Try:" lines, tips, empty-state calls to
+ *       action</li>
+ * </ul>
+ *
+ * <p>Also hosts the two-tone {@code ⬡ vibe} chat prefix and the shared
+ * builders: prefixed message lines, clickable chat buttons, the state dot,
+ * and cost formatting.
  */
 public final class Style {
 
-    /** Success/OK. */
+    /** Success/OK: running / success / positive confirm buttons. */
     public static final NamedTextColor OK = NamedTextColor.GREEN;
-    /** Degraded state / warning. */
+    /** Degraded state / warning — nothing else renders gold. */
     public static final NamedTextColor WARN = NamedTextColor.GOLD;
-    /** Error / failure. */
+    /** Error / failure / destructive consequences and confirm buttons. */
     public static final NamedTextColor ERROR = NamedTextColor.RED;
-    /** Clickable buttons and actions. */
+    /** Clickable buttons, interactive accents, inline code. */
     public static final NamedTextColor ACTION = NamedTextColor.AQUA;
-    /** Plain informational text. */
+    /** Plain informational prose. */
     public static final NamedTextColor INFO = NamedTextColor.GRAY;
+    /** Section headings (render bold via {@link #heading}). */
+    public static final NamedTextColor HEADING = NamedTextColor.DARK_AQUA;
+    /** Metadata: versions, creator, cost lines, tooltips' second line. */
+    public static final NamedTextColor META = NamedTextColor.DARK_GRAY;
+    /** Tips, "Try:" lines, empty-state calls to action. */
+    public static final NamedTextColor HINT = NamedTextColor.YELLOW;
 
     private Style() {
+    }
+
+    /** A bold {@link #HEADING} section heading, never italic. */
+    public static Component heading(String text) {
+        return plain(text, HEADING).decoration(TextDecoration.BOLD, true);
     }
 
     /** The {@code ⬡ vibe } prefix: an aqua hex glyph followed by a dark-aqua "vibe", never italic. */
@@ -66,10 +94,17 @@ public final class Style {
         return c;
     }
 
-    /** A colored {@code ●}: green when enabled and healthy, gold when degraded, gray when off. */
+    /**
+     * A colored {@code ●}: green when enabled and healthy, gold when degraded, gray when off.
+     * The ONLY state-dot builder — no hand-rolled ternaries elsewhere.
+     */
     public static Component dot(boolean enabled, boolean degraded) {
-        NamedTextColor color = degraded ? WARN : (enabled ? OK : NamedTextColor.GRAY);
-        return plain("●", color);
+        return plain("●", stateColor(enabled, degraded));
+    }
+
+    /** The state color behind {@link #dot}: {@link #WARN} degraded, {@link #OK} running, gray off. */
+    public static NamedTextColor stateColor(boolean enabled, boolean degraded) {
+        return degraded ? WARN : (enabled ? OK : NamedTextColor.GRAY);
     }
 
     /** {@code "$0.02"} normally, {@code "$0.0004"} (4 decimals) once the amount drops below a cent. */
