@@ -22,8 +22,8 @@ import org.bukkit.scheduler.BukkitTask;
  * energy — and, since v3.1, actual knowledge of what is being built: the
  * model streams its output and declares a plan manifest up front, so the bar
  * names the mod within seconds ("Conjuring MazeHedge…"), advances file-by-file
- * against the plan, and an action-bar ticker shows the file currently being
- * written with live volume ("✍ CourseManager.java · 3/5 · 6.2k chars").
+ * against the plan, and a scrolling ticker inside the bar name shows the file
+ * currently being written with live volume ("✍ CourseManager.java 3/5 · 6.2k chars").
  *
  * <p>Progress is mapped onto honest spans: Thinking 0→.05, the streamed
  * Writing span .05→.70 (plan-fraction when a plan exists, char-asymptote
@@ -33,13 +33,15 @@ import org.bukkit.scheduler.BukkitTask;
  *
  * <p>{@code streamStats} is volatile-write only (called from HTTP threads at
  * up to ~4/s); the animator task — main thread, every 6 ticks — is the single
- * renderer for bar and action bar. Chat receives only milestones.
+ * renderer for the bar. Chat receives only milestones.
  */
 public final class Progress {
 
     private static final long ANIMATION_PERIOD_TICKS = 6;
     private static final int TICKS_PER_VERB = 8;
     private static final long MAX_ANIMATION_TICKS = 20 * 60 * 10; // 10 minutes
+    private static final int TICKER_WINDOW = 32;
+    private static final String TICKER_LOOP_GAP = "  ·  ";
 
     /** Claude-ish warm shimmer for the label text. */
     private static final List<TextColor> SHIMMER = List.of(
@@ -92,6 +94,7 @@ public final class Progress {
     private volatile int plannedTotal = -1;
     private volatile int filesStarted = 0;
     private volatile int streamChars = 0;
+    private volatile int approxTokens = 0;
 
     public Progress(Plugin plugin, CommandSender viewer, String title) {
         this.plugin = plugin;
@@ -149,6 +152,7 @@ public final class Progress {
     /** Rolling stream volume — volatile write only; the animator renders it. */
     public void streamStats(int chars, int approxTokens) {
         this.streamChars = chars;
+        this.approxTokens = approxTokens;
     }
 
     /** Complete successfully: color-flash finale, full green bar, sound + firework, then hide. */
@@ -156,7 +160,6 @@ public final class Progress {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
-            clearActionBar();
             if (player != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
@@ -184,7 +187,6 @@ public final class Progress {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
-            clearActionBar();
             if (player != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
@@ -213,6 +215,7 @@ public final class Progress {
             currentFile = null;
             filesStarted = 0;
             streamChars = 0;
+            approxTokens = 0;
         } else if (label.equals("Writing")) {
             phaseFloor = 0.05f;
             phaseCeil = 0.70f;
@@ -258,6 +261,12 @@ public final class Progress {
         frame++;
         if (frame * ANIMATION_PERIOD_TICKS > MAX_ANIMATION_TICKS) {
             stopAnimation();
+            hideNow();
+            return;
+        }
+        if (player != null && !player.isOnline()) {
+            stopAnimation();
+            hideNow();
             return;
         }
         String sparkle = SPARKLES[(int) (frame % SPARKLES.length)];
@@ -269,39 +278,59 @@ public final class Progress {
         String object = planName != null ? " " + planName : "";
         bossBar.name(Component.text(sparkle + " ", SHIMMER.get((int) ((frame + 3) % SHIMMER.size())))
                 .append(Component.text(verb + object + dots, color))
-                .append(Component.text("  ⬡ " + title, NamedTextColor.DARK_GRAY)));
+                .append(Component.text(" ▸ ", NamedTextColor.DARK_GRAY))
+                .append(Component.text(tickerWindow(tickerText()), NamedTextColor.GRAY)));
         if (frame % 5 == 0) {
             bossBar.color(BAR_CYCLE.get((int) ((frame / 5) % BAR_CYCLE.size())));
         }
         float base = spanProgress();
         float wobble = (float) (Math.sin(frame / 3.0) * 0.015);
         bossBar.progress(Math.max(phaseFloor, Math.min(phaseCeil, base + wobble)));
+    }
 
-        // Action-bar ticker during the streamed span (6 ticks ≈ the 4/s throttle).
-        if (streamedSpan && player != null) {
-            StringBuilder line = new StringBuilder("✍ ");
+    /** Live ticker content, rebuilt every frame from the volatile stream state. */
+    private String tickerText() {
+        StringBuilder line = new StringBuilder();
+        if (streamedSpan) {
             if (currentFile != null) {
-                line.append(currentFile);
+                line.append("✍ ").append(currentFile);
                 if (plannedTotal > 0) {
-                    line.append(" · ").append(filesStarted).append('/').append(plannedTotal);
+                    line.append(' ').append(filesStarted).append('/').append(plannedTotal);
                 }
                 line.append(" · ");
             }
             line.append(fmtK(streamChars)).append(" chars");
-            player.sendActionBar(Component.text(line.toString(), color));
+            if (approxTokens > 0) {
+                line.append(" · ~").append(fmtK(approxTokens)).append(" tok");
+            }
+            line.append(" · ⬡ ").append(title);
+        } else {
+            line.append("⬡ ").append(title);
+            if (phaseFloor >= 0.70f && plannedTotal > 0) {
+                line.append(" · ").append(plannedTotal).append(" files");
+            }
         }
+        return line.toString();
+    }
+
+    /** Circular marquee: a fixed window over the ticker, advancing one char per frame. */
+    private String tickerWindow(String text) {
+        if (text.length() <= TICKER_WINDOW) {
+            return text;
+        }
+        String looped = text + TICKER_LOOP_GAP;
+        int start = (int) (frame % looped.length());
+        StringBuilder out = new StringBuilder(TICKER_WINDOW);
+        for (int i = 0; i < TICKER_WINDOW; i++) {
+            out.append(looped.charAt((start + i) % looped.length()));
+        }
+        return out.toString();
     }
 
     private void stopAnimation() {
         if (animator != null) {
             animator.cancel();
             animator = null;
-        }
-    }
-
-    private void clearActionBar() {
-        if (player != null) {
-            player.sendActionBar(Component.empty());
         }
     }
 
@@ -333,12 +362,14 @@ public final class Progress {
         }
     }
 
+    private void hideNow() {
+        if (bossBar != null && player != null) {
+            player.hideBossBar(bossBar);
+        }
+    }
+
     private void hideAfter(long ticks) {
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            if (bossBar != null && player != null) {
-                player.hideBossBar(bossBar);
-            }
-        }, ticks);
+        Bukkit.getScheduler().runTaskLater(plugin, this::hideNow, ticks);
     }
 
     private void chat(Component line) {
