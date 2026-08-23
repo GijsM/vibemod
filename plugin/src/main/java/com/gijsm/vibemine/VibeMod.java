@@ -36,6 +36,7 @@ import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.Progress;
+import com.gijsm.vibemine.ui.SettingsDialog;
 import com.gijsm.vibemine.ui.Style;
 
 import net.kyori.adventure.text.Component;
@@ -64,6 +65,7 @@ public final class VibeMod extends JavaPlugin {
     private DynamicCommands dynamicCommands;
     private Dialogs dialogs;
     private InfoDialogs infoDialogs;
+    private SettingsDialog settingsDialog;
 
     @Override
     public void onEnable() {
@@ -129,8 +131,9 @@ public final class VibeMod extends JavaPlugin {
                 (player, mod, changes) -> editFromPrompt(player, mod, changes),
                 this::applyConfigValues);
         infoDialogs = new InfoDialogs(this);
+        settingsDialog = new SettingsDialog(this, this::settingsSnapshot, this::applySettings,
+                this::openSettingsModelPicker, this::reloadVibeConfig);
         ModBrowserGui gui = new ModBrowserGui(this, registry, store, configs, modErrors, debugEcho,
-                catalog, client::sessionCostUsd,
                 new GuiCallbacks(
                         (player, mod) -> exportMod(player, mod, exporter),
                         this::applyStoredVersion,
@@ -146,14 +149,14 @@ public final class VibeMod extends JavaPlugin {
                         this::setModel,
                         player -> dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
                                 client.sessionCostUsd(), model -> setModelAndNotify(player, model)),
-                        client::reasoningEffort,
-                        this::setReasoningEffort));
+                        settingsDialog::open));
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
             VibeCommand handler = new VibeCommand(this, generator, registry, store, configs,
-                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, client::model,
-                    this::setModel, client::sessionCostUsd, this::applyStoredVersion, this::reloadVibeConfig);
+                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, settingsDialog,
+                    client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
+                    this::reloadVibeConfig);
             vibe.setExecutor(handler);
             vibe.setTabCompleter(handler);
         }
@@ -194,18 +197,29 @@ public final class VibeMod extends JavaPlugin {
     /** Re-read config.yml and push the reloadable knobs into live components. */
     private void reloadVibeConfig() {
         reloadConfig();
+        applyLiveConfig();
+        catalog.refreshAsync();
+        getLogger().info("Config reloaded (model=" + client.model()
+                + ", watchdog=" + watchdogSingleMs() + "ms/" + perSecondBudgetMs()
+                + "ms, retries=" + getConfig().getInt("generation.max-retries", 3) + ")");
+    }
+
+    /**
+     * Pushes every reloadable config value into the live components. Shared by
+     * {@link #reloadVibeConfig} and the settings-dialog save path so the two can
+     * never drift; generation retries/streaming need no push (the generator reads
+     * them through live suppliers) and concurrency is deliberately absent (the
+     * pool is sized at construction - a reload/restart applies it).
+     */
+    private void applyLiveConfig() {
         watchdog.setBudgets(watchdogSingleMs(), perSecondBudgetMs());
         dynamicCommands.setAllowTopLevel(getConfig().getBoolean("commands.allow-top-level", true));
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
         client.setReasoningEffort(reasoningEffortFromConfig());
-        catalog.refreshAsync();
         applyErrorLimits();
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
-        getLogger().info("Config reloaded (model=" + client.model()
-                + ", watchdog=" + watchdogSingleMs() + "ms/" + perSecondBudgetMs()
-                + "ms, retries=" + getConfig().getInt("generation.max-retries", 3) + ")");
     }
 
     private void applyErrorLimits() {
@@ -399,6 +413,61 @@ public final class VibeMod extends JavaPlugin {
         setModel(model);
         String price = catalog.find(model).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
         player.sendMessage(Style.ok("Model set to " + model + " (" + price + ")"));
+    }
+
+    // ---- settings dialog plumbing ----
+
+    /** Current config values as the settings dialog's prefill snapshot. */
+    private SettingsDialog.Values settingsSnapshot() {
+        return new SettingsDialog.Values(
+                client.model(),
+                catalog.find(client.model()).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown"),
+                client.sessionCostUsd(),
+                client.reasoningEffort(),
+                getConfig().getBoolean("openrouter.streaming", true),
+                getConfig().getLong("openrouter.timeout-seconds", 120),
+                getConfig().getInt("openrouter.max-tokens", 0),
+                getConfig().getInt("generation.max-retries", 3),
+                getConfig().getInt("generation.concurrency", 4),
+                getConfig().getBoolean("watchdog.enabled", true),
+                getConfig().getLong("watchdog.single-invocation-ms", 250),
+                getConfig().getLong("watchdog.per-second-budget-ms", 500),
+                getConfig().getBoolean("debug.default-echo", false));
+    }
+
+    /**
+     * Settings-dialog save: persist every submitted value to config.yml, then push the
+     * reloadable ones into the live components via {@link #applyLiveConfig} (concurrency
+     * intentionally not live-applied - the generator pool is sized at construction, as
+     * the dialog's label says).
+     */
+    private void applySettings(Player player, SettingsDialog.Values v) {
+        setReasoningEffort(v.effort());
+        getConfig().set("openrouter.streaming", v.streaming());
+        getConfig().set("openrouter.timeout-seconds", v.timeoutSeconds());
+        getConfig().set("openrouter.max-tokens", v.maxTokens());
+        getConfig().set("generation.max-retries", v.maxRetries());
+        getConfig().set("generation.concurrency", v.concurrency());
+        getConfig().set("watchdog.enabled", v.watchdogEnabled());
+        getConfig().set("watchdog.single-invocation-ms", v.watchdogSingleMs());
+        getConfig().set("watchdog.per-second-budget-ms", v.watchdogBudgetMs());
+        getConfig().set("debug.default-echo", v.debugEcho());
+        saveConfig();
+        applyLiveConfig();
+        player.sendMessage(Style.ok("Settings saved and applied (concurrency applies on next reload)."));
+    }
+
+    /**
+     * The settings dialog's [Model…] button: the same picker {@code /vibe model} opens,
+     * except its onPick also reopens the settings dialog (fresh snapshot) so the admin
+     * lands back on the form they came from.
+     */
+    private void openSettingsModelPicker(Player player) {
+        dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
+                client.sessionCostUsd(), model -> {
+                    setModelAndNotify(player, model);
+                    settingsDialog.open(player);
+                });
     }
 
     /** Bridge a ModGenerator progress stream into a Progress UI. */

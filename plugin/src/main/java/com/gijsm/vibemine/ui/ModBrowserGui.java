@@ -24,7 +24,6 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
-import com.gijsm.vibemine.llm.ModelCatalog;
 import com.gijsm.vibemine.runtime.DebugEcho;
 import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
@@ -33,22 +32,24 @@ import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
 
 /**
- * The playful, colorful chest-inventory GUI for browsing and managing mods.
- * The main list shows one glinting item per mod, colored and dotted by live
- * state; left-clicking one opens a detail panel whose buttons are expressive
- * items (anvil reload, blaze powder fix, lever debug toggle, comparator
- * configure, etc.) rather than per-knob steppers - all knob editing now goes
- * through {@link Dialogs} via {@link GuiCallbacks#configure}. Borders and
- * filler panes are tinted by aggregate/mod state (orange-ish when anything is
- * degraded) so no screen ever shows a bare slot.
+ * The playful, colorful chest-inventory GUI for browsing and managing mods:
+ * two screens, LIST and DETAIL. The main list shows one glinting item per
+ * mod, colored and dotted by live state; left-clicking one opens a detail
+ * panel whose buttons are expressive items (anvil reload, blaze powder fix,
+ * lever debug toggle, comparator configure, etc.) rather than per-knob
+ * steppers - all knob editing now goes through {@link Dialogs} via
+ * {@link GuiCallbacks#configure}, and the admin-only [⚙ Settings] entry in
+ * the list's bottom border opens the native {@link SettingsDialog} form via
+ * {@link GuiCallbacks#openSettings} (the old chest SETTINGS screen is gone).
+ * Borders and filler panes are tinted by aggregate/mod state (orange-ish when
+ * anything is degraded) so no screen ever shows a bare slot.
  */
 public final class ModBrowserGui implements Listener {
 
-    private enum Screen { LIST, DETAIL, SETTINGS }
+    private enum Screen { LIST, DETAIL }
 
     private static final long DELETE_CONFIRM_MS = 5000L;
     private static final Component LIST_TITLE = Component.text("⬡ VibeMod");
-    private static final Component SETTINGS_TITLE = Component.text("⬡ VibeMod Settings");
 
     private static final int DETAIL_SIZE = 54;
     private static final int SLOT_RELOAD = 10;
@@ -66,41 +67,28 @@ public final class ModBrowserGui implements Listener {
     private static final int SLOT_DELETE = 24;
     private static final int SLOT_BACK = 53;
 
-    private static final int SETTINGS_SIZE = 27;
-    private static final int SETTINGS_MODEL_SLOT = 10;
-    private static final int SETTINGS_THINKING_SLOT = 12;
-    private static final int SETTINGS_WATCHDOG_SLOT = 14;
-    private static final int SETTINGS_RETRY_SLOT = 16;
-    private static final int SETTINGS_RELOAD_SLOT = 22;
-    private static final int SETTINGS_BACK_SLOT = 26;
-
     private final Plugin plugin;
     private final ModRegistry registry;
     private final ModStore store;
     private final ModConfigs configs;
     private final ModErrors errors;
     private final DebugEcho debug;
-    private final ModelCatalog catalog;
-    private final java.util.function.DoubleSupplier sessionCost;
     private final GuiCallbacks cb;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
 
     /**
-     * {@code catalog} and {@code sessionCost} were added (dynamic model picker + cost
-     * visibility feature) right after {@code debug} - kept as their own params rather than
-     * folded into {@code cb} since they are read-only lookups, not callbacks.
+     * The {@code catalog}/{@code sessionCost} params the old chest SETTINGS screen
+     * displayed were dropped along with that screen - all settings data now flows
+     * through {@link SettingsDialog}'s own snapshot supplier.
      */
     public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs,
-                          ModErrors errors, DebugEcho debug, ModelCatalog catalog,
-                          java.util.function.DoubleSupplier sessionCost, GuiCallbacks cb) {
+                          ModErrors errors, DebugEcho debug, GuiCallbacks cb) {
         this.plugin = plugin;
         this.registry = registry;
         this.store = store;
         this.configs = configs;
         this.errors = errors;
         this.debug = debug;
-        this.catalog = catalog;
-        this.sessionCost = sessionCost;
         this.cb = cb;
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
     }
@@ -159,19 +147,6 @@ public final class ModBrowserGui implements Listener {
         p.openInventory(inv);
     }
 
-    /** Opens the ops-only settings page. */
-    public void openSettings(Player p) {
-        if (!p.hasPermission("vibe.admin")) {
-            error(p, "You don't have permission for that.");
-            return;
-        }
-        Inventory inv = plugin.getServer().createInventory(null, SETTINGS_SIZE, SETTINGS_TITLE);
-        Session session = new Session(Screen.SETTINGS, inv);
-        sessions.put(p.getUniqueId(), session);
-        populateSettings(inv);
-        p.openInventory(inv);
-    }
-
     // ---- click routing ----
 
     @EventHandler
@@ -191,7 +166,6 @@ public final class ModBrowserGui implements Listener {
         switch (session.screen) {
             case LIST -> onListClick(player, session, event.getSlot());
             case DETAIL -> onDetailClick(player, session, event.getSlot());
-            case SETTINGS -> onSettingsClick(player, session, event.getSlot());
         }
     }
 
@@ -216,7 +190,7 @@ public final class ModBrowserGui implements Listener {
     private void onListClick(Player player, Session session, int slot) {
         if (slot == session.settingsSlot) {
             click(player);
-            openSettings(player);
+            cb.openSettings().accept(player);
             return;
         }
         if (slot < 0 || slot >= session.slotMods.size()) {
@@ -276,7 +250,7 @@ public final class ModBrowserGui implements Listener {
         ItemStack item = new ItemStack(Material.COMMAND_BLOCK);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(plain("⚙ Settings", NamedTextColor.GOLD));
-        meta.lore(List.of(plain("Model, watchdog, reload", NamedTextColor.GRAY)));
+        meta.lore(List.of(plain("Model, thinking, timeouts, watchdog, reload", NamedTextColor.GRAY)));
         item.setItemMeta(meta);
         return item;
     }
@@ -520,93 +494,6 @@ public final class ModBrowserGui implements Listener {
             }
             store.setEnabled(modName, true);
             info(player, modName + " enabled.");
-        }
-    }
-
-    // ---- SETTINGS screen ----
-
-    private void populateSettings(Inventory inv) {
-        fillBorder(inv, SETTINGS_SIZE, anyDegradedLive());
-
-        String currentModel = cb.getModel().get();
-        String price = catalog.find(currentModel).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
-        ItemStack model = new ItemStack(Material.NETHER_STAR);
-        ItemMeta modelMeta = model.getItemMeta();
-        modelMeta.displayName(plain("Model: " + currentModel, NamedTextColor.WHITE));
-        modelMeta.lore(List.of(
-                plain(price, NamedTextColor.GRAY),
-                plain("Spent this session: " + Style.fmtCost(sessionCost.getAsDouble()), NamedTextColor.GRAY),
-                plain("Click to open the model picker", NamedTextColor.YELLOW)));
-        model.setItemMeta(modelMeta);
-        inv.setItem(SETTINGS_MODEL_SLOT, model);
-
-        String effort = cb.getEffort().get();
-        ItemStack thinking = new ItemStack(Material.AMETHYST_SHARD);
-        ItemMeta thinkingMeta = thinking.getItemMeta();
-        thinkingMeta.displayName(plain("Thinking: " + effort, NamedTextColor.WHITE));
-        thinkingMeta.lore(List.of(
-                plain("Reasoning effort sent to the model", NamedTextColor.GRAY),
-                plain("off = model default; higher = slower, pricier, smarter", NamedTextColor.GRAY),
-                plain("Click to cycle off → low → medium → high", NamedTextColor.YELLOW)));
-        thinking.setItemMeta(thinkingMeta);
-        inv.setItem(SETTINGS_THINKING_SLOT, thinking);
-
-        inv.setItem(SETTINGS_WATCHDOG_SLOT, displayOnly("Watchdog budgets",
-                "single-invocation-ms / per-second-budget-ms"));
-        inv.setItem(SETTINGS_RETRY_SLOT, displayOnly("Max retries",
-                "generation.max-retries"));
-
-        inv.setItem(SETTINGS_RELOAD_SLOT, button(Material.EMERALD, "[reload]", Style.OK, "Re-read config.yml"));
-        inv.setItem(SETTINGS_BACK_SLOT, button(Material.ARROW, "[← back]", NamedTextColor.GRAY, "Back to the mod list"));
-        fillerRow(inv, 9, SETTINGS_SIZE - 10);
-    }
-
-    private ItemStack displayOnly(String name, String key) {
-        ItemStack item = new ItemStack(Material.COMPARATOR);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(name, NamedTextColor.GRAY));
-        List<Component> lore = new ArrayList<>();
-        lore.add(plain(key, NamedTextColor.DARK_GRAY));
-        lore.addAll(Text.wrap("Display only in this iteration - edit config.yml, then click [reload].",
-                Text.DEFAULT_WIDTH, NamedTextColor.YELLOW));
-        meta.lore(lore);
-        item.setItemMeta(meta);
-        return item;
-    }
-
-    private void onSettingsClick(Player player, Session session, int slot) {
-        if (!player.hasPermission("vibe.admin")) {
-            return;
-        }
-        switch (slot) {
-            case SETTINGS_MODEL_SLOT -> {
-                click(player);
-                cb.pickModel().accept(player);
-            }
-            case SETTINGS_THINKING_SLOT -> {
-                click(player);
-                String next = switch (cb.getEffort().get()) {
-                    case "off" -> "low";
-                    case "low" -> "medium";
-                    case "medium" -> "high";
-                    default -> "off";
-                };
-                cb.setEffort().accept(next);
-                info(player, "Thinking effort set to " + next + ".");
-                populateSettings(session.inventory);
-            }
-            case SETTINGS_RELOAD_SLOT -> {
-                click(player);
-                cb.reloadConfig().run();
-                info(player, "Config reloaded.");
-                populateSettings(session.inventory);
-            }
-            case SETTINGS_BACK_SLOT -> {
-                click(player);
-                open(player);
-            }
-            default -> {
-            }
         }
     }
 

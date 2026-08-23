@@ -39,6 +39,7 @@ import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.Progress;
+import com.gijsm.vibemine.ui.SettingsDialog;
 import com.gijsm.vibemine.ui.Style;
 import com.gijsm.vibemine.ui.VirtualBooks;
 
@@ -60,7 +61,7 @@ public final class VibeCommand implements TabExecutor {
     private static final List<String> SUBCOMMANDS = List.of(
             "make", "edit", "again", "list", "source", "info", "manual", "config", "set", "book",
             "rollback", "history", "enable", "disable", "delete", "export", "do", "model", "chat", "gui",
-            "reload", "panic", "errors", "fix", "debug", "help");
+            "settings", "reload", "panic", "errors", "fix", "debug", "help");
     private static final Set<String> READ_ONLY = Set.of(
             "list", "source", "info", "manual", "history", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
@@ -81,6 +82,7 @@ public final class VibeCommand implements TabExecutor {
     private final ModBrowserGui gui;
     private final ChatMode chatMode;
     private final Dialogs dialogs;
+    private final SettingsDialog settingsDialog;
     private final InfoDialogs infoDialogs;
     private final Supplier<String> getModel;
     private final Consumer<String> setModel;
@@ -97,6 +99,7 @@ public final class VibeCommand implements TabExecutor {
     public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
                         ModConfigs configs, ModErrors errors, DebugEcho debug, ModelCatalog catalog,
                         JarExporter exporter, ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs,
+                        SettingsDialog settingsDialog,
                         Supplier<String> getModel, Consumer<String> setModel,
                         java.util.function.DoubleSupplier sessionCost,
                         BiConsumer<CommandSender, String> applyVersion, Runnable reloadConfig) {
@@ -112,6 +115,7 @@ public final class VibeCommand implements TabExecutor {
         this.gui = gui;
         this.chatMode = chatMode;
         this.dialogs = dialogs;
+        this.settingsDialog = settingsDialog;
         this.infoDialogs = new InfoDialogs(plugin);
         this.getModel = getModel;
         this.setModel = setModel;
@@ -160,6 +164,7 @@ public final class VibeCommand implements TabExecutor {
             case "model" -> cmdModel(sender, rest);
             case "chat" -> cmdChat(sender);
             case "gui" -> cmdGui(sender);
+            case "settings" -> cmdSettings(sender);
             case "reload" -> cmdReload(sender);
             case "panic" -> cmdPanic(sender);
             case "errors" -> cmdErrors(sender, rest);
@@ -744,6 +749,27 @@ public final class VibeCommand implements TabExecutor {
         gui.open(player);
     }
 
+    /** Players get the native settings form; console gets a plain dump of the current values. */
+    private void cmdSettings(CommandSender sender) {
+        if (sender instanceof Player player) {
+            settingsDialog.open(player);
+            return;
+        }
+        SettingsDialog.Values v = settingsDialog.currentValues();
+        sender.sendMessage(Style.info("model: " + v.model() + " (" + v.modelPriceLabel() + ")"));
+        sender.sendMessage(Style.info("session spent: " + Style.fmtCost(v.sessionCostUsd())));
+        sender.sendMessage(Style.info("thinking (openrouter.reasoning-effort): " + v.effort()));
+        sender.sendMessage(Style.info("openrouter.streaming: " + v.streaming()));
+        sender.sendMessage(Style.info("openrouter.timeout-seconds: " + v.timeoutSeconds()));
+        sender.sendMessage(Style.info("openrouter.max-tokens: " + v.maxTokens() + (v.maxTokens() == 0 ? " (model ceiling)" : "")));
+        sender.sendMessage(Style.info("generation.max-retries: " + v.maxRetries()));
+        sender.sendMessage(Style.info("generation.concurrency: " + v.concurrency() + " (applies on next reload)"));
+        sender.sendMessage(Style.info("watchdog.enabled: " + v.watchdogEnabled()));
+        sender.sendMessage(Style.info("watchdog.single-invocation-ms: " + v.watchdogSingleMs()));
+        sender.sendMessage(Style.info("watchdog.per-second-budget-ms: " + v.watchdogBudgetMs()));
+        sender.sendMessage(Style.info("debug.default-echo: " + v.debugEcho()));
+    }
+
     private void cmdReload(CommandSender sender) {
         reloadConfig.run();
         sender.sendMessage(Style.ok(
@@ -784,6 +810,7 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe model [id]", "view/set the LLM model"));
         sender.sendMessage(helpLine("/vibe chat", "toggle chat-as-prompt mode"));
         sender.sendMessage(helpLine("/vibe gui", "open the mod browser"));
+        sender.sendMessage(helpLine("/vibe settings", "open the plugin settings"));
         sender.sendMessage(helpLine("/vibe reload", "re-read config.yml"));
         sender.sendMessage(helpLine("/vibe panic", "disable all mods"));
     }
