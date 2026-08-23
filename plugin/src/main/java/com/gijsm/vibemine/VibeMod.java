@@ -119,7 +119,8 @@ public final class VibeMod extends JavaPlugin {
 
         generator = new ModGenerator(this, client, compiler, store, registry,
                 () -> getConfig().getInt("generation.max-retries", 3),
-                () -> getConfig().getBoolean("openrouter.streaming", true));
+                () -> getConfig().getBoolean("openrouter.streaming", true),
+                getConfig().getInt("generation.concurrency", 4));
         JarExporter exporter = new JarExporter(compiler);
 
         ChatMode chatMode = new ChatMode(this, this::generateFromPrompt);

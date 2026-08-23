@@ -23,6 +23,9 @@ generation:
   # How many auto-repair attempts to make when generated code fails to compile
   # before giving up and reporting failure to the player.
   max-retries: 3
+  # How many mod generations may run at once. Extra requests queue silently, so a
+  # slow model can starve the queue if this is too low. Applied on plugin (re)load.
+  concurrency: 4
 
 watchdog:
   # Whether generated mods are time-boxed at all. Disable only for debugging.

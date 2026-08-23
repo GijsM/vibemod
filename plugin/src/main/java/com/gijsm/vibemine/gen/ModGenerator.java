@@ -74,15 +74,17 @@ public final class ModGenerator {
     private final ModRegistry registry;
     private final IntSupplier maxRetries;
     private final java.util.function.BooleanSupplier streamingEnabled;
-    private final ExecutorService executor = Executors.newFixedThreadPool(2, r -> {
-        Thread t = new Thread(r, "VibeMine-generator");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService executor;
 
+    /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
     public ModGenerator(Plugin plugin, OpenRouterClient client, InMemoryCompiler compiler,
                         ModStore store, ModRegistry registry, IntSupplier maxRetries,
-                        java.util.function.BooleanSupplier streamingEnabled) {
+                        java.util.function.BooleanSupplier streamingEnabled, int concurrency) {
+        this.executor = Executors.newFixedThreadPool(Math.max(1, concurrency), r -> {
+            Thread t = new Thread(r, "VibeMine-generator");
+            t.setDaemon(true);
+            return t;
+        });
         this.plugin = plugin;
         this.client = client;
         this.compiler = compiler;
