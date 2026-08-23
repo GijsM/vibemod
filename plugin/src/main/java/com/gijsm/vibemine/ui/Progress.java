@@ -82,6 +82,8 @@ public final class Progress {
     private int verbOffset = 0;
     private List<String> verbs = THINKING;
     private boolean finished = false;
+    /** planName currently shows "in queue (#P)"; cleared when the first real phase fires. */
+    private boolean queuedNotice = false;
 
     // span model (main-thread reads/writes via phase())
     private float phaseFloor = 0f;
@@ -101,6 +103,27 @@ public final class Progress {
         this.viewer = viewer;
         this.title = title;
         this.player = (viewer instanceof Player p) ? p : null;
+    }
+
+    /**
+     * The run was submitted while all generator threads were busy: one chat milestone,
+     * and the boss bar shows the wait via a borrowed planName ("in queue (#P)") until
+     * the first real phase (Thinking) arrives and {@link #applySpan} clears it.
+     */
+    public void queued(int position, int running) {
+        runOnMain(() -> {
+            if (finished) {
+                return;
+            }
+            queuedNotice = true;
+            planName = "in queue (#" + position + ")";
+            if (player != null) {
+                ensureBossBar();
+                startAnimation();
+            }
+            chat(Style.info("⏳ " + running + " generation" + (running == 1 ? "" : "s")
+                    + " running — yours is #" + position + " in line"));
+        });
     }
 
     /** Advance to a new phase: verb pool + honest progress span switch, one chat line. */
@@ -212,6 +235,11 @@ public final class Progress {
             // New round (initial or repair): the streamed span restarts honestly.
             phaseFloor = 0f;
             phaseCeil = 0.05f;
+            if (queuedNotice) {
+                // The wait is over: give planName back to the real plan.
+                queuedNotice = false;
+                planName = null;
+            }
             currentFile = null;
             filesStarted = 0;
             streamChars = 0;

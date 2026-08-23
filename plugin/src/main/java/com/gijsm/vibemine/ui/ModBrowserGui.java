@@ -95,19 +95,41 @@ public final class ModBrowserGui implements Listener {
 
     // ---- opening screens ----
 
-    /** Opens the main mod list for {@code p}. */
+    /** Opens the main mod list for {@code p}, resuming the page a previous LIST session was on. */
     public void open(Player p) {
         List<ModStore.StoredMod> mods = store.all();
-        boolean admin = p.hasPermission("vibe.admin");
-        int size = idealListSize(mods.size(), admin);
-        boolean anyDegraded = anyDegradedLive();
+        int size = mods.size() > singlePageCapacity() ? 6 * 9 : idealListSize(mods.size());
 
         Inventory inv = plugin.getServer().createInventory(null, size, LIST_TITLE);
-        fillBorder(inv, size, anyDegraded);
+        Session previous = sessions.get(p.getUniqueId());
+        Session session = new Session(Screen.LIST, inv);
+        session.listPage = previous != null ? previous.listPage : 0; // DETAIL carries it too, so Back resumes the page
+        sessions.put(p.getUniqueId(), session);
+        populateList(p, session);
+        p.openInventory(inv);
+    }
+
+    /**
+     * (Re)fills the LIST inventory in place — same populate-without-reopen idiom as
+     * {@link #populateDetail}: the arrow buttons call this instead of {@link #open}.
+     */
+    private void populateList(Player p, Session session) {
+        Inventory inv = session.inventory;
+        inv.clear();
+
+        List<ModStore.StoredMod> mods = store.all();
+        boolean admin = p.hasPermission("vibe.admin");
+        int size = inv.getSize();
+        int perPage = size - 18; // minus the top and bottom border rows
+        int totalPages = Math.max(1, (mods.size() + perPage - 1) / perPage);
+        session.listPage = Math.max(0, Math.min(session.listPage, totalPages - 1)); // clamp when mods shrink
+
+        fillBorder(inv, size, anyDegradedLive());
 
         List<String> slotMods = new ArrayList<>(Collections.nCopies(size, null));
+        int from = session.listPage * perPage;
         int slot = firstContentSlot(size);
-        for (ModStore.StoredMod mod : mods) {
+        for (ModStore.StoredMod mod : mods.subList(from, Math.min(mods.size(), from + perPage))) {
             slot = nextContentSlot(slot, size);
             if (slot < 0) {
                 break;
@@ -116,19 +138,30 @@ public final class ModBrowserGui implements Listener {
             slotMods.set(slot, mod.name());
             slot++;
         }
+        session.slotMods = slotMods;
 
-        int settingsSlot = -1;
+        session.settingsSlot = -1;
         if (admin) {
-            settingsSlot = size - 5;
-            inv.setItem(settingsSlot, buildSettingsEntryItem());
+            session.settingsSlot = size - 5;
+            inv.setItem(session.settingsSlot, buildSettingsEntryItem());
+        }
+
+        // Pagination furniture, only when more than one page exists: arrows sit
+        // symmetrically around the ⚙ Settings slot, the page indicator bottom-left.
+        session.prevSlot = -1;
+        session.nextSlot = -1;
+        if (totalPages > 1) {
+            inv.setItem(size - 9, buildPageIndicatorItem(session.listPage + 1, totalPages, mods.size()));
+            if (session.listPage > 0) {
+                session.prevSlot = size - 6;
+                inv.setItem(session.prevSlot, buildPageArrowItem(false, session.listPage));
+            }
+            if (session.listPage < totalPages - 1) {
+                session.nextSlot = size - 4;
+                inv.setItem(session.nextSlot, buildPageArrowItem(true, session.listPage + 2));
+            }
         }
         fillerRow(inv, 9, size - 10); // no bare slots among the unused content rows
-
-        Session session = new Session(Screen.LIST, inv);
-        session.slotMods = slotMods;
-        session.settingsSlot = settingsSlot;
-        sessions.put(p.getUniqueId(), session);
-        p.openInventory(inv);
     }
 
     /** Opens the detail panel for one mod. */
@@ -140,8 +173,10 @@ public final class ModBrowserGui implements Listener {
             return;
         }
         Inventory inv = plugin.getServer().createInventory(null, DETAIL_SIZE, detailTitle(mod));
+        Session previous = sessions.get(p.getUniqueId());
         Session session = new Session(Screen.DETAIL, inv);
         session.modName = modName;
+        session.listPage = previous != null ? previous.listPage : 0; // so Back resumes the list page
         sessions.put(p.getUniqueId(), session);
         populateDetail(p, session, mod);
         p.openInventory(inv);
@@ -191,6 +226,12 @@ public final class ModBrowserGui implements Listener {
         if (slot == session.settingsSlot) {
             click(player);
             cb.openSettings().accept(player);
+            return;
+        }
+        if (slot == session.prevSlot || slot == session.nextSlot) {
+            click(player);
+            session.listPage += slot == session.nextSlot ? 1 : -1;
+            populateList(player, session); // in place, no reopen
             return;
         }
         if (slot < 0 || slot >= session.slotMods.size()) {
@@ -255,12 +296,36 @@ public final class ModBrowserGui implements Listener {
         return item;
     }
 
-    private static int idealListSize(int modCount, boolean reserveSettings) {
+    private ItemStack buildPageArrowItem(boolean next, int targetPage) {
+        ItemStack item = new ItemStack(Material.ARROW);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(plain(next ? "[next →]" : "[← prev]", NamedTextColor.YELLOW));
+        meta.lore(List.of(plain("Go to page " + targetPage, NamedTextColor.GRAY)));
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack buildPageIndicatorItem(int page, int totalPages, int modCount) {
+        ItemStack item = new ItemStack(Material.MAP);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(plain("Page " + page + "/" + totalPages, NamedTextColor.AQUA));
+        meta.lore(List.of(plain(modCount + " mods total", NamedTextColor.GRAY)));
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /** Single-page sizing for collections of up to {@link #singlePageCapacity()} mods. */
+    private static int idealListSize(int modCount) {
         // Layout = top border row + N full-width content rows + bottom border row
         // (the settings button lives IN the bottom border, costing no content slot).
         int contentRows = Math.max(1, (modCount + 8) / 9);
         int rows = Math.min(6, contentRows + 2);
         return rows * 9;
+    }
+
+    /** Most mods a single page can show: 4 content rows in the biggest (6-row) GUI. */
+    private static int singlePageCapacity() {
+        return 6 * 9 - 18;
     }
 
     private boolean anyDegradedLive() {
@@ -580,6 +645,9 @@ public final class ModBrowserGui implements Listener {
         // LIST
         List<String> slotMods;
         int settingsSlot = -1;
+        int listPage = 0;
+        int prevSlot = -1;
+        int nextSlot = -1;
 
         // DETAIL
         String modName;

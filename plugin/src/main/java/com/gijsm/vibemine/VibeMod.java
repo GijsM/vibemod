@@ -497,6 +497,11 @@ public final class VibeMod extends JavaPlugin {
             public void streamStats(int chars, int approxTokens) {
                 progress.streamStats(chars, approxTokens);
             }
+
+            @Override
+            public void queued(int position, int running) {
+                progress.queued(position, running);
+            }
         };
     }
 

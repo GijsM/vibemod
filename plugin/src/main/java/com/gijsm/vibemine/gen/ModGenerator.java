@@ -56,6 +56,14 @@ public final class ModGenerator {
         /** Rolling stream volume; throttled by the caller. */
         default void streamStats(int chars, int approxTokens) {
         }
+
+        /**
+         * Fired synchronously at submit time, only when every generator thread is
+         * already busy: this run waits at {@code position} (1 = next up) behind
+         * {@code running} in-flight generations.
+         */
+        default void queued(int position, int running) {
+        }
     }
 
     /** Outcome of one generation run. {@code costUsd} sums the real OpenRouter cost of every
@@ -75,12 +83,17 @@ public final class ModGenerator {
     private final IntSupplier maxRetries;
     private final java.util.function.BooleanSupplier streamingEnabled;
     private final ExecutorService executor;
+    private final int poolSize;
+    /** Submitted-but-unfinished runs; anything past {@link #poolSize} is waiting in the pool's queue. */
+    private final java.util.concurrent.atomic.AtomicInteger unfinished =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
     public ModGenerator(Plugin plugin, OpenRouterClient client, InMemoryCompiler compiler,
                         ModStore store, ModRegistry registry, IntSupplier maxRetries,
                         java.util.function.BooleanSupplier streamingEnabled, int concurrency) {
-        this.executor = Executors.newFixedThreadPool(Math.max(1, concurrency), r -> {
+        this.poolSize = Math.max(1, concurrency);
+        this.executor = Executors.newFixedThreadPool(this.poolSize, r -> {
             Thread t = new Thread(r, "VibeMine-generator");
             t.setDaemon(true);
             return t;
@@ -162,6 +175,12 @@ public final class ModGenerator {
 
     private CompletableFuture<Result> run(ProgressListener l, java.util.concurrent.Callable<Result> body) {
         CompletableFuture<Result> out = new CompletableFuture<>();
+        // The unfinished counter (not the pool's own gauges, which lag the hand-off)
+        // decides synchronously whether this run must wait behind a full pool.
+        int position = unfinished.incrementAndGet() - poolSize;
+        if (position > 0) {
+            l.queued(position, poolSize);
+        }
         executor.submit(() -> {
             try {
                 Result result = body.call();
@@ -175,6 +194,8 @@ public final class ModGenerator {
             } catch (Throwable t) {
                 plugin.getLogger().warning("Generation failed: " + t);
                 out.complete(new Result(false, null, 0, 0, brief(t), 0.0));
+            } finally {
+                unfinished.decrementAndGet();
             }
         });
         return out;

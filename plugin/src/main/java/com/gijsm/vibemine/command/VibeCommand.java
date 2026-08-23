@@ -60,8 +60,8 @@ public final class VibeCommand implements TabExecutor {
 
     private static final List<String> SUBCOMMANDS = List.of(
             "make", "edit", "again", "list", "source", "info", "manual", "config", "set", "book",
-            "rollback", "history", "enable", "disable", "delete", "export", "do", "model", "chat", "gui",
-            "settings", "reload", "panic", "errors", "fix", "debug", "help");
+            "rollback", "history", "enable", "disable", "delete", "export", "do", "model", "costs", "chat",
+            "gui", "settings", "reload", "panic", "errors", "fix", "debug", "help");
     private static final Set<String> READ_ONLY = Set.of(
             "list", "source", "info", "manual", "history", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
@@ -162,6 +162,7 @@ public final class VibeCommand implements TabExecutor {
             case "export" -> cmdExport(sender, rest);
             case "do" -> cmdDo(sender, rest);
             case "model" -> cmdModel(sender, rest);
+            case "costs" -> cmdCosts(sender);
             case "chat" -> cmdChat(sender);
             case "gui" -> cmdGui(sender);
             case "settings" -> cmdSettings(sender);
@@ -259,6 +260,11 @@ public final class VibeCommand implements TabExecutor {
             @Override
             public void streamStats(int chars, int approxTokens) {
                 progress.streamStats(chars, approxTokens);
+            }
+
+            @Override
+            public void queued(int position, int running) {
+                progress.queued(position, running);
             }
         };
     }
@@ -728,6 +734,52 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(msg);
     }
 
+    /**
+     * The cost dashboard: lifetime generation spend per mod (costliest first) plus the
+     * session total. Versions saved before cost tracking existed are recognized by their
+     * blank {@code kind} - the reliable marker, since their {@code costUsd} just reads 0.0.
+     */
+    private void cmdCosts(CommandSender sender) {
+        List<InfoDialogs.ModCost> rows = new ArrayList<>();
+        for (ModStore.StoredMod mod : store.all()) {
+            double lifetime = 0.0;
+            int preTracking = 0;
+            for (ModStore.StoredVersion v : mod.versions()) {
+                lifetime += v.costUsd();
+                if (v.kind() == null || v.kind().isBlank()) {
+                    preTracking++;
+                }
+            }
+            rows.add(new InfoDialogs.ModCost(mod.name(), lifetime, mod.versions().size(), preTracking));
+        }
+        rows.sort(java.util.Comparator.comparingDouble(InfoDialogs.ModCost::lifetimeUsd).reversed());
+
+        if (sender instanceof Player player) {
+            infoDialogs.openCosts(player, sessionCost.getAsDouble(), rows);
+            return;
+        }
+        sender.sendMessage(Component.text("VibeMod — costs:", NamedTextColor.GOLD));
+        sender.sendMessage(Component.text("Session spend: " + Style.fmtCost(sessionCost.getAsDouble()),
+                NamedTextColor.GOLD));
+        int zeroMods = 0;
+        boolean anyPreTracking = false;
+        for (InfoDialogs.ModCost row : rows) {
+            anyPreTracking |= row.preTracking() > 0;
+            if (row.lifetimeUsd() <= 0) {
+                zeroMods++;
+                continue;
+            }
+            sender.sendMessage(Component.text(InfoDialogs.costLine(row), NamedTextColor.GRAY));
+        }
+        if (zeroMods > 0) {
+            sender.sendMessage(Component.text(zeroMods + " mod(s) at $0 not shown", NamedTextColor.DARK_GRAY));
+        }
+        if (anyPreTracking) {
+            sender.sendMessage(Component.text("versions from before cost tracking count as $0",
+                    NamedTextColor.GRAY));
+        }
+    }
+
     private void cmdChat(CommandSender sender) {
         if (!(sender instanceof Player player)) {
             error(sender, "Only players can use chat mode.");
@@ -808,6 +860,7 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe export <mod>", "export a standalone plugin jar"));
         sender.sendMessage(helpLine("/vibe do <mod> <action> [args]", "run a mod action"));
         sender.sendMessage(helpLine("/vibe model [id]", "view/set the LLM model"));
+        sender.sendMessage(helpLine("/vibe costs", "what generation has cost, per mod"));
         sender.sendMessage(helpLine("/vibe chat", "toggle chat-as-prompt mode"));
         sender.sendMessage(helpLine("/vibe gui", "open the mod browser"));
         sender.sendMessage(helpLine("/vibe settings", "open the plugin settings"));

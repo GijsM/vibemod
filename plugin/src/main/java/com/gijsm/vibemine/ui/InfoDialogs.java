@@ -390,6 +390,75 @@ public final class InfoDialogs {
         return String.join(" · ", meta);
     }
 
+    // ---- costs ----
+
+    /**
+     * One mod's lifetime generation spend, assembled by {@code /vibe costs};
+     * {@code preTracking} counts versions saved before cost tracking existed
+     * (blank {@code kind} marks those - their {@code costUsd} reads 0.0).
+     */
+    public record ModCost(String name, double lifetimeUsd, int versions, int preTracking) {
+    }
+
+    /**
+     * Opens the read-only cost dashboard: session spend plus one line per mod,
+     * costliest first ({@code rows} arrives pre-sorted). Mods that never cost
+     * anything are folded into a footnote instead of listed. Done-only: unlike
+     * the other viewers there is nowhere to navigate to - history covers the
+     * per-mod drilldown.
+     */
+    public void openCosts(Player p, double sessionCostUsd, List<ModCost> rows) {
+        List<DialogBody> body = new ArrayList<>();
+        body.add(DialogBody.plainMessage(Component.text(
+                "Session spend: " + Style.fmtCost(sessionCostUsd), NamedTextColor.GOLD), PROSE_WIDTH));
+        List<String> lines = new ArrayList<>();
+        int zeroMods = 0;
+        boolean anyPreTracking = false;
+        for (ModCost row : rows) {
+            anyPreTracking |= row.preTracking() > 0;
+            if (row.lifetimeUsd() <= 0) {
+                zeroMods++;
+                continue;
+            }
+            lines.add(costLine(row));
+        }
+        if (lines.isEmpty()) {
+            body.add(DialogBody.plainMessage(Component.text("No paid generations yet.", NamedTextColor.GRAY),
+                    PROSE_WIDTH));
+        } else {
+            body.add(DialogBody.plainMessage(joined(lines), PROSE_WIDTH));
+        }
+        if (zeroMods > 0) {
+            body.add(DialogBody.plainMessage(Component.text(
+                    zeroMods + " mod(s) at $0 not shown", NamedTextColor.DARK_GRAY), PROSE_WIDTH));
+        }
+        if (anyPreTracking) {
+            body.add(DialogBody.plainMessage(Component.text(
+                    "versions from before cost tracking count as $0", NamedTextColor.GRAY), PROSE_WIDTH));
+        }
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text("VibeMod — costs"))
+                        .body(body)
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.notice(doneButton())));
+        show(p, dialog);
+    }
+
+    /**
+     * {@code "ModName — $0.0123 · 5 versions (2 pre-tracking)"}. Public so
+     * {@code VibeCommand}'s console costs dump can reuse it (like {@link #relativeTime}).
+     */
+    public static String costLine(ModCost row) {
+        StringBuilder line = new StringBuilder(row.name())
+                .append(" — ").append(Style.fmtCost(row.lifetimeUsd()))
+                .append(" · ").append(row.versions()).append(row.versions() == 1 ? " version" : " versions");
+        if (row.preTracking() > 0) {
+            line.append(" (").append(row.preTracking()).append(" pre-tracking)");
+        }
+        return line.toString();
+    }
+
     // ---- shared plumbing ----
 
     private static ActionButton manualButton(String mod) {
