@@ -299,7 +299,7 @@ public final class ModGenerator {
             try {
                 onMainThread(() -> registry.load(saved.name(), saved.currentVersion(),
                         saved.description(), mainFqcn, compiled.classes(),
-                        saved.config(), store.resolvedConfigValues(saved.name())));
+                        saved.config(), store.resolvedConfigValues(saved.name()), saved.debugEcho()));
                 return new Result(true, saved.name(), saved.currentVersion(), attempt,
                         saved.name() + " v" + saved.currentVersion() + " is live", costUsd);
             } catch (Exception enableFail) {

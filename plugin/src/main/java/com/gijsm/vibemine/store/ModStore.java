@@ -61,12 +61,15 @@ public final class ModStore {
      * A stored mod: its identity, current pointer, full version history, and its
      * config schema/values. {@code usage}/{@code manual}/{@code icon}/{@code config}/
      * {@code configValues} are optional and normalized to ""/""/List.of()/Map.of()
-     * by every accessor on this class.
+     * by every accessor on this class. {@code debugEcho} is deliberately tri-state
+     * and exempt from that no-nulls rule: {@code null} means "no explicit override,
+     * follow the config default" (what every pre-existing meta.json reads as),
+     * {@code true}/{@code false} a persisted per-mod override.
      */
     public record StoredMod(String name, String description, String usage, String manual, String icon,
                              String mainClass, int currentVersion, boolean enabled, String creator,
                              List<StoredVersion> versions, List<ConfigKnob> config,
-                             Map<String, String> configValues) {
+                             Map<String, String> configValues, Boolean debugEcho) {
     }
 
     public ModStore(Path modsDir) {
@@ -162,7 +165,8 @@ public final class ModStore {
         }
 
         StoredMod updated = new StoredMod(name, description, usage, manual, icon, mainClass, nextVersion, true,
-                effectiveCreator, versions, newConfig, preservedValues);
+                effectiveCreator, versions, newConfig, preservedValues,
+                existing == null ? null : existing.debugEcho());
         writeMeta(dir, updated);
         return updated;
     }
@@ -204,7 +208,7 @@ public final class ModStore {
         }
         StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
                 mod.mainClass(), version, mod.enabled(), mod.creator(), mod.versions(), mod.config(),
-                mod.configValues());
+                mod.configValues(), mod.debugEcho());
         writeMeta(dir, updated);
     }
 
@@ -239,7 +243,27 @@ public final class ModStore {
         }
         StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
                 mod.mainClass(), mod.currentVersion(), enabled, mod.creator(), mod.versions(), mod.config(),
-                mod.configValues());
+                mod.configValues(), mod.debugEcho());
+        writeMeta(dir, updated);
+    }
+
+    /**
+     * Sets (or, with {@code null}, clears) a mod's persisted per-mod debug echo
+     * override without touching anything else. Tri-state on purpose: {@code null}
+     * means "follow the config default" — see {@link StoredMod#debugEcho()}.
+     */
+    public synchronized void setDebugEcho(String name, Boolean on) {
+        Path dir = resolveDir(name);
+        if (dir == null) {
+            return;
+        }
+        StoredMod mod = readMeta(dir);
+        if (mod == null) {
+            return;
+        }
+        StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
+                mod.mainClass(), mod.currentVersion(), mod.enabled(), mod.creator(), mod.versions(), mod.config(),
+                mod.configValues(), on);
         writeMeta(dir, updated);
     }
 
@@ -255,7 +279,7 @@ public final class ModStore {
         }
         StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
                 mod.mainClass(), mod.currentVersion() - 1, mod.enabled(), mod.creator(), mod.versions(),
-                mod.config(), mod.configValues());
+                mod.config(), mod.configValues(), mod.debugEcho());
         writeMeta(dir, updated);
         return true;
     }
@@ -299,7 +323,7 @@ public final class ModStore {
 
         StoredMod updated = new StoredMod(mod.name(), mod.description(), mod.usage(), mod.manual(), mod.icon(),
                 mod.mainClass(), mod.currentVersion(), mod.enabled(), mod.creator(), mod.versions(), mod.config(),
-                values);
+                values, mod.debugEcho());
         writeMeta(dir, updated);
     }
 
@@ -499,6 +523,8 @@ public final class ModStore {
      * existed get those normalized to {@code ""} (Gson already defaults a missing
      * {@code costUsd} to 0.0). This is the single point where old-shaped {@code meta.json}
      * files (which predate these fields) are made safe for every caller.
+     * {@code debugEcho} passes through UNCHANGED — its null is meaningful
+     * ("no override"), see {@link StoredMod#debugEcho()}.
      */
     private static StoredMod normalize(StoredMod mod) {
         if (mod == null) {
@@ -516,7 +542,8 @@ public final class ModStore {
                 nullToEmpty(mod.creator()),
                 normalizeVersions(mod.versions()),
                 mod.config() == null ? List.of() : mod.config(),
-                mod.configValues() == null ? Map.of() : mod.configValues());
+                mod.configValues() == null ? Map.of() : mod.configValues(),
+                mod.debugEcho());
     }
 
     /**

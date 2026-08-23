@@ -7,7 +7,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -38,6 +37,7 @@ import com.gijsm.vibemine.ui.Dialogs;
 import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
+import com.gijsm.vibemine.ui.ModHubDialog;
 import com.gijsm.vibemine.ui.Progress;
 import com.gijsm.vibemine.ui.SettingsDialog;
 import com.gijsm.vibemine.ui.Style;
@@ -66,7 +66,8 @@ public final class VibeCommand implements TabExecutor {
             "list", "source", "info", "manual", "history", "errors", "help");
     private static final Set<String> MOD_ARG_SUBS = Set.of(
             "edit", "again", "source", "info", "manual", "config", "set", "book",
-            "rollback", "history", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug");
+            "rollback", "history", "enable", "disable", "delete", "export", "do", "errors", "fix", "debug",
+            "reload");
     private static final int FIX_ERROR_LINES = 8;
     private static final int CONSOLE_ERROR_LINES = 25;
 
@@ -83,26 +84,39 @@ public final class VibeCommand implements TabExecutor {
     private final ChatMode chatMode;
     private final Dialogs dialogs;
     private final SettingsDialog settingsDialog;
+    private final ModHubDialog hub;
     private final InfoDialogs infoDialogs;
     private final Supplier<String> getModel;
     private final Consumer<String> setModel;
     private final java.util.function.DoubleSupplier sessionCost;
-    private final BiConsumer<CommandSender, String> applyVersion;
+    private final ApplyVersion applyVersion;
     private final Runnable reloadConfig;
+
+    /**
+     * Recompiles a mod's current stored version and hot-loads it, asynchronously;
+     * {@code onLive} (nullable) runs on the main thread once the version is actually
+     * live — the compile is async, so "after the call returns" is too early for
+     * anything that wants to show the result (e.g. reopening the mod hub).
+     */
+    @FunctionalInterface
+    public interface ApplyVersion {
+        void apply(CommandSender feedback, String modName, Runnable onLive);
+    }
 
     /**
      * {@code catalog} was added (dynamic model picker + cost visibility feature) right
      * after {@code debug}, mirroring {@link ModBrowserGui}'s constructor; {@code
      * sessionCost} was added right after {@code setModel} since it is model-related, like
-     * {@code getModel}/{@code setModel}.
+     * {@code getModel}/{@code setModel}; {@code hub} (mod hub dialog feature) sits right
+     * after {@code settingsDialog} since it is the next dialog surface.
      */
     public VibeCommand(Plugin plugin, ModGenerator generator, ModRegistry registry, ModStore store,
                         ModConfigs configs, ModErrors errors, DebugEcho debug, ModelCatalog catalog,
                         JarExporter exporter, ModBrowserGui gui, ChatMode chatMode, Dialogs dialogs,
-                        SettingsDialog settingsDialog,
+                        SettingsDialog settingsDialog, ModHubDialog hub,
                         Supplier<String> getModel, Consumer<String> setModel,
                         java.util.function.DoubleSupplier sessionCost,
-                        BiConsumer<CommandSender, String> applyVersion, Runnable reloadConfig) {
+                        ApplyVersion applyVersion, Runnable reloadConfig) {
         this.plugin = plugin;
         this.generator = generator;
         this.registry = registry;
@@ -116,6 +130,7 @@ public final class VibeCommand implements TabExecutor {
         this.chatMode = chatMode;
         this.dialogs = dialogs;
         this.settingsDialog = settingsDialog;
+        this.hub = hub;
         this.infoDialogs = new InfoDialogs(plugin);
         this.getModel = getModel;
         this.setModel = setModel;
@@ -166,7 +181,7 @@ public final class VibeCommand implements TabExecutor {
             case "chat" -> cmdChat(sender);
             case "gui" -> cmdGui(sender);
             case "settings" -> cmdSettings(sender);
-            case "reload" -> cmdReload(sender);
+            case "reload" -> cmdReload(sender, rest);
             case "panic" -> cmdPanic(sender);
             case "errors" -> cmdErrors(sender, rest);
             case "fix" -> cmdFix(sender, rest);
@@ -353,6 +368,10 @@ public final class VibeCommand implements TabExecutor {
             error(sender, "Unknown mod: " + modName);
             return;
         }
+        if (sender instanceof Player player) {
+            hub.open(player, mod.name());
+            return;
+        }
         ModHandle live = registry.get(modName);
         sender.sendMessage(InstallCard.build(mod, live));
         sender.sendMessage(InstallCard.verifiedFooter(mod, live, configs.values(modName), errorsLineFor(modName)));
@@ -396,13 +415,17 @@ public final class VibeCommand implements TabExecutor {
         dialogs.openConfig(player, mod.name(), knobsFor(modName));
     }
 
+    /** Schema + current values -> the knob list the config dialog renders. Store-side, so it works for unloaded mods. */
     private List<Dialogs.Knob> knobsFor(String modName) {
+        ModStore.StoredMod mod = store.get(modName);
+        if (mod == null) {
+            return List.of();
+        }
+        Map<String, String> values = store.resolvedConfigValues(mod.name());
         List<Dialogs.Knob> knobs = new ArrayList<>();
-        Map<String, String> values = configs.values(modName);
-        for (GeneratedProject.ConfigKnob knob : configs.schema(modName)) {
-            String current = values.getOrDefault(knob.key(), knob.def());
-            knobs.add(new Dialogs.Knob(knob.key(), knob.type(), knob.description(), current,
-                    knob.min(), knob.max(), knob.step(), knob.choices()));
+        for (GeneratedProject.ConfigKnob k : mod.config()) {
+            knobs.add(new Dialogs.Knob(k.key(), k.type(), k.description(),
+                    values.getOrDefault(k.key(), k.def()), k.min(), k.max(), k.step(), k.choices()));
         }
         return knobs;
     }
@@ -415,14 +438,21 @@ public final class VibeCommand implements TabExecutor {
         String modName = args[0];
         String key = args[1];
         String value = String.join(" ", Arrays.copyOfRange(args, 2, args.length));
-        String oldValue = configs.values(modName).get(key);
+        // Unloaded mods have no live config cache: fall back to the disk store
+        // (same validation - ModStore.validateKnobValue backs both paths).
+        boolean unloaded = configs.schema(modName).isEmpty() && registry.get(modName) == null;
+        String oldValue = (unloaded ? store.resolvedConfigValues(modName) : configs.values(modName)).get(key);
         try {
-            configs.set(modName, key, value);
+            if (unloaded) {
+                store.setConfigValue(modName, key, value);
+            } else {
+                configs.set(modName, key, value);
+            }
         } catch (IllegalArgumentException e) {
             error(sender, e.getMessage());
             return;
         }
-        String newValue = configs.values(modName).get(key);
+        String newValue = (unloaded ? store.resolvedConfigValues(modName) : configs.values(modName)).get(key);
         sender.sendMessage(Component.text(modName + "." + key + ": ", NamedTextColor.GRAY)
                 .append(Component.text(oldValue != null ? oldValue : "(default)", NamedTextColor.RED))
                 .append(Component.text(" -> ", NamedTextColor.GRAY))
@@ -455,7 +485,7 @@ public final class VibeCommand implements TabExecutor {
                 error(sender, "Can't roll back " + modName + " (already at v1 or unknown).");
                 return;
             }
-            applyVersion.accept(sender, modName);
+            applyVersion.apply(sender, modName, null);
             ModStore.StoredMod mod = store.get(modName);
             int version = mod != null ? mod.currentVersion() : -1;
             sender.sendMessage(Style.ok("Rolled back " + modName + " to v" + version + "."));
@@ -493,12 +523,11 @@ public final class VibeCommand implements TabExecutor {
         }
         boolean confirmed = args.length >= 3 && args[2].equalsIgnoreCase("confirm");
         if (sender instanceof Player player && !confirmed) {
-            String changelog = !target.changelog().isBlank() ? target.changelog() : target.prompt();
-            dialogs.openRollbackConfirm(player, mod.name(), version, changelog);
+            dialogs.openRollbackConfirm(player, mod.name(), version, InfoDialogs.changelogOrPrompt(target));
             return;
         }
         store.setCurrentVersion(mod.name(), version);
-        applyVersion.accept(sender, modName);
+        applyVersion.apply(sender, modName, null);
         sender.sendMessage(Style.ok("Activated " + mod.name() + " v" + version + "."));
     }
 
@@ -534,8 +563,8 @@ public final class VibeCommand implements TabExecutor {
             if (!v.requester().isBlank()) {
                 segments.add("by " + v.requester());
             }
-            String changelog = !v.changelog().isBlank() ? v.changelog() : v.prompt();
-            sender.sendMessage(Component.text(String.join(" · ", segments) + " — " + changelog,
+            sender.sendMessage(Component.text(
+                    String.join(" · ", segments) + " — " + InfoDialogs.changelogOrPrompt(v),
                     NamedTextColor.GRAY));
         }
     }
@@ -560,7 +589,7 @@ public final class VibeCommand implements TabExecutor {
             store.setEnabled(modName, true);
             sender.sendMessage(Style.ok(modName + " enabled."));
         } else {
-            applyVersion.accept(sender, modName);
+            applyVersion.apply(sender, modName, null);
         }
     }
 
@@ -585,8 +614,14 @@ public final class VibeCommand implements TabExecutor {
             return;
         }
         String modName = args[0];
-        if (store.get(modName) == null) {
+        ModStore.StoredMod mod = store.get(modName);
+        if (mod == null) {
             error(sender, "Unknown mod: " + modName);
+            return;
+        }
+        boolean confirmed = args.length >= 2 && args[1].equalsIgnoreCase("confirm");
+        if (sender instanceof Player player && !confirmed) {
+            dialogs.openDeleteConfirm(player, mod.name(), mod.versions().size());
             return;
         }
         registry.unload(modName);
@@ -742,15 +777,7 @@ public final class VibeCommand implements TabExecutor {
     private void cmdCosts(CommandSender sender) {
         List<InfoDialogs.ModCost> rows = new ArrayList<>();
         for (ModStore.StoredMod mod : store.all()) {
-            double lifetime = 0.0;
-            int preTracking = 0;
-            for (ModStore.StoredVersion v : mod.versions()) {
-                lifetime += v.costUsd();
-                if (v.kind() == null || v.kind().isBlank()) {
-                    preTracking++;
-                }
-            }
-            rows.add(new InfoDialogs.ModCost(mod.name(), lifetime, mod.versions().size(), preTracking));
+            rows.add(InfoDialogs.ModCost.of(mod));
         }
         rows.sort(java.util.Comparator.comparingDouble(InfoDialogs.ModCost::lifetimeUsd).reversed());
 
@@ -822,10 +849,25 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(Style.info("debug.default-echo: " + v.debugEcho()));
     }
 
-    private void cmdReload(CommandSender sender) {
-        reloadConfig.run();
-        sender.sendMessage(Style.ok(
-                "Config reloaded (model/timeout, watchdog budgets, top-level commands, error/debug limits re-read)."));
+    /**
+     * No args: re-read config.yml, exactly as before. With a mod name: recompile and
+     * hot-load that mod's current stored version; a player who asked gets the hub
+     * reopened once the version is actually live (the compile is async).
+     */
+    private void cmdReload(CommandSender sender, String[] args) {
+        if (args.length == 0) {
+            reloadConfig.run();
+            sender.sendMessage(Style.ok(
+                    "Config reloaded (model/timeout, watchdog budgets, top-level commands, error/debug limits re-read)."));
+            return;
+        }
+        String modName = args[0];
+        if (store.get(modName) == null) {
+            error(sender, "Unknown mod: " + modName);
+            return;
+        }
+        applyVersion.apply(sender, modName,
+                sender instanceof Player player ? () -> hub.open(player, modName) : null);
     }
 
     private void cmdPanic(CommandSender sender) {
@@ -844,7 +886,7 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe again <mod>", "rerun a mod's last prompt"));
         sender.sendMessage(helpLine("/vibe list", "list stored mods"));
         sender.sendMessage(helpLine("/vibe source <mod>", "view a mod's source"));
-        sender.sendMessage(helpLine("/vibe info <mod>", "show the install card + verified facts"));
+        sender.sendMessage(helpLine("/vibe info <mod>", "open the mod hub (console: install card)"));
         sender.sendMessage(helpLine("/vibe manual <mod>", "open the player manual"));
         sender.sendMessage(helpLine("/vibe config <mod>", "open the config dialog"));
         sender.sendMessage(helpLine("/vibe set <mod> <key> <value>", "set one config knob (console/RCON)"));
@@ -856,7 +898,7 @@ public final class VibeCommand implements TabExecutor {
                 "revert one version back, or activate a specific one"));
         sender.sendMessage(helpLine("/vibe history <mod>", "browse and activate previous versions"));
         sender.sendMessage(helpLine("/vibe enable|disable <mod>", "toggle a mod"));
-        sender.sendMessage(helpLine("/vibe delete <mod>", "permanently remove a mod"));
+        sender.sendMessage(helpLine("/vibe delete <mod>", "permanently remove a mod (asks to confirm)"));
         sender.sendMessage(helpLine("/vibe export <mod>", "export a standalone plugin jar"));
         sender.sendMessage(helpLine("/vibe do <mod> <action> [args]", "run a mod action"));
         sender.sendMessage(helpLine("/vibe model [id]", "view/set the LLM model"));
@@ -864,7 +906,7 @@ public final class VibeCommand implements TabExecutor {
         sender.sendMessage(helpLine("/vibe chat", "toggle chat-as-prompt mode"));
         sender.sendMessage(helpLine("/vibe gui", "open the mod browser"));
         sender.sendMessage(helpLine("/vibe settings", "open the plugin settings"));
-        sender.sendMessage(helpLine("/vibe reload", "re-read config.yml"));
+        sender.sendMessage(helpLine("/vibe reload [mod]", "re-read config.yml, or recompile one mod"));
         sender.sendMessage(helpLine("/vibe panic", "disable all mods"));
     }
 
@@ -925,6 +967,9 @@ public final class VibeCommand implements TabExecutor {
         }
         if (args.length == 4 && sub.equals("rollback")) {
             return startsWithFilter(List.of("confirm"), args[3]);
+        }
+        if (args.length == 3 && sub.equals("delete")) {
+            return startsWithFilter(List.of("confirm"), args[2]);
         }
         if (args.length == 3 && sub.equals("do")) {
             ModHandle handle = registry.get(args[1]);

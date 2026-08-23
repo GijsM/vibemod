@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -38,6 +39,7 @@ public final class DebugEcho {
     private final Map<String, EchoHandler> handlers = new ConcurrentHashMap<>();
     private final Map<String, Boolean> overrides = new ConcurrentHashMap<>();
     private volatile boolean defaultEnabled;
+    private volatile BiConsumer<String, Boolean> persister;
 
     public DebugEcho(Plugin plugin) {
         this.plugin = plugin;
@@ -46,6 +48,29 @@ public final class DebugEcho {
     /** Sets the fallback used by {@link #enabled} for any mod without an explicit override. */
     public void setDefault(boolean on) {
         this.defaultEnabled = on;
+    }
+
+    /**
+     * Registers the write-through hook {@link #set} (and thus {@link #toggle})
+     * notifies with every explicit override, so overrides can be persisted
+     * outside this class. {@link #seed} deliberately bypasses it.
+     */
+    public void onChange(BiConsumer<String, Boolean> persister) {
+        this.persister = persister;
+    }
+
+    /**
+     * Restores a mod's persisted override on load: {@code null} (no stored
+     * override) removes any in-memory override so the config default applies,
+     * anything else becomes the override — WITHOUT notifying the
+     * {@link #onChange} persister (the value just came from disk).
+     */
+    public void seed(String mod, Boolean stored) {
+        if (stored == null) {
+            overrides.remove(lower(mod));
+        } else {
+            overrides.put(lower(mod), stored);
+        }
     }
 
     /** Starts tracking a mod: attaches its (idempotent) log handler. Call on load. */
@@ -66,10 +91,14 @@ public final class DebugEcho {
         return next;
     }
 
-    /** Sets an explicit per-mod echo override. */
+    /** Sets an explicit per-mod echo override and notifies the {@link #onChange} persister. */
     public void set(String mod, boolean on) {
         ensureAttached(mod);
         overrides.put(lower(mod), on);
+        BiConsumer<String, Boolean> p = persister;
+        if (p != null) {
+            p.accept(mod, on);
+        }
     }
 
     /** Detaches the handler and drops all state for a mod. Call on unload. */

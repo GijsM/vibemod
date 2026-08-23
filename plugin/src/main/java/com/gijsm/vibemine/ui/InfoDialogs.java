@@ -356,8 +356,12 @@ public final class InfoDialogs {
                 .type(DialogType.multiAction(nav).exitAction(doneButton()).columns(nav.size()).build()));
     }
 
-    /** The version's changelog, or its stored prompt (truncated to one line) for pre-changelog entries. */
-    private static String changelogOrPrompt(ModStore.StoredVersion v) {
+    /**
+     * The version's changelog, or its stored prompt (truncated to one line) for pre-changelog
+     * entries. Public so {@code VibeCommand}'s rollback confirm and console history dump can
+     * reuse it (like {@link #relativeTime}).
+     */
+    public static String changelogOrPrompt(ModStore.StoredVersion v) {
         if (v.changelog() != null && !v.changelog().isBlank()) {
             return v.changelog();
         }
@@ -398,6 +402,19 @@ public final class InfoDialogs {
      * (blank {@code kind} marks those - their {@code costUsd} reads 0.0).
      */
     public record ModCost(String name, double lifetimeUsd, int versions, int preTracking) {
+
+        /** Sums one stored mod's per-version costs (blank {@code kind} = pre-tracking, counts as $0). */
+        public static ModCost of(ModStore.StoredMod mod) {
+            double lifetime = 0.0;
+            int preTracking = 0;
+            for (ModStore.StoredVersion v : mod.versions()) {
+                lifetime += v.costUsd();
+                if (v.kind() == null || v.kind().isBlank()) {
+                    preTracking++;
+                }
+            }
+            return new ModCost(mod.name(), lifetime, mod.versions().size(), preTracking);
+        }
     }
 
     /**

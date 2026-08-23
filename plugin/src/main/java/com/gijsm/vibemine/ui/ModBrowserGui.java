@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -24,94 +26,69 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
-import com.gijsm.vibemine.runtime.DebugEcho;
 import com.gijsm.vibemine.runtime.ModErrors;
 import com.gijsm.vibemine.runtime.ModHandle;
 import com.gijsm.vibemine.runtime.ModRegistry;
-import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
 
 /**
- * The playful, colorful chest-inventory GUI for browsing and managing mods:
- * two screens, LIST and DETAIL. The main list shows one glinting item per
- * mod, colored and dotted by live state; left-clicking one opens a detail
- * panel whose buttons are expressive items (anvil reload, blaze powder fix,
- * lever debug toggle, comparator configure, etc.) rather than per-knob
- * steppers - all knob editing now goes through {@link Dialogs} via
- * {@link GuiCallbacks#configure}, and the admin-only [⚙ Settings] entry in
- * the list's bottom border opens the native {@link SettingsDialog} form via
- * {@link GuiCallbacks#openSettings} (the old chest SETTINGS screen is gone).
- * Borders and filler panes are tinted by aggregate/mod state (orange-ish when
- * anything is degraded) so no screen ever shows a bare slot.
+ * The playful, colorful chest-inventory GUI: ONLY the paginated mod list (the
+ * general plugin overview). It shows one glinting item per mod, colored and
+ * dotted by live state; left-clicking one opens that mod's native
+ * {@link ModHubDialog} via the injected {@code openHub} callback (the old
+ * chest DETAIL screen is gone — every per-mod action now lives in the hub),
+ * and the admin-only [⚙ Settings] entry in the bottom border opens the native
+ * {@link SettingsDialog} form via {@code openSettings}. Borders and filler
+ * panes are tinted by aggregate state (orange-ish when anything is degraded)
+ * so the screen never shows a bare slot.
  */
 public final class ModBrowserGui implements Listener {
 
-    private enum Screen { LIST, DETAIL }
-
-    private static final long DELETE_CONFIRM_MS = 5000L;
     private static final Component LIST_TITLE = Component.text("⬡ VibeMod");
-
-    private static final int DETAIL_SIZE = 54;
-    private static final int SLOT_RELOAD = 10;
-    private static final int SLOT_FIX = 11;
-    private static final int SLOT_DEBUG = 12;
-    private static final int SLOT_HEADER = 13;
-    private static final int SLOT_CONFIGURE = 14;
-    private static final int SLOT_EDIT = 15;
-    private static final int SLOT_TOGGLE = 16;
-    private static final int SLOT_MANUAL = 19;
-    private static final int SLOT_SOURCE = 20;
-    private static final int SLOT_ERRORS = 21;
-    private static final int SLOT_ROLLBACK = 22;
-    private static final int SLOT_EXPORT = 23;
-    private static final int SLOT_DELETE = 24;
-    private static final int SLOT_BACK = 53;
 
     private final Plugin plugin;
     private final ModRegistry registry;
     private final ModStore store;
-    private final ModConfigs configs;
     private final ModErrors errors;
-    private final DebugEcho debug;
-    private final GuiCallbacks cb;
+    private final Consumer<Player> openSettings;
+    private final BiConsumer<Player, String> openHub;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
 
     /**
-     * The {@code catalog}/{@code sessionCost} params the old chest SETTINGS screen
-     * displayed were dropped along with that screen - all settings data now flows
-     * through {@link SettingsDialog}'s own snapshot supplier.
+     * The {@code configs}/{@code debug} params (and the old callbacks-bundle record)
+     * the old chest DETAIL screen consumed were dropped along with that screen — the
+     * two callbacks left are the two things the list itself can open.
      */
-    public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModConfigs configs,
-                          ModErrors errors, DebugEcho debug, GuiCallbacks cb) {
+    public ModBrowserGui(Plugin plugin, ModRegistry registry, ModStore store, ModErrors errors,
+                          Consumer<Player> openSettings, BiConsumer<Player, String> openHub) {
         this.plugin = plugin;
         this.registry = registry;
         this.store = store;
-        this.configs = configs;
         this.errors = errors;
-        this.debug = debug;
-        this.cb = cb;
+        this.openSettings = openSettings;
+        this.openHub = openHub;
         plugin.getServer().getPluginManager().registerEvents(this, plugin);
     }
 
-    // ---- opening screens ----
+    // ---- opening the list ----
 
-    /** Opens the main mod list for {@code p}, resuming the page a previous LIST session was on. */
+    /** Opens the main mod list for {@code p}, resuming the page a previous session was on. */
     public void open(Player p) {
         List<ModStore.StoredMod> mods = store.all();
         int size = mods.size() > singlePageCapacity() ? 6 * 9 : idealListSize(mods.size());
 
         Inventory inv = plugin.getServer().createInventory(null, size, LIST_TITLE);
         Session previous = sessions.get(p.getUniqueId());
-        Session session = new Session(Screen.LIST, inv);
-        session.listPage = previous != null ? previous.listPage : 0; // DETAIL carries it too, so Back resumes the page
+        Session session = new Session(inv);
+        session.listPage = previous != null ? previous.listPage : 0; // reopening resumes the page
         sessions.put(p.getUniqueId(), session);
         populateList(p, session);
         p.openInventory(inv);
     }
 
     /**
-     * (Re)fills the LIST inventory in place — same populate-without-reopen idiom as
-     * {@link #populateDetail}: the arrow buttons call this instead of {@link #open}.
+     * (Re)fills the LIST inventory in place — populate-without-reopen: the arrow
+     * buttons call this instead of {@link #open}.
      */
     private void populateList(Player p, Session session) {
         Inventory inv = session.inventory;
@@ -164,24 +141,6 @@ public final class ModBrowserGui implements Listener {
         fillerRow(inv, 9, size - 10); // no bare slots among the unused content rows
     }
 
-    /** Opens the detail panel for one mod. */
-    public void openDetail(Player p, String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            error(p, "Unknown mod: " + modName);
-            open(p);
-            return;
-        }
-        Inventory inv = plugin.getServer().createInventory(null, DETAIL_SIZE, detailTitle(mod));
-        Session previous = sessions.get(p.getUniqueId());
-        Session session = new Session(Screen.DETAIL, inv);
-        session.modName = modName;
-        session.listPage = previous != null ? previous.listPage : 0; // so Back resumes the list page
-        sessions.put(p.getUniqueId(), session);
-        populateDetail(p, session, mod);
-        p.openInventory(inv);
-    }
-
     // ---- click routing ----
 
     @EventHandler
@@ -197,11 +156,7 @@ public final class ModBrowserGui implements Listener {
             return;
         }
         event.setCancelled(true);
-
-        switch (session.screen) {
-            case LIST -> onListClick(player, session, event.getSlot());
-            case DETAIL -> onDetailClick(player, session, event.getSlot());
-        }
+        onListClick(player, session, event.getSlot());
     }
 
     @EventHandler
@@ -220,12 +175,10 @@ public final class ModBrowserGui implements Listener {
         sessions.remove(event.getPlayer().getUniqueId());
     }
 
-    // ---- LIST screen ----
-
     private void onListClick(Player player, Session session, int slot) {
         if (slot == session.settingsSlot) {
             click(player);
-            cb.openSettings().accept(player);
+            openSettings.accept(player);
             return;
         }
         if (slot == session.prevSlot || slot == session.nextSlot) {
@@ -240,9 +193,12 @@ public final class ModBrowserGui implements Listener {
         String modName = session.slotMods.get(slot);
         if (modName != null) {
             click(player);
-            openDetail(player, modName);
+            // The hub dialog shows next tick, so opening from a click handler is safe.
+            openHub.accept(player, modName);
         }
     }
+
+    // ---- items ----
 
     private ItemStack buildListItem(ModStore.StoredMod mod) {
         ModHandle handle = registry.get(mod.name());
@@ -276,8 +232,9 @@ public final class ModBrowserGui implements Listener {
     /**
      * Resolves a mod's icon Material from its stored {@code icon} name, falling back to
      * {@link Material#PAPER} when the name is blank, unrecognized, or not a real item.
+     * Package-private: {@link ModHubDialog} renders the same icon as its item body.
      */
-    private static Material resolveIcon(String icon) {
+    static Material resolveIcon(String icon) {
         if (icon != null && !icon.isBlank()) {
             Material m = Material.matchMaterial(icon);
             if (m != null && m.isItem()) {
@@ -337,241 +294,7 @@ public final class ModBrowserGui implements Listener {
         return false;
     }
 
-    // ---- DETAIL screen ----
-
-    private Component detailTitle(ModStore.StoredMod mod) {
-        return Component.text("⬡ " + mod.name());
-    }
-
-    private void populateDetail(Player player, Session session, ModStore.StoredMod mod) {
-        Inventory inv = session.inventory;
-        inv.clear();
-
-        ModHandle live = registry.get(mod.name());
-        boolean enabled = live != null ? live.enabled() : mod.enabled();
-        boolean degraded = live != null && live.degraded();
-
-        // Fix-success jingle: this mod was degraded last time we drew this panel, and now isn't.
-        if (session.knownDegraded && !degraded && enabled) {
-            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1f, 1f);
-        }
-        session.knownDegraded = degraded;
-
-        fillBorder(inv, DETAIL_SIZE, degraded);
-
-        inv.setItem(SLOT_HEADER, buildHeaderItem(mod, enabled, degraded, live));
-
-        inv.setItem(SLOT_RELOAD, button(Material.ANVIL, "[⟳ reload]", Style.ACTION,
-                "Recompile and apply the current stored version"));
-        if (degraded) {
-            inv.setItem(SLOT_FIX, button(Material.BLAZE_POWDER, "[🔧 fix]", Style.WARN,
-                    "Send recent errors to the model for a repair round"));
-        }
-        inv.setItem(SLOT_DEBUG, debugLeverItem(mod.name()));
-        inv.setItem(SLOT_CONFIGURE, button(Material.COMPARATOR, "[⚙ configure]", Style.ACTION,
-                "Open the config dialog"));
-        inv.setItem(SLOT_EDIT, button(Material.WRITABLE_BOOK, "[✎ edit]", Style.ACTION,
-                "Open the edit-request dialog"));
-        inv.setItem(SLOT_TOGGLE, button(enabled ? Material.SLIME_BALL : Material.GRAY_DYE,
-                enabled ? "[disable]" : "[enable]", enabled ? Style.ERROR : Style.OK,
-                enabled ? "Disable this mod" : "Enable this mod"));
-
-        inv.setItem(SLOT_MANUAL, button(Material.BOOK, "[📖 manual]", Style.ACTION, "Open the manual"));
-        inv.setItem(SLOT_SOURCE, button(Material.PAPER, "[<> source]", Style.ACTION, "Open the source"));
-        inv.setItem(SLOT_ERRORS, button(Material.OBSERVER, "[⚠ errors]", Style.WARN, "Open the error log"));
-        inv.setItem(SLOT_ROLLBACK, button(Material.CLOCK, "[history]", NamedTextColor.YELLOW,
-                "Browse and activate previous versions"));
-        inv.setItem(SLOT_EXPORT, button(Material.CHEST, "[export]", Style.ACTION, "Export a standalone plugin jar"));
-        inv.setItem(SLOT_DELETE, deleteButton(session));
-        inv.setItem(SLOT_BACK, button(Material.ARROW, "[← back]", NamedTextColor.GRAY, "Back to the mod list"));
-
-        fillerRow(inv, 9, DETAIL_SIZE - 10); // no bare slots among the interior rows
-    }
-
-    private ItemStack buildHeaderItem(ModStore.StoredMod mod, boolean enabled, boolean degraded, ModHandle live) {
-        ItemStack item = new ItemStack(resolveIcon(mod.icon()));
-        ItemMeta meta = item.getItemMeta();
-        NamedTextColor nameColor = degraded ? NamedTextColor.GOLD : (enabled ? NamedTextColor.WHITE : NamedTextColor.GRAY);
-        meta.displayName(plain(mod.name(), nameColor));
-        meta.setEnchantmentGlintOverride(enabled ? Boolean.TRUE : Boolean.FALSE);
-
-        List<Component> lore = new ArrayList<>(Text.wrap(mod.description(), Text.DEFAULT_WIDTH, NamedTextColor.GRAY));
-        if (mod.usage() != null && !mod.usage().isBlank()) {
-            lore.addAll(Text.wrap("Try: " + mod.usage(), Text.DEFAULT_WIDTH, NamedTextColor.YELLOW));
-        }
-        lore.add(stateDotLine(enabled, degraded, live));
-        lore.add(plain(mod.versions().size() > 1
-                ? "v" + mod.currentVersion() + " of " + mod.versions().size()
-                : "v" + mod.currentVersion(), NamedTextColor.DARK_GRAY));
-        lore.add(plain("by " + mod.creator(), NamedTextColor.DARK_GRAY));
-        int knobs = configs.schema(mod.name()).size();
-        lore.add(plain(knobs == 0 ? "No configurable settings" : knobs + " config knob(s)", NamedTextColor.DARK_GRAY));
-        meta.lore(lore);
-        item.setItemMeta(meta);
-        return item;
-    }
-
-    private ItemStack debugLeverItem(String modName) {
-        boolean on = debug.enabled(modName);
-        ItemStack item = new ItemStack(Material.LEVER);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain("[debug: " + (on ? "ON" : "OFF") + "]", on ? Style.OK : NamedTextColor.GRAY));
-        meta.lore(List.of(plain("Echo ctx.log() + exceptions to ops chat", NamedTextColor.GRAY),
-                plain("Click to toggle", NamedTextColor.YELLOW)));
-        item.setItemMeta(meta);
-        return item;
-    }
-
-    private ItemStack deleteButton(Session session) {
-        boolean armed = session.pendingDelete && System.currentTimeMillis() < session.pendingDeleteExpiresAt;
-        ItemStack item = new ItemStack(Material.TNT);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(armed ? "[✖ delete] click again to confirm!" : "[✖ delete]", Style.ERROR));
-        meta.lore(List.of(plain(armed ? "Confirm within 5s" : "Click twice within 5s to delete",
-                NamedTextColor.GRAY)));
-        item.setItemMeta(meta);
-        return item;
-    }
-
-    private void onDetailClick(Player player, Session session, int slot) {
-        String modName = session.modName;
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            error(player, "That mod no longer exists.");
-            open(player);
-            return;
-        }
-
-        if (slot != SLOT_DELETE) {
-            session.pendingDelete = false;
-        }
-
-        switch (slot) {
-            case SLOT_RELOAD -> {
-                click(player);
-                cb.applyVersion().accept(player, modName);
-                refreshDetail(player);
-            }
-            case SLOT_FIX -> {
-                click(player);
-                cb.fix().accept(player, modName);
-            }
-            case SLOT_DEBUG -> {
-                click(player);
-                boolean now = debug.toggle(modName);
-                info(player, modName + " debug echo " + (now ? "ON" : "OFF") + ".");
-                refreshDetail(player);
-            }
-            case SLOT_CONFIGURE -> {
-                click(player);
-                cb.configure().accept(player, modName);
-            }
-            case SLOT_EDIT -> {
-                click(player);
-                cb.editMod().accept(player, modName);
-            }
-            case SLOT_TOGGLE -> {
-                click(player);
-                toggleEnabled(player, modName);
-                refreshDetail(player);
-            }
-            case SLOT_MANUAL -> {
-                click(player);
-                cb.openManual().accept(player, modName);
-            }
-            case SLOT_SOURCE -> {
-                click(player);
-                cb.openSource().accept(player, modName);
-            }
-            case SLOT_ERRORS -> {
-                click(player);
-                cb.openErrors().accept(player, modName);
-            }
-            case SLOT_ROLLBACK -> {
-                // No refreshDetail: the history dialog replaces this screen.
-                click(player);
-                cb.openHistory().accept(player, modName);
-            }
-            case SLOT_EXPORT -> {
-                click(player);
-                cb.export().accept(player, modName);
-            }
-            case SLOT_DELETE -> handleDeleteClick(player, session, modName);
-            case SLOT_BACK -> {
-                click(player);
-                open(player);
-            }
-            default -> {
-            }
-        }
-    }
-
-    private void handleDeleteClick(Player player, Session session, String modName) {
-        long now = System.currentTimeMillis();
-        click(player);
-        if (session.pendingDelete && now < session.pendingDeleteExpiresAt) {
-            registry.unload(modName);
-            store.delete(modName);
-            info(player, "Deleted " + modName + ".");
-            open(player);
-            return;
-        }
-        session.pendingDelete = true;
-        session.pendingDeleteExpiresAt = now + DELETE_CONFIRM_MS;
-        warn(player, "Click [✖ delete] again within 5s to permanently delete " + modName + ".");
-        refreshDetail(player);
-    }
-
-    private void refreshDetail(Player player) {
-        Session session = sessions.get(player.getUniqueId());
-        if (session == null || session.screen != Screen.DETAIL) {
-            return;
-        }
-        ModStore.StoredMod mod = store.get(session.modName);
-        if (mod == null) {
-            open(player);
-            return;
-        }
-        populateDetail(player, session, mod);
-    }
-
-    private void toggleEnabled(Player player, String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            error(player, "Unknown mod: " + modName);
-            return;
-        }
-        boolean enabled = registry.get(modName) != null ? registry.get(modName).enabled() : mod.enabled();
-        if (enabled) {
-            registry.disable(modName);
-            store.setEnabled(modName, false);
-            info(player, modName + " disabled.");
-        } else {
-            if (registry.get(modName) == null) {
-                cb.applyVersion().accept(player, modName);
-                return;
-            }
-            try {
-                registry.enable(modName);
-            } catch (ModRegistry.ModLoadException e) {
-                error(player, "Failed to enable " + modName + ": " + e.getMessage());
-                return;
-            }
-            store.setEnabled(modName, true);
-            info(player, modName + " enabled.");
-        }
-    }
-
     // ---- shared helpers ----
-
-    private static ItemStack button(Material material, String label, NamedTextColor color, String hoverLine) {
-        ItemStack item = new ItemStack(material);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(plain(label, color));
-        meta.lore(List.of(plain(hoverLine, NamedTextColor.GRAY)));
-        item.setItemMeta(meta);
-        return item;
-    }
 
     /** Colors the top and bottom rows with a glass pane tinted by state; degraded skews orange. */
     private static void fillBorder(Inventory inv, int size, boolean degraded) {
@@ -625,38 +348,17 @@ public final class ModBrowserGui implements Listener {
         player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1f, 1f);
     }
 
-    private static void info(Player player, String msg) {
-        player.sendMessage(Style.ok(msg));
-    }
-
-    private static void warn(Player player, String msg) {
-        player.sendMessage(Style.warn(msg));
-    }
-
-    private static void error(Player player, String msg) {
-        player.sendMessage(Style.err(msg));
-    }
-
-    /** Per-player GUI state: which screen is open, in what inventory, and any screen-specific bookkeeping. */
+    /** Per-player GUI state: the open list inventory and its paging bookkeeping. */
     private static final class Session {
-        final Screen screen;
         final Inventory inventory;
 
-        // LIST
         List<String> slotMods;
         int settingsSlot = -1;
         int listPage = 0;
         int prevSlot = -1;
         int nextSlot = -1;
 
-        // DETAIL
-        String modName;
-        boolean pendingDelete;
-        long pendingDeleteExpiresAt;
-        boolean knownDegraded;
-
-        Session(Screen screen, Inventory inventory) {
-            this.screen = screen;
+        Session(Inventory inventory) {
             this.inventory = inventory;
         }
     }

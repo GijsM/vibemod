@@ -20,7 +20,8 @@ import com.gijsm.vibemine.store.ModStore;
  * the per-version changelog/kind/costUsd/requester), FQCN derivation, rollback
  * semantics, arbitrary setCurrentVersion, versionsOnDisk, path-traversal
  * rejection, v1 meta.json
- * null-normalization, config knob validation/overlay/preservation, live
+ * null-normalization, the tri-state per-mod debugEcho override's persistence,
+ * config knob validation/overlay/preservation, live
  * config caching, and a real compile + jar export (with an embedded
  * config.yml for knobbed mods) whose contents are verified with
  * java.util.jar.JarFile.
@@ -40,6 +41,7 @@ public class StoreSelfTest {
         testNullFieldMetaJsonNormalized();
         testVersionMetadataAndVersionsOnDisk();
         testIconRoundTripAndNormalization();
+        testDebugEchoPersistence();
         testSetConfigValueValidationMatrix();
         testResolvedConfigValuesOverlay();
         testSaveNewVersionPreservesSurvivingConfigValues();
@@ -205,6 +207,9 @@ public class StoreSelfTest {
         check("v1 meta.json null configValues normalized to Map.of()",
                 mod.configValues() != null && mod.configValues().isEmpty());
 
+        check("v1 meta.json debugEcho stays null (tri-state: no override, NOT defaulted)",
+                mod.debugEcho() == null);
+
         // Version entries written before changelog/kind/costUsd/requester existed
         // (the 21 live mods) must read back with ""/0.0 defaults, never null.
         ModStore.StoredVersion oldVersion = mod.versions().get(0);
@@ -312,6 +317,42 @@ public class StoreSelfTest {
                 new ConfigKnob("count", "integer", "5", "How many things.", 1.0, 10.0, 1.0, null),
                 new ConfigKnob("mode", "choice", "normal", "How intense.", null, null, null,
                         List.of("weak", "normal", "strong")));
+    }
+
+    /**
+     * The tri-state per-mod debug echo override: null on new mods, set/clear via
+     * setDebugEcho, surviving every other metadata rewrite (setEnabled/
+     * setCurrentVersion/rollback/setConfigValue) and carried forward by
+     * saveNewVersion.
+     */
+    private static void testDebugEchoPersistence() throws Exception {
+        Path modsDir = tempDir("modstore-debug-echo");
+        ModStore store = new ModStore(modsDir);
+        saveModWithConfig(store, "Echoey", baseSchema());
+
+        check("a new mod starts with debugEcho null (no override)", store.get("Echoey").debugEcho() == null);
+
+        store.setDebugEcho("Echoey", true);
+        check("setDebugEcho(true) round-trips from disk", Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+        store.setDebugEcho("Echoey", false);
+        check("setDebugEcho(false) round-trips from disk", Boolean.FALSE.equals(store.get("Echoey").debugEcho()));
+        store.setDebugEcho("Echoey", null);
+        check("setDebugEcho(null) clears the override", store.get("Echoey").debugEcho() == null);
+
+        store.setDebugEcho("Echoey", true);
+        store.setEnabled("Echoey", false);
+        check("debugEcho survives setEnabled", Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+        saveModWithConfig(store, "Echoey", baseSchema()); // v2
+        check("saveNewVersion carries debugEcho forward", Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+        store.setCurrentVersion("Echoey", 1);
+        check("debugEcho survives setCurrentVersion", Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+        store.setCurrentVersion("Echoey", 2);
+        check("debugEcho survives rollback",
+                store.rollback("Echoey") && Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+        store.setConfigValue("Echoey", "count", "3");
+        check("debugEcho survives setConfigValue", Boolean.TRUE.equals(store.get("Echoey").debugEcho()));
+
+        System.out.println("PASS: debugEcho tri-state persists, clears, and survives every metadata rewrite");
     }
 
     private static void testSetConfigValueValidationMatrix() throws Exception {
@@ -459,7 +500,7 @@ public class StoreSelfTest {
 
         ModStore.StoredMod mod = new ModStore.StoredMod("Trivial", "A trivial export test mod", "", "", "",
                 "TrivialMod", 1, true, "gijs", List.of(new ModStore.StoredVersion(1, "make a trivial mod", "model-x",
-                        System.currentTimeMillis(), "", "", 0.0, "")), List.of(), Map.of());
+                        System.currentTimeMillis(), "", "", 0.0, "")), List.of(), Map.of(), null);
 
         Path outDir = tempDir("jarexport-out");
         JarExporter exporter = new JarExporter(new InMemoryCompiler());
@@ -539,7 +580,7 @@ public class StoreSelfTest {
                 "KnobbyMod", 1, true, "gijs",
                 List.of(new ModStore.StoredVersion(1, "make a knobby mod", "model-x", System.currentTimeMillis(),
                         "", "", 0.0, "")),
-                config, configValues);
+                config, configValues, null);
 
         Path outDir = tempDir("jarexport-config-out");
         JarExporter exporter = new JarExporter(new InMemoryCompiler());

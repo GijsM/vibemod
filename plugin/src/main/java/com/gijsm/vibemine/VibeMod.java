@@ -17,7 +17,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 import com.gijsm.vibemine.command.VibeCommand;
 import com.gijsm.vibemine.compile.CompileResult;
 import com.gijsm.vibemine.compile.InMemoryCompiler;
-import com.gijsm.vibemine.gen.GeneratedProject;
 import com.gijsm.vibemine.gen.ModGenerator;
 import com.gijsm.vibemine.llm.ModelCatalog;
 import com.gijsm.vibemine.llm.OpenRouterClient;
@@ -31,10 +30,9 @@ import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
 import com.gijsm.vibemine.ui.ChatMode;
 import com.gijsm.vibemine.ui.Dialogs;
-import com.gijsm.vibemine.ui.GuiCallbacks;
-import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
+import com.gijsm.vibemine.ui.ModHubDialog;
 import com.gijsm.vibemine.ui.Progress;
 import com.gijsm.vibemine.ui.SettingsDialog;
 import com.gijsm.vibemine.ui.Style;
@@ -64,7 +62,6 @@ public final class VibeMod extends JavaPlugin {
     private Watchdog watchdog;
     private DynamicCommands dynamicCommands;
     private Dialogs dialogs;
-    private InfoDialogs infoDialogs;
     private SettingsDialog settingsDialog;
 
     @Override
@@ -100,6 +97,8 @@ public final class VibeMod extends JavaPlugin {
         applyErrorLimits();
         debugEcho = new DebugEcho(this);
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
+        // Every explicit toggle/set writes through to meta.json, so overrides survive restarts.
+        debugEcho.onChange((mod, on) -> store.setDebugEcho(mod, on));
         registry = new ModRegistry(this, dynamicCommands, watchdog, configs, modErrors, debugEcho);
 
         // Supersede the registry defaults so the store flag follows disables.
@@ -130,31 +129,16 @@ public final class VibeMod extends JavaPlugin {
                 this::generateFromPrompt,
                 (player, mod, changes) -> editFromPrompt(player, mod, changes),
                 this::applyConfigValues);
-        infoDialogs = new InfoDialogs(this);
         settingsDialog = new SettingsDialog(this, this::settingsSnapshot, this::applySettings,
                 this::openSettingsModelPicker, this::reloadVibeConfig);
-        ModBrowserGui gui = new ModBrowserGui(this, registry, store, configs, modErrors, debugEcho,
-                new GuiCallbacks(
-                        (player, mod) -> exportMod(player, mod, exporter),
-                        this::applyStoredVersion,
-                        (player, mod) -> dialogs.openConfig(player, mod, knobsFor(mod)),
-                        (player, mod) -> dialogs.openEdit(player, mod, manualSummary(mod)),
-                        (player, mod) -> dialogs.openFixConfirm(player, mod, lastErrorLine(mod)),
-                        (player, mod) -> openManual(player, mod),
-                        (player, mod) -> openSource(player, mod),
-                        (player, mod) -> infoDialogs.openErrors(player, mod, modErrors.recent(mod)),
-                        this::openHistory,
-                        this::reloadVibeConfig,
-                        client::model,
-                        this::setModel,
-                        player -> dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
-                                client.sessionCostUsd(), model -> setModelAndNotify(player, model)),
-                        settingsDialog::open));
+        ModHubDialog hub = new ModHubDialog(this, registry, store, modErrors, debugEcho);
+        ModBrowserGui gui = new ModBrowserGui(this, registry, store, modErrors,
+                settingsDialog::open, hub::open);
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
             VibeCommand handler = new VibeCommand(this, generator, registry, store, configs,
-                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, settingsDialog,
+                    modErrors, debugEcho, catalog, exporter, gui, chatMode, dialogs, settingsDialog, hub,
                     client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
                     this::reloadVibeConfig);
             vibe.setExecutor(handler);
@@ -238,8 +222,18 @@ public final class VibeMod extends JavaPlugin {
         return getConfig().getLong("watchdog.per-second-budget-ms", 500);
     }
 
-    /** Recompile a mod's current stored version and hot-load it. Used by rollback/enable/reload/boot. */
+    /** {@link #applyStoredVersion(CommandSender, String, Runnable)} with no completion hook. */
     private void applyStoredVersion(CommandSender feedback, String modName) {
+        applyStoredVersion(feedback, modName, null);
+    }
+
+    /**
+     * Recompile a mod's current stored version and hot-load it. Used by
+     * rollback/enable/reload/boot. {@code onLive} (nullable) runs on the main
+     * thread after the version is actually live — the compile is async, so this
+     * is the only correct place for follow-ups like reopening the mod hub.
+     */
+    private void applyStoredVersion(CommandSender feedback, String modName, Runnable onLive) {
         ModStore.StoredMod mod = store.get(modName);
         if (mod == null) {
             feedback.sendMessage(Style.err("Unknown mod: " + modName));
@@ -257,9 +251,12 @@ public final class VibeMod extends JavaPlugin {
                 try {
                     registry.load(mod.name(), mod.currentVersion(), mod.description(),
                             mod.mainClass(), compiled.classes(),
-                            mod.config(), store.resolvedConfigValues(mod.name()));
+                            mod.config(), store.resolvedConfigValues(mod.name()), mod.debugEcho());
                     store.setEnabled(mod.name(), true);
                     feedback.sendMessage(Style.ok(mod.name() + " v" + mod.currentVersion() + " is live"));
+                    if (onLive != null) {
+                        onLive.run();
+                    }
                 } catch (ModRegistry.ModLoadException e) {
                     feedback.sendMessage(Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
                 }
@@ -293,96 +290,27 @@ public final class VibeMod extends JavaPlugin {
 
     // ---- dialog/config plumbing ----
 
-    /** Schema + current values -> the knob list the config dialog renders. */
-    private List<Dialogs.Knob> knobsFor(String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            return List.of();
-        }
-        Map<String, String> values = store.resolvedConfigValues(mod.name());
-        List<Dialogs.Knob> knobs = new ArrayList<>();
-        for (GeneratedProject.ConfigKnob k : mod.config()) {
-            knobs.add(new Dialogs.Knob(k.key(), k.type(), k.description(),
-                    values.getOrDefault(k.key(), k.def()), k.min(), k.max(), k.step(), k.choices()));
-        }
-        return knobs;
-    }
-
-    /** Config-dialog submission: apply every value, returning per-key errors. */
+    /**
+     * Config-dialog submission: apply every value, returning per-key errors. An
+     * unloaded mod has no live config cache, so its values go straight to the disk
+     * store (same validation - {@code ModStore.validateKnobValue} backs both paths)
+     * and apply when the mod is next enabled.
+     */
     private List<String> applyConfigValues(Player player, String modName, Map<String, String> values) {
         List<String> errors = new ArrayList<>();
+        boolean unloaded = configs.schema(modName).isEmpty() && registry.get(modName) == null;
         for (Map.Entry<String, String> e : values.entrySet()) {
             try {
-                configs.set(modName, e.getKey(), e.getValue());
+                if (unloaded) {
+                    store.setConfigValue(modName, e.getKey(), e.getValue());
+                } else {
+                    configs.set(modName, e.getKey(), e.getValue());
+                }
             } catch (IllegalArgumentException bad) {
                 errors.add(e.getKey() + ": " + bad.getMessage());
             }
         }
         return errors;
-    }
-
-    private String manualSummary(String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            return "";
-        }
-        String manual = mod.manual() == null || mod.manual().isBlank() ? mod.description() : mod.manual();
-        return manual.length() <= 200 ? manual : manual.substring(0, 197) + "…";
-    }
-
-    private String lastErrorLine(String modName) {
-        List<ModErrors.ErrorRecord> recent = modErrors.recent(modName);
-        if (recent.isEmpty()) {
-            return "no recorded errors";
-        }
-        ModErrors.ErrorRecord r = recent.get(0);
-        return r.count() + "× " + r.exceptionClass() + (r.message() != null ? ": " + r.message() : "");
-    }
-
-    private void openManual(Player player, String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            player.sendMessage(Style.err("Unknown mod: " + modName));
-            return;
-        }
-        infoDialogs.openManual(player, mod, registry.get(mod.name()), store.resolvedConfigValues(mod.name()));
-    }
-
-    private void openSource(Player player, String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            player.sendMessage(Style.err("Unknown mod: " + modName));
-            return;
-        }
-        infoDialogs.openSource(player, mod.name(), mod.currentVersion(),
-                store.sources(mod.name(), mod.currentVersion()));
-    }
-
-    private void openHistory(Player player, String modName) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            player.sendMessage(Style.err("Unknown mod: " + modName));
-            return;
-        }
-        infoDialogs.openHistory(player, mod, store.versionsOnDisk(mod.name()));
-    }
-
-    private void exportMod(Player player, String modName, JarExporter exporter) {
-        ModStore.StoredMod mod = store.get(modName);
-        if (mod == null) {
-            return;
-        }
-        Map<String, String> sources = store.sources(mod.name(), mod.currentVersion());
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try {
-                Path jar = exporter.export(mod, sources, getDataFolder().toPath().resolve("exports"));
-                Bukkit.getScheduler().runTask(this, () -> player.sendMessage(
-                        Style.ok("Exported standalone plugin: " + jar)));
-            } catch (Exception e) {
-                Bukkit.getScheduler().runTask(this, () -> player.sendMessage(
-                        Style.err("Export failed: " + e.getMessage())));
-            }
-        });
     }
 
     private void setModel(String model) {

@@ -26,7 +26,7 @@ public final class InstallCard {
 
     /**
      * Name/version/state line, wrapped description, a "Try:" usage hint, and follow-up buttons:
-     * {@code [manual][config][info][off]} always, plus {@code [fix][errors]} when degraded.
+     * {@code [manual][config][open][off]} always, plus {@code [fix][errors]} when degraded.
      */
     public static Component build(ModStore.StoredMod mod, ModHandle liveOrNull) {
         boolean enabled = liveOrNull != null ? liveOrNull.enabled() : mod.enabled();
@@ -116,7 +116,7 @@ public final class InstallCard {
                 .append(Component.text(" "))
                 .append(Style.button("config", "/vibe config " + modName, "Tune this mod's settings", Style.ACTION))
                 .append(Component.text(" "))
-                .append(Style.button("info", "/vibe info " + modName, "Show this install card again", Style.ACTION))
+                .append(Style.button("open", "/vibe info " + modName, "Open the mod hub", Style.ACTION))
                 .append(Component.text(" "))
                 .append(Style.button("off", "/vibe disable " + modName, "Disable this mod", Style.ERROR));
         if (degraded) {

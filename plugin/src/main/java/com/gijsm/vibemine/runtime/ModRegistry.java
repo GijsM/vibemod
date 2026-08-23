@@ -92,16 +92,18 @@ public final class ModRegistry {
     /** Compile output -> live mod. Replaces (tears down) an existing mod of the same name. Main thread. */
     public ModHandle load(String name, int version, String description, String mainClassFqcn,
                            Map<String, byte[]> classes) throws ModLoadException {
-        return load(name, version, description, mainClassFqcn, classes, List.of(), Map.of());
+        return load(name, version, description, mainClassFqcn, classes, List.of(), Map.of(), null);
     }
 
     /**
-     * Compile output -> live mod, with the config schema and current values to register for it.
-     * Replaces (tears down) an existing mod of the same name. Main thread.
+     * Compile output -> live mod, with the config schema and current values to register for it,
+     * plus the mod's persisted debug-echo override to seed ({@code null} = no override, follow
+     * the config default). Replaces (tears down) an existing mod of the same name. Main thread.
      */
     public ModHandle load(String name, int version, String description, String mainClassFqcn,
                            Map<String, byte[]> classes,
-                           List<GeneratedProject.ConfigKnob> schema, Map<String, String> values)
+                           List<GeneratedProject.ConfigKnob> schema, Map<String, String> values,
+                           Boolean debugEcho)
             throws ModLoadException {
         assertMainThread();
         String key = lower(name);
@@ -121,6 +123,7 @@ public final class ModRegistry {
             throw e;
         }
         debug.track(name);
+        debug.seed(name, debugEcho);
         errors.clearEpisode(name);
         return handle;
     }

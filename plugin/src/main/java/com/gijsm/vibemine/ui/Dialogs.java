@@ -36,7 +36,8 @@ import com.gijsm.vibemine.llm.ModelCatalog;
  * Native Minecraft Dialog UI ({@code io.papermc.paper.dialog}, Paper 1.21.8)
  * replacing the retired book-and-quill flows: a multiline prompt dialog for
  * {@code /vibe make}, an edit-request dialog, a per-knob config dialog, a
- * fix confirmation, and a rollback/activate confirmation.
+ * fix confirmation, a rollback/activate confirmation, and a delete
+ * confirmation.
  *
  * <p>The dialog API is {@code @Experimental} on this Paper version; those
  * warnings are suppressed file-wide (there is no {@code -Werror} anywhere in
@@ -50,11 +51,13 @@ import com.gijsm.vibemine.llm.ModelCatalog;
  * callback is ever allowed to propagate into Bukkit: it is caught, logged,
  * and reported to the player via {@link Style#err}.
  *
- * <p>{@link #openFixConfirm} and {@link #openRollbackConfirm} have no injected
- * "run it" callbacks (the constructor below is the frozen v3 surface and only
- * carries the make/edit/config callbacks reused from the old book flows) -
- * their confirm buttons instead run {@code /vibe fix <mod> confirm} /
- * {@code /vibe rollback <mod> <version> confirm} as real commands, which
+ * <p>{@link #openFixConfirm}, {@link #openRollbackConfirm} and
+ * {@link #openDeleteConfirm} have no injected "run it" callbacks (the
+ * constructor below is the frozen v3 surface and only carries the
+ * make/edit/config callbacks reused from the old book flows) - their confirm
+ * buttons instead run {@code /vibe fix <mod> confirm} /
+ * {@code /vibe rollback <mod> <version> confirm} /
+ * {@code /vibe delete <mod> confirm} as real commands, which
  * {@code VibeCommand} treats as "already confirmed, run it now" instead of
  * reopening the same dialog.
  */
@@ -510,6 +513,32 @@ public final class Dialogs {
                         .afterAction(DialogBase.DialogAfterAction.CLOSE)
                         .build())
                 .type(DialogType.confirmation(activate, notNow)));
+        show(p, dialog);
+    }
+
+    // ---- delete confirm ----
+
+    /**
+     * Confirms permanently deleting {@code mod} and all its stored versions. Same idiom as
+     * {@link #openFixConfirm}: the confirm button runs {@code /vibe delete <mod> confirm} as
+     * a real command rather than calling back into this class, which {@code VibeCommand}
+     * treats as "already confirmed, delete it now" instead of reopening this same dialog.
+     */
+    public void openDeleteConfirm(Player p, String mod, int versionCount) {
+        ActionButton delete = ActionButton.builder(Component.text("Delete ✖"))
+                .action(DialogAction.staticAction(ClickEvent.runCommand("/vibe delete " + mod + " confirm")))
+                .build();
+        ActionButton keep = ActionButton.builder(Component.text("Keep it")).action(noOp()).build();
+
+        Dialog dialog = Dialog.create(b -> b.empty()
+                .base(DialogBase.builder(Component.text("Delete " + mod + "?"))
+                        .body(List.of(DialogBody.plainMessage(Component.text(
+                                "Permanently delete " + mod + " and its " + versionCount
+                                        + " stored version(s)? This cannot be undone.",
+                                NamedTextColor.GRAY))))
+                        .afterAction(DialogBase.DialogAfterAction.CLOSE)
+                        .build())
+                .type(DialogType.confirmation(delete, keep)));
         show(p, dialog);
     }
 
