@@ -15,6 +15,9 @@ openrouter:
   streaming: true
   # Completion-token cap per request. 0 (default) = no cap: the model's own ceiling applies.
   max-tokens: 0
+  # Reasoning/thinking effort sent to the model: off, low, medium, or high.
+  # "off" (default) omits the field entirely — the model's default behavior applies.
+  reasoning-effort: off
 
 generation:
   # How many auto-repair attempts to make when generated code fails to compile

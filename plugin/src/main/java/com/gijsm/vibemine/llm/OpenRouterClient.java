@@ -95,6 +95,7 @@ public final class OpenRouterClient {
     private volatile String model;
     private volatile Duration timeout;
     private volatile int maxTokens = 0; // <= 0: omit, OpenRouter uses the model's own ceiling
+    private volatile String reasoningEffort; // null: off — omit the "reasoning" field entirely
     private final DoubleAdder sessionCost = new DoubleAdder();
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
@@ -108,6 +109,25 @@ public final class OpenRouterClient {
         this.maxTokens = Math.max(0, maxTokens); // 0 = omit the field entirely
     }
 
+    /**
+     * Reasoning/thinking effort sent with every request ("low"/"medium"/"high");
+     * anything else — including "off", "", null, or YAML's bare {@code off} parsed
+     * as boolean {@code false} and stringified — disables reasoning entirely.
+     */
+    public void setReasoningEffort(String effort) {
+        String normalized = effort == null ? "" : effort.trim().toLowerCase(java.util.Locale.ROOT);
+        this.reasoningEffort = switch (normalized) {
+            case "low", "medium", "high" -> normalized;
+            default -> null;
+        };
+    }
+
+    /** The active reasoning effort: "low"/"medium"/"high", or "off" when disabled. */
+    public String reasoningEffort() {
+        String effort = reasoningEffort;
+        return effort == null ? "off" : effort;
+    }
+
     /** Shared request-body builder for both the buffered and streaming request shapes. */
     private JsonObject buildBody(String systemPrompt, List<ChatMessage> messages, boolean stream) {
         JsonObject body = new JsonObject();
@@ -115,7 +135,16 @@ public final class OpenRouterClient {
         if (maxTokens > 0) {
             body.addProperty("max_tokens", maxTokens);
         }
-        body.addProperty("temperature", 0.4);
+        String effort = reasoningEffort;
+        if (effort != null) {
+            JsonObject reasoning = new JsonObject();
+            reasoning.addProperty("effort", effort);
+            body.add("reasoning", reasoning);
+            // No "temperature" here: with reasoning enabled, Anthropic models reject any
+            // temperature other than 1, so we omit it and let the provider default apply.
+        } else {
+            body.addProperty("temperature", 0.4);
+        }
         if (stream) {
             body.addProperty("stream", true);
             // Deliberately no "stream_options"/"usage.include": OpenRouter always includes

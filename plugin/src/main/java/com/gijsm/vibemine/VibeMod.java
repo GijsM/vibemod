@@ -84,6 +84,7 @@ public final class VibeMod extends JavaPlugin {
                 getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"),
                 Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
+        client.setReasoningEffort(reasoningEffortFromConfig());
         catalog = new ModelCatalog();
         catalog.refreshAsync();
 
@@ -139,7 +140,9 @@ public final class VibeMod extends JavaPlugin {
                         client::model,
                         this::setModel,
                         player -> dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
-                                client.sessionCostUsd(), model -> setModelAndNotify(player, model))));
+                                client.sessionCostUsd(), model -> setModelAndNotify(player, model)),
+                        client::reasoningEffort,
+                        this::setReasoningEffort));
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
@@ -191,6 +194,7 @@ public final class VibeMod extends JavaPlugin {
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
+        client.setReasoningEffort(reasoningEffortFromConfig());
         catalog.refreshAsync();
         applyErrorLimits();
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
@@ -355,6 +359,23 @@ public final class VibeMod extends JavaPlugin {
     private void setModel(String model) {
         client.setModel(model);
         getConfig().set("openrouter.model", model);
+        saveConfig();
+    }
+
+    /**
+     * Reads {@code openrouter.reasoning-effort}, tolerating YAML's bare {@code off}
+     * parsing as boolean false (Bukkit stringifies it to "false"; the client treats
+     * anything but low/medium/high as off).
+     */
+    private String reasoningEffortFromConfig() {
+        String raw = getConfig().getString("openrouter.reasoning-effort", "off");
+        return raw == null ? "off" : raw;
+    }
+
+    /** {@link #setModel}'s counterpart for the reasoning effort: apply live, persist to config.yml. */
+    private void setReasoningEffort(String effort) {
+        client.setReasoningEffort(effort);
+        getConfig().set("openrouter.reasoning-effort", client.reasoningEffort());
         saveConfig();
     }
 

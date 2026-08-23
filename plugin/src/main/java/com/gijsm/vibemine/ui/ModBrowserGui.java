@@ -67,9 +67,10 @@ public final class ModBrowserGui implements Listener {
     private static final int SLOT_BACK = 53;
 
     private static final int SETTINGS_SIZE = 27;
-    private static final int SETTINGS_MODEL_SLOT = 11;
-    private static final int SETTINGS_WATCHDOG_SLOT = 13;
-    private static final int SETTINGS_RETRY_SLOT = 15;
+    private static final int SETTINGS_MODEL_SLOT = 10;
+    private static final int SETTINGS_THINKING_SLOT = 12;
+    private static final int SETTINGS_WATCHDOG_SLOT = 14;
+    private static final int SETTINGS_RETRY_SLOT = 16;
     private static final int SETTINGS_RELOAD_SLOT = 22;
     private static final int SETTINGS_BACK_SLOT = 26;
 
@@ -549,6 +550,17 @@ public final class ModBrowserGui implements Listener {
         model.setItemMeta(modelMeta);
         inv.setItem(SETTINGS_MODEL_SLOT, model);
 
+        String effort = cb.getEffort().get();
+        ItemStack thinking = new ItemStack(Material.AMETHYST_SHARD);
+        ItemMeta thinkingMeta = thinking.getItemMeta();
+        thinkingMeta.displayName(plain("Thinking: " + effort, NamedTextColor.WHITE));
+        thinkingMeta.lore(List.of(
+                plain("Reasoning effort sent to the model", NamedTextColor.GRAY),
+                plain("off = model default; higher = slower, pricier, smarter", NamedTextColor.GRAY),
+                plain("Click to cycle off → low → medium → high", NamedTextColor.YELLOW)));
+        thinking.setItemMeta(thinkingMeta);
+        inv.setItem(SETTINGS_THINKING_SLOT, thinking);
+
         inv.setItem(SETTINGS_WATCHDOG_SLOT, displayOnly("Watchdog budgets",
                 "single-invocation-ms / per-second-budget-ms"));
         inv.setItem(SETTINGS_RETRY_SLOT, displayOnly("Max retries",
@@ -580,6 +592,18 @@ public final class ModBrowserGui implements Listener {
             case SETTINGS_MODEL_SLOT -> {
                 click(player);
                 cb.pickModel().accept(player);
+            }
+            case SETTINGS_THINKING_SLOT -> {
+                click(player);
+                String next = switch (cb.getEffort().get()) {
+                    case "off" -> "low";
+                    case "low" -> "medium";
+                    case "medium" -> "high";
+                    default -> "off";
+                };
+                cb.setEffort().accept(next);
+                info(player, "Thinking effort set to " + next + ".");
+                populateSettings(session.inventory);
             }
             case SETTINGS_RELOAD_SLOT -> {
                 click(player);

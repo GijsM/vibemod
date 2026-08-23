@@ -14,7 +14,10 @@ import org.bukkit.entity.Player;
  * {@code config.yml}, reading/writing the active LLM model, and (new in the
  * dynamic model picker feature) opening the model-picker dialog itself -
  * {@code pickModel} is declared right after {@code getModel}/{@code setModel}
- * since it is model-related plumbing, same as those two.
+ * since it is model-related plumbing, same as those two. The reasoning-effort
+ * pair ({@code getEffort}/{@code setEffort}) follows the same read/write shape
+ * as the model pair: the GUI cycles the value, the wiring layer applies and
+ * persists it.
  */
 public record GuiCallbacks(BiConsumer<Player, String> export,
                            BiConsumer<Player, String> applyVersion,
@@ -26,5 +29,6 @@ public record GuiCallbacks(BiConsumer<Player, String> export,
                            BiConsumer<Player, String> openErrors,
                            Runnable reloadConfig,
                            Supplier<String> getModel, Consumer<String> setModel,
-                           Consumer<Player> pickModel) {
+                           Consumer<Player> pickModel,
+                           Supplier<String> getEffort, Consumer<String> setEffort) {
 }
