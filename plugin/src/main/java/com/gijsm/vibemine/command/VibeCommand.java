@@ -35,6 +35,7 @@ import com.gijsm.vibemine.store.ModConfigs;
 import com.gijsm.vibemine.store.ModStore;
 import com.gijsm.vibemine.ui.ChatMode;
 import com.gijsm.vibemine.ui.Dialogs;
+import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.Progress;
@@ -49,8 +50,9 @@ import com.gijsm.vibemine.ui.VirtualBooks;
  * <p>Typing UX moved to native dialogs in v3: {@code make}/{@code edit} with
  * no free-text description, {@code config}, and {@code book} all open a
  * {@link Dialogs} popup for players (console/RCON keeps working exactly as
- * before by supplying the text inline). Reading moved to virtual books via
- * {@link VirtualBooks} - no more given items.
+ * before by supplying the text inline). Reading ({@code manual}/{@code source}/
+ * {@code errors}) opens native dialogs via {@link InfoDialogs} for players;
+ * console gets the same content as {@link VirtualBooks} chat dumps.
  */
 public final class VibeCommand implements TabExecutor {
 
@@ -77,6 +79,7 @@ public final class VibeCommand implements TabExecutor {
     private final ModBrowserGui gui;
     private final ChatMode chatMode;
     private final Dialogs dialogs;
+    private final InfoDialogs infoDialogs;
     private final Supplier<String> getModel;
     private final Consumer<String> setModel;
     private final java.util.function.DoubleSupplier sessionCost;
@@ -107,6 +110,7 @@ public final class VibeCommand implements TabExecutor {
         this.gui = gui;
         this.chatMode = chatMode;
         this.dialogs = dialogs;
+        this.infoDialogs = new InfoDialogs(plugin);
         this.getModel = getModel;
         this.setModel = setModel;
         this.sessionCost = sessionCost;
@@ -318,7 +322,7 @@ public final class VibeCommand implements TabExecutor {
         }
         Map<String, String> sources = store.sources(modName, mod.currentVersion());
         if (sender instanceof Player player) {
-            VirtualBooks.openSource(player, modName, sources);
+            infoDialogs.openSource(player, mod.name(), mod.currentVersion(), sources);
         } else {
             VirtualBooks.dumpSource(sender, modName, sources);
         }
@@ -354,7 +358,7 @@ public final class VibeCommand implements TabExecutor {
         ModHandle live = registry.get(modName);
         Map<String, String> values = configs.values(modName);
         if (sender instanceof Player player) {
-            VirtualBooks.openManual(player, mod, live, values);
+            infoDialogs.openManual(player, mod, live, values);
             return;
         }
         VirtualBooks.dumpManual(sender, mod, live, values);
@@ -543,8 +547,8 @@ public final class VibeCommand implements TabExecutor {
         String modName = args[0];
         int distinct = errors.distinctCount(modName);
         if (sender instanceof Player player) {
-            VirtualBooks.openErrors(player, modName, errors.recent(modName));
-            player.sendMessage(Style.warn(modName + ": " + distinct + " distinct error(s) - see the book."));
+            infoDialogs.openErrors(player, modName, errors.recent(modName));
+            player.sendMessage(Style.warn(modName + ": " + distinct + " distinct error(s) - see the dialog."));
             return;
         }
         VirtualBooks.dumpErrors(sender, errors.report(modName, CONSOLE_ERROR_LINES));

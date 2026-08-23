@@ -80,8 +80,8 @@ public final class InstallCard {
     }
 
     /**
-     * Plain-text lines behind {@link #verifiedFooter}, reused by {@link VirtualBooks} for its
-     * written-book "Verified facts" page. When {@code live} is {@code null} (mod not currently
+     * Plain-text lines behind {@link #verifiedFooter}, reused by {@link InfoDialogs} for the
+     * manual dialog's "Verified facts" section. When {@code live} is {@code null} (mod not currently
      * loaded), introspected counts aren't available from stored data alone, so that's said plainly
      * rather than guessed.
      */

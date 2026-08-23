@@ -10,7 +10,7 @@ import org.bukkit.entity.Player;
  * Actions the mod browser GUI cannot perform on its own and instead delegates
  * back to the wiring layer: exporting a jar, reapplying a rolled-back
  * version (the per-mod [⟟ reload] button), opening the configure/edit/fix
- * dialogs, opening the manual/source/errors virtual books, reloading
+ * dialogs, opening the manual/source/errors viewer dialogs, reloading
  * {@code config.yml}, reading/writing the active LLM model, and (new in the
  * dynamic model picker feature) opening the model-picker dialog itself -
  * {@code pickModel} is declared right after {@code getModel}/{@code setModel}

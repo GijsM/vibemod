@@ -32,11 +32,11 @@ import com.gijsm.vibemine.store.ModStore;
 import com.gijsm.vibemine.ui.ChatMode;
 import com.gijsm.vibemine.ui.Dialogs;
 import com.gijsm.vibemine.ui.GuiCallbacks;
+import com.gijsm.vibemine.ui.InfoDialogs;
 import com.gijsm.vibemine.ui.InstallCard;
 import com.gijsm.vibemine.ui.ModBrowserGui;
 import com.gijsm.vibemine.ui.Progress;
 import com.gijsm.vibemine.ui.Style;
-import com.gijsm.vibemine.ui.VirtualBooks;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -46,7 +46,8 @@ import net.kyori.adventure.text.format.NamedTextColor;
  * an LLM for Java, compiles it in-process, and hot-loads the result as a mod —
  * no restarts, no external services. v3: renamed from VibeCore; mods that
  * error are marked degraded with a one-click [fix]; native dialogs replace
- * book items for all typing, virtual books for all reading.
+ * book items for all typing and virtual books for all reading (console keeps
+ * plain chat dumps).
  */
 public final class VibeMod extends JavaPlugin {
 
@@ -62,6 +63,7 @@ public final class VibeMod extends JavaPlugin {
     private Watchdog watchdog;
     private DynamicCommands dynamicCommands;
     private Dialogs dialogs;
+    private InfoDialogs infoDialogs;
 
     @Override
     public void onEnable() {
@@ -125,6 +127,7 @@ public final class VibeMod extends JavaPlugin {
                 this::generateFromPrompt,
                 (player, mod, changes) -> editFromPrompt(player, mod, changes),
                 this::applyConfigValues);
+        infoDialogs = new InfoDialogs(this);
         ModBrowserGui gui = new ModBrowserGui(this, registry, store, configs, modErrors, debugEcho,
                 catalog, client::sessionCostUsd,
                 new GuiCallbacks(
@@ -135,7 +138,7 @@ public final class VibeMod extends JavaPlugin {
                         (player, mod) -> dialogs.openFixConfirm(player, mod, lastErrorLine(mod)),
                         (player, mod) -> openManual(player, mod),
                         (player, mod) -> openSource(player, mod),
-                        (player, mod) -> VirtualBooks.openErrors(player, mod, modErrors.recent(mod)),
+                        (player, mod) -> infoDialogs.openErrors(player, mod, modErrors.recent(mod)),
                         this::reloadVibeConfig,
                         client::model,
                         this::setModel,
@@ -326,7 +329,7 @@ public final class VibeMod extends JavaPlugin {
             player.sendMessage(Style.err("Unknown mod: " + modName));
             return;
         }
-        VirtualBooks.openManual(player, mod, registry.get(mod.name()), store.resolvedConfigValues(mod.name()));
+        infoDialogs.openManual(player, mod, registry.get(mod.name()), store.resolvedConfigValues(mod.name()));
     }
 
     private void openSource(Player player, String modName) {
@@ -335,7 +338,8 @@ public final class VibeMod extends JavaPlugin {
             player.sendMessage(Style.err("Unknown mod: " + modName));
             return;
         }
-        VirtualBooks.openSource(player, mod.name(), store.sources(mod.name(), mod.currentVersion()));
+        infoDialogs.openSource(player, mod.name(), mod.currentVersion(),
+                store.sources(mod.name(), mod.currentVersion()));
     }
 
     private void exportMod(Player player, String modName, JarExporter exporter) {
