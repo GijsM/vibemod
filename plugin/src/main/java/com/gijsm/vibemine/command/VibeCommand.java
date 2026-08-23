@@ -732,9 +732,13 @@ public final class VibeCommand implements TabExecutor {
                 return startsWithFilter(modNames(), args[1]);
             }
             if (sub.equals("model")) {
-                List<String> ids = new ArrayList<>();
-                for (ModelCatalog.ModelInfo m : catalog.featured(getModel.get())) {
-                    ids.add(m.id());
+                // The full uncurated catalog; the curated list only until the first fetch lands.
+                List<String> ids = catalog.allIds();
+                if (ids.isEmpty()) {
+                    ids = new ArrayList<>();
+                    for (ModelCatalog.ModelInfo m : catalog.featured(getModel.get())) {
+                        ids.add(m.id());
+                    }
                 }
                 return startsWithFilter(ids, args[1]);
             }

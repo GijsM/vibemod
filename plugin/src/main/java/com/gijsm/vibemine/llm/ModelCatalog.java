@@ -122,6 +122,14 @@ public final class ModelCatalog {
     }
 
     /**
+     * Every model id in the last successfully fetched catalog, sorted alphabetically —
+     * uncurated, for tab completion. Empty until the first fetch succeeds.
+     */
+    public List<String> allIds() {
+        return catalog.stream().map(p -> p.info().id()).sorted().toList();
+    }
+
+    /**
      * A short, curated list for pickers: {@code currentModelId} always first (a "price
      * unknown" placeholder when the catalog hasn't loaded yet or doesn't know it), then
      * up to {@value #FREE_TIER_COUNT} free models (largest context first), then a handful
