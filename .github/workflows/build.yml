@@ -1,38 +1,261 @@
 name: Build
 
+# The Phase F matrix (ARCHITECTURE-V2 §9, §10.4 "Notes for Phase F").
+#
+# Three tiers, in order of how much they prove and how likely they are to be
+# flaky:
+#
+#   build         one job: every module, every self-test, the fixture corpus,
+#                 then the same compile-heavy self-tests again with ECJ forced.
+#                 Fast, hermetic, and the one that must never be red.
+#   smoke         five jobs: a REAL dedicated server per supported platform and
+#                 version, driven over RCON with assertions on every reply.
+#                 Downloads servers; caches them.
+#   client-gates  two real game clients under xvfb + llvmpipe. `continue-on-
+#                 error` on purpose - see the job's own comment.
+
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
+
+# One run per ref. A second push while the matrix is still downloading
+# Minecraft servers should replace the first, not race it.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # The hermetic gate: compile everything, run every self-test.
+  # ---------------------------------------------------------------------------
   build:
+    name: build + self-tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      # 21 is the toolchain every module but the two loader hosts uses;
-      # `fabric` and `neoforge` need 25 (MC 26.x requires it) and the foojay
-      # resolver provisions that itself.
+      # 25, not 21. The two loader modules need it (MC 26.x requires Java 25)
+      # and it is the only JDK the smoke jobs below have, so building on it is
+      # building on what actually runs. Every other module still COMPILES at
+      # --release 21 via the root build's toolchain, which the foojay resolver
+      # provisions on its own when the runner has no 21.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # `build` also runs the five self-tests: they are plain main() classes
-      # wired as JavaExec tasks and hooked into `check`. StoreSelfTest's
-      # stored-corpus compile skips itself here (no server/ in a clean clone).
+      # `build` runs the five self-tests (they are plain main() classes wired as
+      # JavaExec and hooked into `check`), including StoreSelfTest's corpus
+      # compile. The REAL corpus is one user's 569 stored sources and is not in
+      # the repo, so that half still reports SKIPPED here - but the checked-in
+      # fixture corpus (core/src/test/resources/corpus) is required and does
+      # run, which is the whole reason it exists.
       - name: Build and self-test
         run: ./gradlew build --stacktrace
+
+      # Deliberately a separate task, and deliberately not in `check`: this
+      # recompiles the corpora with CompilerProvider steered onto ECJ, which is
+      # the backend a JRE-only loader install falls back to (§7.3). It doubles
+      # the compile time and answers a portability question, so it runs once
+      # here rather than on every developer's `build`.
+      - name: Self-test with the ECJ backend forced
+        run: ./gradlew selfTestEcj --stacktrace
 
       - name: Upload jars
         uses: actions/upload-artifact@v4
         with:
           name: VibeMod
+          if-no-files-found: error
           path: |
             paper/build/libs/VibeMod.jar
             fabric/build/libs/vibemod-fabric-*.jar
             neoforge/build/libs/vibemod-neoforge-*.jar
+
+  # ---------------------------------------------------------------------------
+  # The real gates: a dedicated server per supported platform/version.
+  #
+  # These run against the jars the `build` job UPLOADED, not against a fresh
+  # dev-classpath build, and that is the point of them. On Loom's and MDG's dev
+  # classpaths Adventure and ECJ are plain classpath entries; in the shipped jar
+  # they are nested and have to be found through the loader and materialized by
+  # the cpcache before javac can read them. Phase D found two bugs that are
+  # invisible under `runServer` for exactly this reason (§10.3).
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: smoke ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # Every platform's verdict, every time. A red Fabric gate must not hide
+      # the NeoForge result.
+      fail-fast: false
+      matrix:
+        include:
+          - name: paper 1.20.6
+            gate: scripts/smoke-paper.sh 1.20.6
+            cache-path: paper/run/.paper-cache
+            cache-key: paper-1.20.6
+          - name: paper 1.21.8
+            gate: scripts/smoke-paper.sh 1.21.8
+            cache-path: paper/run/.paper-cache
+            cache-key: paper-1.21.8
+          - name: paper 26.2
+            gate: scripts/smoke-paper.sh 26.2
+            cache-path: paper/run/.paper-cache
+            cache-key: paper-26.2
+          - name: fabric 26.2
+            gate: scripts/smoke-fabric.sh
+            cache-path: fabric/smoke-cache
+            cache-key: fabric-26.2
+          - name: neoforge 26.2
+            gate: scripts/smoke-neoforge.sh
+            cache-path: neoforge/smoke-cache
+            cache-key: neoforge-26.2
+    steps:
+      - uses: actions/checkout@v4
+
+      # One JDK for all five. 26.x REQUIRES 25, and Paper 1.20.6 and 1.21.8 both
+      # run on it - which is not an assumption: it is what the local machine
+      # these gates were developed on has, and how §10.2's 1.20.6 gate was run
+      # green in the first place.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Server jars, the Fabric launcher + fabric-api, and NeoForge's installer
+      # plus the ~200MB server tree it builds. The smoke scripts already treat
+      # these directories as caches (NeoForge's copies its tree per run rather
+      # than reinstalling), so all this does is carry them between runs.
+      - name: Cache downloaded servers
+        uses: actions/cache@v4
+        with:
+          path: ${{ matrix.cache-path }}
+          key: smoke-${{ matrix.cache-key }}-${{ hashFiles('gradle.properties') }}
+          restore-keys: smoke-${{ matrix.cache-key }}-
+
+      - name: Download the built jars
+        uses: actions/download-artifact@v4
+        with:
+          name: VibeMod
+
+      - name: Show what we are about to test
+        run: |
+          ls -l paper/build/libs fabric/build/libs neoforge/build/libs
+          java -version
+          python3 --version
+
+      # The Paper gate has an optional second phase: a headless mineflayer bot
+      # that joins the server and proves bare `/vibe` pushes a show_dialog
+      # PACKET rather than a chat block - the one assertion RCON physically
+      # cannot make, because RCON has no player. The script skips it silently
+      # when mineflayer is absent or does not speak the protocol, so a failure
+      # to install must not fail the job.
+      - name: Install the mineflayer bot (optional phase)
+        if: startsWith(matrix.name, 'paper')
+        continue-on-error: true
+        working-directory: scripts
+        run: npm ci --no-fund --no-audit
+
+      - name: ${{ matrix.name }} dedicated-server gate
+        run: ${{ matrix.gate }}
+
+      # The logs are the evidence. On a red gate they are the only evidence.
+      - name: Upload the server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-logs-${{ matrix.cache-key }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            paper/run/smoke-*/boot.log
+            paper/run/smoke-*/rcon.log
+            paper/run/smoke-*/bot.log
+            fabric/smoke/boot.log
+            fabric/smoke/rcon.log
+            neoforge/smoke/boot.log
+            neoforge/smoke/rcon.log
+
+  # ---------------------------------------------------------------------------
+  # The two gates that need a screen.
+  #
+  # `continue-on-error: true` is an honest label, not a shrug. Both of these
+  # boot a REAL game client with a REAL GL context, and until this workflow has
+  # actually run they have only ever run on one macOS display (§10.4: "the two
+  # client gates have never been run under xvfb here - that is the one Phase F
+  # assumption still unverified"). Marking them required before they have ever
+  # gone green would make every PR red for a reason nobody could act on.
+  #
+  # Promote them to required once they have passed a few times in a row. If they
+  # never do, the finding to record is that the client gates are developer-
+  # machine gates, and the CHANGELOG should say so.
+  #
+  # These build from source rather than using the uploaded jars: both run inside
+  # their loader's dev environment (Loom's runClientGameTest, MDG's
+  # runClientGate), which is a dev classpath by construction.
+  # ---------------------------------------------------------------------------
+  client-gates:
+    name: client gates (xvfb + llvmpipe)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # xvfb is the display; libgl1-mesa-dri is llvmpipe, the software GL
+      # renderer LIBGL_ALWAYS_SOFTWARE selects; the libx* packages are what GLFW
+      # dlopen()s and fails on with an unhelpful message when they are missing.
+      - name: Install a software GL stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libgl1-mesa-dri libglu1-mesa mesa-utils \
+            libxi6 libxcursor1 libxrandr2 libxinerama1 libxxf86vm1 libxss1
+          glxinfo -B 2>/dev/null || true
+
+      - name: Fabric client gate (runClientGameTest)
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          MESA_GL_VERSION_OVERRIDE: "4.5"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            ./gradlew :fabric:runClientGameTest --stacktrace
+
+      - name: NeoForge client gate
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          MESA_GL_VERSION_OVERRIDE: "4.5"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x720x24" \
+            scripts/clientgate-neoforge.sh
+
+      - name: Upload the client-gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-gate-logs
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            neoforge/clientgate.log
+            neoforge/clientgate-run/vibemod-clientgate-results.txt
+            fabric/run/**/logs/latest.log
