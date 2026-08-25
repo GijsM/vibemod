@@ -1541,9 +1541,10 @@ it**: run 3 green, 30/30, and not one "could not be cached" line in the log —
 which is the only honest way to verify it, because reproducing the race needs
 two concurrent restores and a filesystem slow enough to lose.
 
-The score for the client gates so far is therefore **2 green, 1 red, and the red
-one was right**. That is a better argument for keeping them than a clean sweep
-would have been, and it is also why `continue-on-error` stays on for now.
+The score for the client gates over four runs is therefore **3 green, 1 red, and
+the red one was right**. That is a better argument for keeping them than a clean
+sweep would have been, and it is also why `continue-on-error` stays on for now:
+three greens is a start, not a track record.
 
 ### The licence gap §10.4 deferred, closed
 
