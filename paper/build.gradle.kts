@@ -44,21 +44,28 @@ tasks.jar {
 // stored mods of one version never leak into another.
 // ---------------------------------------------------------------------------
 
+// Resolved here, not inside the task closures: inside a task configuration block
+// `property(...)` resolves against the task, not the project.
+val legacyRunVersion = property("paperRunVersionLegacy") as String
+val modernRunVersion = property("paperRunVersionModern") as String
+val nextRunVersion = property("paperRunVersionNext") as String
+
 /** Every run directory lives under `paper/run/`, which is git-ignored runtime state. */
 fun AbstractRun.useRunDirFor(version: String) {
-    runDirectory = layout.projectDirectory.dir("run/$version")
+    runDirectory = project.layout.projectDirectory.dir("run/$version")
 }
 
+// `runServer` is the one run-paper creates for us; it points at the version the
+// plugin is compiled against.
 tasks.runServer {
-    minecraftVersion(property("paperRunVersionModern") as String)
-    useRunDirFor(property("paperRunVersionModern") as String)
+    minecraftVersion(modernRunVersion)
+    useRunDirFor(modernRunVersion)
 }
 
 listOf(
-    "paperRunVersionLegacy" to "the 1.20.6 floor: no dialog API, chat renderer only",
-    "paperRunVersionNext" to "the newest supported line",
-).forEach { (versionProperty, why) ->
-    val version = property(versionProperty) as String
+    legacyRunVersion to "the 1.20.6 floor: no dialog API, so the chat renderer is the whole UI",
+    nextRunVersion to "the newest supported line",
+).forEach { (version, why) ->
     tasks.register<xyz.jpenilla.runpaper.task.RunServer>("runServer${version.replace('.', '_')}") {
         group = "run paper"
         description = "Runs a Paper $version server with VibeMod installed ($why)."

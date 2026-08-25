@@ -575,6 +575,174 @@ straight out of `compile()` — which is documented "never throws". Reproduced o
 MapArt and SpectralScreen (13 of 148 corpus versions); not reproduced under the Java 21
 toolchain nor on the 1.21.8 dev server. One defensive copy fixes it.
 
+## 10.2 Phase C record (seams + Paper 1.20.6 + ChatRenderer) — what actually landed
+
+**Everything on the §9 Phase C checklist landed.** The §1.1 moves Phase B deferred are
+done: `core` now holds the whole engine and `paper` holds only the host. Details worth
+knowing before Phase D:
+
+### The SPI, as built
+`platform-api` gained four things the skeletons did not have, all documented in place:
+- `Registration.of(Runnable)` / `.inactive()` / `.closeAll(...)` — the canonical
+  once-only, never-throwing implementation. Every bridge returns one of these.
+- `ModFailure` — where a caught mod failure goes. `ModLifecycle` implements it; every
+  bridge that dispatches into generated code reports through it. Phase D's client
+  dispatch needs exactly this (§8.1) with `where="client"`.
+- `Messenger.online(UUID)` and `broadcastToPlayers(Component, String)`. The first
+  because the progress boss bar must stop animating for someone who logged off and
+  `Audience` cannot answer that; the second because `DebugEcho` mirrors JUL records the
+  console already prints, so a console-inclusive broadcast doubles every line.
+- `PlatformInfo` gained `hasItemGlintOverride()`, `hasCommandResync()`, `profileId()`
+  and `maxTargetRelease()` (see the bug below). The first two are default-false so a
+  host need not implement them.
+
+`core` gained one SPI of its own, `runtime/ModHost`: instantiate the mod, build its
+context, call `onEnable`/`onDisable`, returning an opaque activation token. This is the
+seam that lets `ModLifecycle` live in core at all — `Mod` and `VibeContext` are
+platform-typed by design (§4.1), so core cannot name them, and does not need to.
+`ModDispatch` is the other new core class: the single guarded, watchdog-timed entry
+point into mod code that v1 had copy-pasted three times inside `ModRegistry`.
+
+### Screens
+All 17 builders live in `core/ui/screens/` split four ways — `ScreenKit` (the shared
+button/format vocabulary lifted out of `DialogKit`), `FormScreens` (1–7), `HubScreens`
+(8–9), `InfoScreens` (10–16), `SettingsScreens` (17). `HubScreens`/`InfoScreens`/
+`SettingsScreens`/`FormScreens` are instances, not statics: the config screen reopens
+itself with a banner, the source index and version timeline drill down in place, and
+the settings screen reopens after a model pick — all of which need the live
+`UiRenderer` and `Messenger`.
+
+`PaperDialogRenderer` replaces four hand-written dialog classes with one generic
+`Screen -> Dialog` mapping; `DialogKit` kept only its visual vocabulary. `ChatRenderer`
+lives in `core/ui/chat/` with a package-private `ChatFormSession`, and owns the
+`/vibe ui <token>` route (single-use, per-player, 5-minute TTL, `SecureRandom`).
+
+**One correction future screen authors must know:** `WidthHint.ROW` is the renderer's
+signal for "this is a list row, pin it to 300px so the column aligns". A grid button
+sizes to its label, which v1 achieved by simply never setting a width on one. Only
+`ScreenKit.row(...)` uses `ROW`; nav/exit/submit buttons use `BODY`, which the dialog
+renderer reads as "natural size". `Button.command(...)` in platform-api was changed to
+match.
+
+### Compilation pipeline
+`CompilerProvider.resolve()` works as specced, with two additions reality forced:
+- **`-Dvibemod.compiler=ecj` has to filter the ServiceLoader step.** The JDK's own
+  `jdk.compiler` module registers `JavacTool` as a `JavaCompiler` service, so an
+  unfiltered scan hands back javac even when ECJ was demanded. The first ECJ-forced run
+  passed while silently testing javac; `CompilerSelfTest` now asserts the requested
+  backend was actually resolved.
+- **ECJ cannot take in-memory compilation units at all.** It re-resolves every unit by
+  `JavaFileObject#getName()` against the filesystem and reports
+  `File /p/A.java is missing`, whatever file manager it is handed — including one that
+  properly implements `StandardJavaFileManager` (which `InMemoryFileManager` now does
+  anyway, and should). That is the §7.3 risk, confirmed. The contained fallback is
+  `CompilerProvider.acceptsInMemorySources()`: when false, `InMemoryCompiler` stages the
+  sources into a temp directory, compiles from real files, and deletes it. Output still
+  goes to memory. ECJ also names output classes with slashes (`p/A`), which the class
+  loader would have rejected — normalized.
+
+**ECJ is 3.42.0, not ≥3.43.** 3.43 does not exist on Maven Central yet. 3.42.0 compiles
+the entire 569-source corpus clean.
+
+**The §10.1 CME could not be reproduced.** All 148 corpus versions compile without
+throwing on this machine's JDK 25 (Temurin 25.0.1+8), including MapArt and
+SpectralScreen. The fix landed anyway — `List.copyOf` before formatting, plus a
+fail-safe render — and `CompilerSelfTest` now proves both halves of the claim with a
+synthetic diagnostic that reports another diagnostic while being rendered: the naive
+live loop throws `ConcurrentModificationException`, the shipped snapshot does not. The
+mechanism is real and guarded; which javac builds trigger it in the wild is not
+something this branch can pin down.
+
+### PlatformProfile
+`paper-modern` and `paper-legacy` differ exactly where the era does: the legacy cheat
+sheet teaches the `GENERIC_` attribute names, forbids the short 1.21.3+ forms, forbids
+`setEnchantmentGlintOverride` and the other post-1.20.6 data-component setters, and
+warns off `Registry`-based lookups. `net.kyori.adventure.*` is now an officially allowed
+import root in both. `PromptLibrary.systemPrompt()` (no args) still returns the
+paper-modern prompt, so the corpus and every existing assertion are unchanged.
+
+**Deviation from §6.1:** the profile is threaded into `ModGenerator` and reaches
+`systemPrompt(profile)`, but `makePrompt`/`editPrompt`/`fixPrompt`/`repairPrompt` stay
+profile-free. Nothing in "Create a mod: X", the current sources, the knob table or a
+javac diagnostic differs per platform, so a profile parameter there would be one nobody
+reads. Phase D should add it to `makePrompt` when the `side` guidance (§6.2, "all" row)
+gives it something to say.
+
+**Also §6.1:** `roleLine` carries the whole opening block (role sentence *plus* the
+"a mod is not a Bukkit plugin" paragraph), not just the first sentence. That second
+paragraph is Paper-specific prose the loader profiles will have to restate.
+
+### The floor drop, and the bug it hid
+`plugin.yml` declares `api-version: '1.20'`; the exporter takes its `api-version` from
+the profile, and **both Paper profiles say `'1.20'`** — `api-version` gates legacy data
+conversion, not which API exists, and declaring a floor above the running server makes
+Paper refuse the plugin outright, so the lowest honest floor is the one that lets an
+export travel. The emitted wrapper now probes the command map instead of dereferencing
+`Bukkit.getCommandMap()` blind.
+
+**The real hazard was not the API surface, it was bytecode.** Paper 1.20.6 pipes every
+dynamically defined class through the ASM 9.7 in its plugin remapper, and ASM 9.7 cannot
+read Java 25 class files. Compiling generated mods for the JVM's feature version made a
+1.20.6 server on a JDK 25 log `Unsupported class file major version 69` for every mod
+class. `PlatformInfo.maxTargetRelease()` now answers with the release the *host itself*
+was compiled for — read from `org.bukkit.Bukkit`'s class-file header — and `--release`
+is clamped to `min(runtime, backend, host)`. 1.20.6 and 1.21.8 resolve to java21, 26.2
+to java25. **Phase D must answer the same question for Fabric/NeoForge**; the default is
+the runtime's feature version, which is only correct when the loader's own tooling is as
+new as the JVM.
+
+### cpcache: deliberately deferred
+§7.2's extract-once content-addressed cache is not implemented. Every path
+`PaperClasspathProvider` yields is already a plain readable jar or a directory javac can
+open; the cache exists for nested Jar-in-Jar entries and ModLauncher `union:` URLs, which
+only appear on the loaders. `ClasspathProvider`'s javadoc already assigns it to
+implementations, so Phases D/E own it.
+
+### meta.json v3: deliberately deferred
+§5's `platform`/`mcVersion`/`side` fields are not implemented. Nothing in Phase C reads
+them: there is one platform, `ModStore.normalize` would write fields no code consults,
+and the `(other platform)` browser badge has nothing to badge. Phase D adds them
+together with the code that needs them — and should note that `ModStore` persists
+`ConfigKnob` with the record component name `def`, not the LLM contract's `default`.
+
+### The acceptance gate, and how it is run
+`scripts/smoke-paper.sh <version> [--force-chat]` is the whole Phase C gate in one
+command: it downloads a Paper build, seeds a canned mod straight into the store (so no
+LLM and no API key are needed — restore-on-boot compiles and hot-loads it exactly as a
+generated mod), waits for the plugin's own "is live" line, drives it over RCON
+(`scripts/smoke-rcon.py`, dependency-free), and then joins as a real headless player
+(`scripts/smoke-bot.js`, mineflayer) because a `Screen` only renders for a player. The
+bot clicks the way a client does: by running the `/vibe ui <token>` command it finds in
+the message JSON.
+
+Results:
+
+| Server | Probe | UI | Result |
+|---|---|---|---|
+| 1.20.6 | `dialogs=false profile=paper-legacy target=java21` | chat | **zero** `io.papermc.paper.dialog` classes loaded (of 26136); canary compiles → loads → `/smokeping` answers → knob change applies live → action runs → disable removes the command → re-enable restores it; 25 player-driven chat-UI checks pass |
+| 1.21.8 | `dialogs=true profile=paper-modern target=java21` | dialogs | bare `/vibe` and `/vibe settings` push a `show_dialog` packet and print no chat block; full RCON lifecycle green |
+| 1.21.8 `--force-chat` | `dialogs=true` (probe stays honest) | chat | the only dialog class loaded is the probe's own `Class.forName`; the renderer never links; same 25 player checks pass |
+| 26.2 | `dialogs=true profile=paper-modern target=java25` | dialogs | full RCON lifecycle green (mineflayer does not speak 26.2, so the player phase skips itself) |
+
+`run-paper` **3.1.0** (not 2.x — 3.x speaks the current `fill.papermc.io` API) provides
+`runServer` (1.21.8), `runServer1_20_6` and `runServer26_2`. Verified booting for real.
+
+**Deviation from §9:** "manual QA on dev server" for the 17 dialog screens was replaced
+by the scripted gate above. The dialog renderer is verified to render (packet-level) and
+to be a mechanical refactor; a screen-by-screen visual diff against v1 needs a human
+with a client and is the one item this branch cannot self-certify.
+
+`ErrorsSelfTest` moved to `core/src/test` with the class it tests; `:core:selfTest` now
+runs all five, and `./gradlew selfTestEcj` runs the compile-heavy two on ECJ (not wired
+into `check` — it doubles the corpus compile time and answers a portability question,
+not a correctness one).
+
+### One behaviour change worth knowing
+Chat mode (`/vibe chat`) is now a `ChatBridge` capture that never finishes. The bridge
+allows one capture per player, so opening a chat-rendered form ends chat mode. That is
+the honest outcome when two flows both want the player's next line, and it can only
+happen on a server with no dialog support.
+
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 
 Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;
