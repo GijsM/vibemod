@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#
+# PAPER-ONLY DEV HELPER (see the header of scripts/setup.sh).
+#
 # Stops the local dev server gracefully via RCON (falling back to killing the
 # tracked PID), then waits for the process to actually exit.
 set -euo pipefail

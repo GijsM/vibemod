@@ -1,5 +1,16 @@
 name: Release
 
+# Tag `vX.Y.Z` -> a GitHub release with one jar per platform.
+#
+# The names on the release page are the whole reason this job does any work
+# beyond `gradle build`: a user arriving from a Fabric mod list needs to know at
+# a glance which of three jars is theirs, and `vibemod-fabric-2.0.0.jar` next to
+# `VibeMod.jar` does not tell them. Every asset is
+# `VibeMod-<version>-<platform>.jar`.
+
+# Tags only, deliberately: no workflow_dispatch. The asset names and the version
+# check below both read GITHUB_REF_NAME, so a manual run from a branch would
+# either fail confusingly or publish a release named after a branch.
 on:
   push:
     tags:
@@ -8,24 +19,76 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      # 25: the two loader modules require it (MC 26.x). Everything else still
+      # compiles at --release 21 through the root build's toolchain.
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
-          cache: maven
+          java-version: "25"
 
-      - name: Build plugin
-        run: mvn -B package
-        working-directory: plugin
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Same gate as a normal build - a release must not be the first time the
+      # self-tests run - plus the ECJ pass, because the loader jars ship ECJ and
+      # a release is exactly when "can ECJ build the corpus" needs answering.
+      - name: Build and self-test
+        run: ./gradlew build --stacktrace
+
+      - name: Self-test with the ECJ backend forced
+        run: ./gradlew selfTestEcj --stacktrace
+
+      # The tag is the source of truth for the version in the FILENAME. The jars
+      # themselves carry the version from gradle.properties/build.gradle.kts, so
+      # a mismatch is a mistake worth failing on rather than papering over.
+      - name: Name the assets after the tag
+        id: assets
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          BUILT_VERSION="$(./gradlew -q properties --property version | awk '/^version:/ {print $2}')"
+          if [[ "$BUILT_VERSION" != "$VERSION" ]]; then
+            echo "!! tag $GITHUB_REF_NAME says $VERSION but the build says $BUILT_VERSION" >&2
+            echo "   bump build.gradle.kts, plugin.yml, fabric.mod.json and neoforge.mods.toml" >&2
+            exit 1
+          fi
+
+          mkdir -p release
+          cp paper/build/libs/VibeMod.jar "release/VibeMod-$VERSION-paper.jar"
+          cp fabric/build/libs/vibemod-fabric-*.jar "release/VibeMod-$VERSION-fabric.jar"
+          cp neoforge/build/libs/vibemod-neoforge-[0-9]*.jar "release/VibeMod-$VERSION-neoforge.jar"
+
+          # A release whose loader jars have lost their licence files is a
+          # licence violation, not a cosmetic slip: ECJ is EPL-2.0 and ships
+          # nested inside both of them.
+          for jar in "release/VibeMod-$VERSION-fabric.jar" "release/VibeMod-$VERSION-neoforge.jar"; do
+            unzip -l "$jar" | grep -q 'META-INF/licenses/ECJ-EPL-2.0.txt' \
+              || { echo "!! $jar is missing META-INF/licenses/ECJ-EPL-2.0.txt" >&2; exit 1; }
+            unzip -l "$jar" | grep -q 'META-INF/licenses/NOTICE.txt' \
+              || { echo "!! $jar is missing META-INF/licenses/NOTICE.txt" >&2; exit 1; }
+          done
+
+          ls -l release
+          sha256sum release/*.jar | tee release/SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: plugin/target/VibeMod.jar
+          files: |
+            release/VibeMod-${{ steps.assets.outputs.version }}-paper.jar
+            release/VibeMod-${{ steps.assets.outputs.version }}-fabric.jar
+            release/VibeMod-${{ steps.assets.outputs.version }}-neoforge.jar
+            release/SHA256SUMS.txt
           generate_release_notes: true

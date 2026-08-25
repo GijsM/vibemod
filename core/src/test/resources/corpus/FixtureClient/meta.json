@@ -1,0 +1,30 @@
+{
+  "schema": 3,
+  "platform": "paper",
+  "mcVersion": "1.21.8",
+  "side": "client",
+  "name": "FixtureClient",
+  "description": "Fixture corpus: the sdk-client surface (HUD, key lease, client tick, /vibec command).",
+  "usage": "/vibec FixtureClient where",
+  "manual": "## FixtureClient\n\nA compile fixture for the client half of the api.",
+  "icon": "",
+  "mainClass": "vibemod.fixtureclient.FixtureClient",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "fixture",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "fixture corpus, client side",
+      "model": "fixture",
+      "createdAt": 1756000002000,
+      "changelog": "",
+      "kind": "create",
+      "costUsd": 0.0,
+      "requester": "fixture"
+    }
+  ],
+  "config": [],
+  "configValues": {},
+  "debugEcho": null
+}

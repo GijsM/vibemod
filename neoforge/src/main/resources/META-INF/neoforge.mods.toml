@@ -1,0 +1,37 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+issueTrackerURL = "https://github.com/GijsM/vibemod/issues"
+
+[[mods]]
+modId = "vibemod"
+version = "2.0.0"
+displayName = "VibeMod"
+authors = "gijsm"
+displayURL = "https://github.com/GijsM/vibemod"
+description = '''
+Vibe-code gameplay mods from in-game prompts: describe a mod, an LLM writes the Java, VibeMod compiles it in-process and hot-loads it. No restarts, no external services.
+'''
+# ECJ is bundled Jar-in-Jar as the compiler backend of last resort (ARCHITECTURE-V2 7.3);
+# it is EPL-2.0 and its license ships under META-INF/licenses/.
+credits = "Compilation fallback by the Eclipse JDT compiler (ECJ), EPL-2.0. Text rendering by Adventure (kyori), MIT."
+
+# No [[mixins]] block, and that is a finding rather than an omission: the one
+# mixin the Fabric host needs (ARCHITECTURE-V2 8.5, routing dialog button
+# clicks back to the player who clicked) has no NeoForge counterpart, because
+# NeoForge patches the packet handler itself and posts CustomClickActionEvent
+# with the ServerPlayer already attached. See ARCHITECTURE-V2 10.4.
+
+[[dependencies.vibemod]]
+modId = "neoforge"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.vibemod]]
+modId = "minecraft"
+type = "required"
+versionRange = "[26.1,)"
+ordering = "NONE"
+side = "BOTH"

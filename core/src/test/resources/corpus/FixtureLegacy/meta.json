@@ -1,0 +1,16 @@
+{
+  "name": "FixtureLegacy",
+  "description": "Fixture corpus: a mod stored before meta.json v3 and before the vibemine -> vibemod rename.",
+  "mainClass": "vibemine.fixturelegacy.FixtureLegacy",
+  "currentVersion": 1,
+  "enabled": true,
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "fixture corpus, pre-v3 shape",
+      "model": "fixture",
+      "createdAt": 1740000000000
+    }
+  ],
+  "config": []
+}

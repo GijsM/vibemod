@@ -1,0 +1,19 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+
+[[mods]]
+modId = "vibemodgate"
+version = "1.0.0"
+displayName = "VibeMod Client Gate"
+authors = "gijsm"
+description = '''
+The Phase E client acceptance gate (ARCHITECTURE-V2 9, 10.4). Development only: it is a separate source set and never ships in the VibeMod jar.
+'''
+
+[[dependencies.vibemodgate]]
+modId = "vibemod"
+type = "required"
+versionRange = "[1.0.0,)"
+ordering = "AFTER"
+side = "CLIENT"

@@ -1,0 +1,9 @@
+{
+  "required": true,
+  "package": "com.gijsm.vibemod.fabric.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["ServerCommonPacketListenerMixin"],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
