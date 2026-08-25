@@ -533,6 +533,48 @@ javac --release 21 -Werror -d <out> \
 (paper-api is needed only by `sdk`'s Bukkit-typed members; adventure jars only by
 `platform-api` — paper-api does not bundle Adventure.)
 
+## 10.1 Phase B record (Gradle multi-module) — what actually landed
+
+Build: Gradle **9.7.1** wrapper (checksum-pinned), not 8.x — Gradle 8 cannot run on the
+JDK 25 that is the only JDK on the dev machine. Java 21 toolchain via the foojay resolver
+convention, so the build provisions a JDK 21 where none exists and everything (including the
+self-tests, hence `InMemoryCompiler`'s `--release`) is Java 21 everywhere.
+`settings.gradle.kts` lists sdk-client, platform-api, sdk, core, paper.
+
+Class moves: only classes that were **already** platform-free moved to `core` —
+`llm/*`, `compile/*`, `gen/GeneratedProject`, `store/*`, `ui/{Style,Text,MarkdownMini}`.
+Every §1.1 row whose destination is `core` *with a change note* (`gen/ModGenerator`,
+`runtime/{ModHandle,ModErrors,Watchdog,DebugEcho}`, `ui/{Progress,VirtualBooks}`, the
+`ModRegistry` and dialog splits) still imports Bukkit and therefore stayed in `paper`:
+those moves are the Phase C seam work, not "pure moves". `ui/InstallCard` is in `paper`
+too — it takes a `ModHandle`, so it can only follow `ModHandle` to core.
+**Phase C must land those moves along with the SPI it introduces.**
+
+sdk: the Phase A skeletons are now the only copies; `api/VibeMod` (the deprecated bridge)
+joined them. `JarExporter` embeds the six `api/client/*` classes as well as the four `api/*`
+ones — `VibeContext.client(Consumer<ClientContext>)` names them, so an export without them
+would not link.
+
+Prompts: `:core:generatePromptSources` emits `com.gijsm.vibemod.llm.GeneratedApiSources`
+from the sdk files (§6.4); the four constants include `CLIENT_CONTEXT`, unused until the mod
+flavor's profile needs it in Phase D. The Paper prompt still embeds exactly Mod +
+VibeContext + ModCommandHandler, as before.
+
+Self-tests: `./gradlew selfTest`, or per module — `:core:selfTest{Compiler,Llm,Store,Catalog}`
+and `:paper:selfTestErrors`. They hang off `check`, so `./gradlew build` runs them.
+`StoreSelfTest` gained the corpus gate the docs already claimed (`-Dvibemod.mods.dir`,
+Gradle-defaulted to `<repo>/server/plugins/VibeMod/mods`, override with
+`-Pvibemod.modsDir=`): 49 mods / 148 versions / **569 sources**, all compiling. Gradle's
+JUnit `test` task is disabled — there is no test framework in this project.
+
+Known bug found, deliberately not fixed here (Phase C owns `InMemoryCompiler`, §7.3):
+`formatDiagnostics` iterates `DiagnosticCollector.getDiagnostics()` live while
+`Diagnostic#getMessage` is what triggers javac's mandatory-warning aggregation, so on
+**JDK 25** a compile that emits a deprecation summary throws `ConcurrentModificationException`
+straight out of `compile()` — which is documented "never throws". Reproduced on JDK 25 for
+MapArt and SpectralScreen (13 of 148 corpus versions); not reproduced under the Java 21
+toolchain nor on the 1.21.8 dev server. One defensive copy fixes it.
+
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 
 Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;

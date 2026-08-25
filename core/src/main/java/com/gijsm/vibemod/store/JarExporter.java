@@ -27,7 +27,7 @@ import com.gijsm.vibemod.gen.GeneratedProject.ConfigKnob;
  * Paper server without VibeMod installed.
  *
  * The export compiles a small generated {@code JavaPlugin} wrapper alongside
- * the mod's own sources, embeds copies of the four {@code com.gijsm.vibemod.api}
+ * the mod's own sources, embeds copies of the {@code com.gijsm.vibemod.api}
  * classes so the jar is self-contained, and writes a {@code plugin.yml} plus the
  * full source tree next to the jar.
  *
