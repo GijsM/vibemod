@@ -67,6 +67,29 @@ public final class SymbolOracle {
     /** ECJ: {@code helth cannot be resolved or is not a field} — no owner, still worth a look. */
     private static final Pattern ECJ_FIELD = Pattern.compile(
             "([A-Za-z_$][\\w$]*) cannot be resolved or is not a field");
+    /**
+     * javac's overload-mismatch continuation line: {@code     method
+     * net.minecraft.server.level.ServerPlayer.teleportTo(double,double,double)
+     * is not applicable}.
+     *
+     * <p>V3 Phase 4 §C, found by the live demo. This is the shape a SECOND
+     * repair round produces — the model has been told the method exists, has
+     * stopped guessing the name, and is now guessing the arguments — and the
+     * oracle said nothing about it, because it is not a "cannot find symbol".
+     * The header line (`no suitable method found for teleportTo(…)`) names the
+     * method but not the owner; this line names both, which is why it is the
+     * one parsed.
+     */
+    private static final Pattern JAVAC_NOT_APPLICABLE = Pattern.compile(
+            "method\\s+([\\w.$]+)\\.([A-Za-z_$][\\w$]*)\\([^)]*\\)\\s+is not applicable");
+    /**
+     * ECJ's wording for the same thing: {@code The method teleportTo(double,
+     * double, double) in the type ServerPlayer is not applicable for the
+     * arguments (…)}. The type is a simple name, resolved through the same
+     * table ECJ's other messages need.
+     */
+    private static final Pattern ECJ_NOT_APPLICABLE = Pattern.compile(
+            "The method ([A-Za-z_$][\\w$]*)\\([^)]*\\) in the type ([\\w.$]+) is not applicable");
     /** Every fully-qualified type name anywhere in the diagnostics, for resolving ECJ's simple names. */
     private static final Pattern QUALIFIED_TYPE = Pattern.compile(
             "\\b([a-z][\\w]*(?:\\.[a-z][\\w]*)+\\.[A-Z][\\w$]*)\\b");
@@ -124,13 +147,29 @@ public final class SymbolOracle {
             if (owner == null || !interesting(owner.getName())) {
                 continue;
             }
-            List<String> members = closestMembers(owner, miss.symbol());
+            boolean signature = miss.why() == Why.SIGNATURE;
+            List<String> members = signature
+                    ? overloadsOf(owner, miss.symbol())
+                    : closestMembers(owner, miss.symbol());
+            if (members.isEmpty()) {
+                // A SIGNATURE miss with no exact-name overload means the owner
+                // we parsed is not the one that declares it (an inherited
+                // method javac named on the supertype, say). Fall back to the
+                // fuzzy list rather than saying nothing.
+                members = closestMembers(owner, miss.symbol());
+                signature = false;
+            }
             if (members.isEmpty()) {
                 continue;
             }
             StringBuilder block = new StringBuilder();
-            block.append(owner.getName()).append(" has no `").append(miss.symbol())
-                    .append("`; its real public members closest to that name are:\n");
+            if (signature) {
+                block.append(owner.getName()).append('.').append(miss.symbol())
+                        .append(" exists, but NOT with the arguments you passed. Every real overload:\n");
+            } else {
+                block.append(owner.getName()).append(" has no `").append(miss.symbol())
+                        .append("`; its real public members closest to that name are:\n");
+            }
             for (String member : members) {
                 block.append("  - ").append(member).append('\n');
             }
@@ -148,8 +187,25 @@ public final class SymbolOracle {
 
     // ------------------------------------------------------------------ parsing
 
+    /**
+     * Why the compiler complained, which decides what the hint may claim.
+     *
+     * <p>The distinction is not cosmetic. For {@link #ABSENT} the honest
+     * sentence is "this type has no such member, here are near names"; for
+     * {@link #SIGNATURE} that sentence would be a lie — the member exists and
+     * the model got its name right. Saying "has no `teleportTo`" to a model
+     * that just wrote a working `teleportTo` name is how a repair round turns
+     * into two.
+     */
+    private enum Why {
+        /** No member of that name at all. */
+        ABSENT,
+        /** The name is right; the argument list is not. */
+        SIGNATURE
+    }
+
     /** One missing member and the type it was looked for on. */
-    private record Miss(String owner, String symbol) {
+    private record Miss(String owner, String symbol, Why why) {
     }
 
     private static List<Miss> parse(String diagnostics) {
@@ -157,6 +213,20 @@ public final class SymbolOracle {
         String[] lines = diagnostics.split("\n", -1);
 
         for (int i = 0; i < lines.length; i++) {
+            // Overload mismatches first: their continuation lines also contain
+            // the word "method", and matching them here keeps the
+            // cannot-find-symbol patterns below reading only what they were
+            // written for.
+            Matcher notApplicable = JAVAC_NOT_APPLICABLE.matcher(lines[i]);
+            if (notApplicable.find()) {
+                misses.add(new Miss(notApplicable.group(1), notApplicable.group(2), Why.SIGNATURE));
+                continue;
+            }
+            Matcher ecjNotApplicable = ECJ_NOT_APPLICABLE.matcher(lines[i]);
+            if (ecjNotApplicable.find()) {
+                misses.add(new Miss(ecjNotApplicable.group(2), ecjNotApplicable.group(1), Why.SIGNATURE));
+                continue;
+            }
             Matcher symbol = JAVAC_SYMBOL.matcher(lines[i]);
             if (symbol.find()) {
                 String kind = symbol.group(1);
@@ -167,13 +237,13 @@ public final class SymbolOracle {
                 }
                 String owner = locationNear(lines, i);
                 if (owner != null) {
-                    misses.add(new Miss(owner, symbol.group(2)));
+                    misses.add(new Miss(owner, symbol.group(2), Why.ABSENT));
                 }
                 continue;
             }
             Matcher ecjMethod = ECJ_METHOD.matcher(lines[i]);
             if (ecjMethod.find()) {
-                misses.add(new Miss(ecjMethod.group(2), ecjMethod.group(1)));
+                misses.add(new Miss(ecjMethod.group(2), ecjMethod.group(1), Why.ABSENT));
                 continue;
             }
             Matcher ecjField = ECJ_FIELD.matcher(lines[i]);
@@ -181,7 +251,7 @@ public final class SymbolOracle {
                 // No owner in the message; the enclosing line often names one.
                 String owner = qualifiedOn(lines[i]);
                 if (owner != null) {
-                    misses.add(new Miss(owner, ecjField.group(1)));
+                    misses.add(new Miss(owner, ecjField.group(1), Why.ABSENT));
                 }
             }
         }
@@ -261,6 +331,40 @@ public final class SymbolOracle {
     }
 
     // ------------------------------------------------------------------ matching
+
+    /**
+     * Every public overload named exactly {@code name}.
+     *
+     * <p>For an overload mismatch the fuzzy list is actively unhelpful: the
+     * model has the name right and needs the argument lists, and burying four
+     * real overloads among eight near-miss neighbours makes it work for the
+     * answer. Exact matches only, sorted so the shortest argument list reads
+     * first.
+     */
+    private List<String> overloadsOf(Class<?> owner, String name) {
+        List<Method> exact = new ArrayList<>();
+        try {
+            for (Method method : owner.getMethods()) {
+                if (method.getName().equals(name) && Modifier.isPublic(method.getModifiers())
+                        && !method.isSynthetic()) {
+                    exact.add(method);
+                }
+            }
+        } catch (Throwable unreadable) {
+            return List.of();
+        }
+        exact.sort(Comparator.<Method>comparingInt(Method::getParameterCount)
+                .thenComparing(SymbolOracle::render));
+        List<String> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (Method method : exact) {
+            String rendered = render(method);
+            if (seen.add(rendered) && out.size() < MAX_PER_SYMBOL) {
+                out.add(rendered);
+            }
+        }
+        return out;
+    }
 
     /**
      * Public members whose names are near {@code missing}: containment first

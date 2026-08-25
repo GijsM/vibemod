@@ -31,3 +31,6 @@ scripts/.rcon-password
 .DS_Store
 *.log
 fabric/smoke-cache/
+
+# --- the V3 live demo driver (a real server, a real key, real generations) ---
+fabric/demo/

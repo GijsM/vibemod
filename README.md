@@ -15,6 +15,13 @@ in seconds.
 mod, built from one codebase. On the two loaders it runs on a dedicated server *and* in
 singleplayer, and generated mods can put things on your own HUD and bind your own keys.
 
+**On Fabric, a generated mod is just a Fabric mod.** It implements `ModInitializer`, registers to
+real fabric-api events, adds real Brigadier commands, ships `data/` and `assets/` like a real jar,
+and can register real items — with **no VibeMod imports anywhere in it**. It still hot-loads and
+hot-unloads, because the host intercepts the handful of call sites that would otherwise be
+unrevocable, in bytecode, on the way out of the compiler. See
+[Why mods aren't plugins](#why-mods-arent-plugins) and [`DEMO.md`](DEMO.md).
+
 ## Security model — read this first
 
 VibeMod compiles LLM-generated Java and loads it into your game's JVM with **full privileges**.
@@ -145,19 +152,63 @@ compiles everywhere, it just does less.
 
 ## What generated mods can do, per platform
 
-The generated-code contract (`com.gijsm.vibemod.api.Mod` + `VibeContext`) has the same class names
-on all three platforms but two flavors, and the host puts the right one on the classpath:
+### On Fabric: a generated mod is a normal Fabric mod
+
+Since 3.0.0 the model is not asked to learn anything. It writes what every Fabric tutorial on the
+internet writes — `implements net.fabricmc.api.ModInitializer`, `ServerTickEvents
+.END_SERVER_TICK.register(...)`, `CommandRegistrationCallback`, `KeyMappingHelper`,
+`HudElementRegistry`, `Registry.register` — with **zero VibeMod imports anywhere in the file**.
+The result still hot-loads and still hot-unloads.
+
+- **Any Fabric event.** `Event.register` on anything fabric-api exposes. Merge semantics follow
+  the event's return type (`boolean` events AND without short-circuiting, `InteractionResult`
+  takes the first non-`PASS`, and so on).
+- **Real Brigadier commands**, live the instant the mod loads — no `/reload` — and gone again when
+  it is disabled. They survive `/reload` and every datapack reload, because the host replays them
+  into the fresh dispatcher.
+- **A real client half.** `ClientModInitializer`: keybinds out of the eight-slot pool, HUD
+  elements, client events, and `Screen` subclasses the host closes off your display when the mod
+  is unloaded.
+- **`data/**` and `assets/**`, like a real jar.** Recipes, advancements, loot tables, functions
+  and tags become a world datapack; models, textures and language files join a runtime client
+  resource pack. Both are live within a couple of seconds and both are gone on disable. Textures
+  are written as a small JSON pixel grid (a palette plus rows) and the host encodes the PNG.
+- **Really registered content** — items and entity types, in `BuiltInRegistries`, with data
+  components bound, in the creative Ingredients tab, craftable from the mod's own recipe.
+
+**The limits are real and the host states them rather than failing quietly:**
+
+- Registering items or entity types works in **singleplayer and on a LAN host**. On a dedicated
+  server it is refused and the mod fails to load, because a vanilla client joining later would
+  negotiate a registry sync without the id and be kicked. The prompt teaches the alternative
+  (components on a vanilla item in the recipe result), and the host now *tells* the model which
+  side it is on, so it does not have to find out the expensive way.
+- **Blocks are refused**, with the reason: chunk sections are serialized against a palette whose
+  bit width is fixed from the block-state registry when the world loads.
+- `/vibe disable` cannot take a registry **id** back — there is no `MappedRegistry.remove`. The
+  install card says so, and a ledger records it.
+- No mixins, no reflection, no threads, no networking. Mod code runs on the server thread so the
+  watchdog means something.
+- Native mods have **no config knobs** — there is no `ctx` to read one from — so the prompt tells
+  the model to use named constants and not to promise settings in the manual.
+
+### On NeoForge and Paper: the v2 contract
+
+Both still use `com.gijsm.vibemod.api.Mod` + `VibeContext`, unchanged:
 
 - **On Paper**, mods are Bukkit-typed and get the *entire* Bukkit event system through
   `ctx.listen(listener)`, plus commands, actions, tasks and live config knobs.
-- **On Fabric and NeoForge**, mods are Mojang-typed (`net.minecraft.*`) and get a **curated,
-  frozen set of ten server hooks** — `onPlayerJoin`, `onPlayerQuit`, `onServerTick`, `onChat`,
-  `onBlockBreak`, `onUseBlock`, `onUseItem`, `onEntityDeath`, `onPlayerDeath`, `onRespawn` — plus
-  the same commands, actions, tasks and config knobs, plus the client surface above. The list is
-  curated rather than open because a Fabric event cannot be unregistered: every hook has to be
-  host-dispatched for a mod to be unloadable at all, so a curated list is the honest surface.
-  Mods may not touch `net.fabricmc.*` / `net.neoforged.*`, mixins, screens or registry content;
-  the prompt says so and the compiler catches attempts.
+- **On NeoForge**, mods are Mojang-typed and get a **curated, frozen set of ten server hooks** —
+  `onPlayerJoin`, `onPlayerQuit`, `onServerTick`, `onChat`, `onBlockBreak`, `onUseBlock`,
+  `onUseItem`, `onEntityDeath`, `onPlayerDeath`, `onRespawn` — plus the same commands, actions,
+  tasks and config knobs, plus the client surface above. The list is curated rather than open for
+  the same reason the Fabric seams exist: a loader event cannot be unregistered, so every hook has
+  to be host-dispatched for a mod to be unloadable at all. NeoForge mods also get the **datapack
+  channel** (`data/**` becomes a world datapack, exactly as on Fabric — that half of the design
+  names no loader), but not the client resource pack.
+
+  The native seams are **Fabric-only for now**. A NeoForge mod that reaches for
+  `net.fabricmc.*` gets a compile diagnostic, not a crash.
 
 A mod remembers which platform it was generated on (`meta.json` records `platform`, `mcVersion`
 and `side`). Enabling a Paper-generated mod on a Fabric server is refused with a friendly message
@@ -176,8 +227,12 @@ wherever the platform has them, chat blocks on Paper 1.20.6–1.21.6:
   Change them via the config screen (`/vibe config <mod>`: sliders, checkboxes, dropdowns) or
   `/vibe set <mod> <key> <value>`; both apply **instantly** — mods read config live, no reload.
 - **Manuals** — the model writes a player guide (Markdown, rendered in a scrollable screen);
-  VibeMod appends *verified facts* it introspects itself (real commands/actions/listeners +
-  current knob values). `/vibe manual <mod>` opens it, `/vibe info <mod>` opens the mod hub.
+  VibeMod appends *verified facts* it introspects itself. For a `VibeContext` mod those are its
+  real commands, actions, listener and task counts and current knob values; for a native Fabric
+  mod they are the loader entrypoints it implements, its loader-event subscription count, the
+  commands the seam installed, the resource trees it owns, and any registry ids it holds (with
+  the honest note that those outlive `/vibe disable`). `/vibe manual <mod>` opens it,
+  `/vibe info <mod>` opens the mod hub.
 - **Self-healing generation** — compile errors are fed back to the model automatically; repair
   and edit rounds may return SEARCH/REPLACE edit blocks instead of whole files (blocks that fail
   to apply trigger an automatic full-project retry).
@@ -251,6 +306,43 @@ loaded into its own child classloader under VibeMod's identity, with every liste
 and client registration tracked per mod. That makes load/unload/reload genuinely instant and exact
 on all three platforms.
 
+### The surgeon: how a Fabric mod can be a Fabric mod and still be unloadable
+
+Tracking registrations works when the mod asks *you* to register something. It does not work when
+the mod calls the loader directly — and a Fabric `Event` has no unsubscribe at all. Until 3.0.0
+the answer was to forbid it: generated mods got a curated hook list and were banned from touching
+`net.fabricmc.*`.
+
+3.0.0 inverts that. A **bytecode pass** runs on the compiler — `InMemoryCompiler.compile`, which
+every route from source to live classes goes through, so generation, repair rounds, `/vibe edit`,
+rollback and restore-on-boot are covered by one hook — and rewrites seventeen specific call sites
+to point at host shims instead:
+
+- `Event.register` → a host-owned fanout standing behind one permanent, process-lived
+  subscription per event. The mod is an entry behind it, and entries can be removed.
+- `CommandRegistrationCallback` → invoked immediately against the live dispatcher, with what it
+  added *discovered* by diffing the dispatcher root rather than declared.
+- `KeyMappingHelper`, `HudElementRegistry` → the existing pooled key slots and the host's single
+  HUD element.
+- `Registry.register`, `Item$Properties.setId`, `EntityType$Builder.build` and friends →
+  namespaced, ledgered, refusable writes inside a registration window.
+
+Three properties make this safe rather than clever. The rewrite is **shape-preserving**
+(`invokevirtual` → `invokestatic` with the receiver prepended, so the operand stack is unchanged
+and no frame is recomputed). A class that hits no seam is returned **byte-identical**, which is
+asserted — that is what makes the older `VibeContext` mods provably unaffected by a pass that runs
+over them. And a **policy** (an allowlist of package roots plus a deny table covering reflection,
+threads, networking, mixins and loader internals) turns anything out of bounds into a javac-shaped
+diagnostic that goes back to the model through the ordinary self-heal loop.
+
+`:fabric:surgeonSelfTest` compiles fixtures with the same compiler against the same classpath the
+host uses, then **defines and runs** the rewritten classes against a recording shim — so a rewrite
+that produced unverifiable bytecode, or pointed at a method that does not exist, fails there
+rather than passing a constant-pool check and exploding in someone's world.
+
+The full design, including every seam's descriptor, the teardown matrix and the list of things
+deliberately not built, is in [`docs/ARCHITECTURE-V3.md`](docs/ARCHITECTURE-V3.md).
+
 ## Building
 
 Requirements: a **JDK 25** (the loader modules require it; the rest of the build compiles at
@@ -303,6 +395,23 @@ Two more gates drive a **real game client** and therefore need a display (or xvf
 scripts/clientgate-neoforge.sh         # a self-driving mod, since NeoForge has no harness
 ```
 
+They are `continue-on-error` in CI until they have passed a few times in a row, but their
+*compilation* is required — they live in their own source sets that a plain `build` does not
+touch, so CI compiles them explicitly.
+
+And one thing that is **not** a gate:
+
+```bash
+scripts/demo-live.sh          # needs $OPENROUTER_API_KEY or ~/.config/vibemod/openrouter.key
+```
+
+It boots the same dedicated Fabric server and drives `/vibe make` with the [`DEMO.md`](DEMO.md)
+prompts against a real model, asserting generated → self-healed → live → exercised → deleted → no
+residue. It spends real money and depends on a model's judgement, so a bad run is not necessarily
+a regression — but it is the only thing in the repo that tests **the prompt**, and it has already
+paid for itself twice (a recipe shape that failed silently, and a prompt that never said which
+side of the game it was running on).
+
 ### The Paper dev server
 
 `scripts/setup.sh`, `start.sh`, `stop.sh`, `build.sh`, `deploy.sh`, `rcon.sh` and `logtail.sh` are
@@ -346,10 +455,20 @@ fabric/         the Fabric host (Loom). One jar, server + client entrypoints
 neoforge/       the NeoForge host (ModDevGradle). One jar, no mixins
 ```
 
-`docs/ARCHITECTURE-V2.md` is the real architecture document: the SPI, the screen model, the two
-sdk flavors, the compilation pipeline, the client design, and a phase-by-phase record of what
-actually landed and what was deliberately deferred. `ARCHITECTURE.md` is a short overview that
-points into it. `DEMO.md` has a verified test transcript.
+Two architecture documents, both authoritative for their own half:
+
+- **`docs/ARCHITECTURE-V3.md`** — the seam architecture: the decision log, the table of 26.2 facts
+  each one was read off the jars with `javap`, the surgeon's policy and all seventeen seams, the
+  shim semantics, the **teardown matrix** (what `disable` and `delete` each take away and what
+  documented residue remains), what every gate found, and the out-of-scope list with the mechanism
+  behind each refusal.
+- **`docs/ARCHITECTURE-V2.md`** — everything V3 did not touch: the SPI, the screen model, the two
+  sdk flavors, the compilation pipeline, the client design, and a phase-by-phase record of what
+  landed and what was deferred.
+
+`ARCHITECTURE.md` is a short overview that points into both. `DEMO.md` has six prompts that were
+impossible before 3.0.0, with the seams each one uses. `docs/phases/` holds the four V3 phase
+briefs and the result document each one produced.
 
 ## Third-party code
 

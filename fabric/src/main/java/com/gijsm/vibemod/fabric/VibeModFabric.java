@@ -586,6 +586,13 @@ public final class VibeModFabric implements ModInitializer {
             // REALLY offers. The host's own loader is the right one to ask —
             // it is the one that has the game and the Fabric API on it.
             generator.setSymbolOracle(SymbolOracle.forLoader(VibeModFabric.class.getClassLoader()));
+            // V3 Phase 4 §C: which SIDE this process is. The Fabric profile is
+            // the only one whose rules branch on it — assets, the client
+            // entrypoint and the registry seam all behave differently on a
+            // dedicated server — and until the live demo it stated both branches
+            // and let the model pick. It picked the registry, was refused, and
+            // paid for a repair round to learn what this line says for free.
+            generator.setHostFacts(PlatformProfiles.fabricHostFacts(platform.isDedicatedServer()));
             JarExporter exporter = new JarExporter(compiler, profile);
 
             ChatMode chatMode = new ChatMode(chatBridge, this::generateFromPrompt);

@@ -37,7 +37,11 @@ MC_VERSION="$(prop minecraftVersion)"
 LOADER_VERSION="$(prop fabricLoaderVersion)"
 FABRIC_API_VERSION="$(prop fabricApiVersion)"
 
-JAR="$(ls "$ROOT"/fabric/build/libs/vibemod-fabric-*.jar 2>/dev/null | head -1 || true)"
+# NEWEST first, not lexicographically first. After a version bump the old jar is
+# still in build/libs and sorts BEFORE the new one ("2.0.0" < "3.0.0"), so the
+# plain `ls | head -1` this used to be would have gated the previous release and
+# said nothing about it.
+JAR="$(ls -t "$ROOT"/fabric/build/libs/vibemod-fabric-*.jar 2>/dev/null | head -1 || true)"
 if [[ -z "$JAR" ]]; then
   echo "!! no vibemod-fabric jar - run ./gradlew :fabric:build first" >&2
   exit 1

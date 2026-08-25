@@ -50,6 +50,20 @@ public final class ModHandle {
     volatile boolean enabled;
     volatile boolean degraded;
     volatile int errorCount;
+    /**
+     * The loader entrypoints this mod's main class implements, as the loader's
+     * own names ({@code "ModInitializer"}, {@code "ModInitializer,
+     * ClientModInitializer"}), or {@code null} for a curated
+     * {@code VibeContext} mod.
+     *
+     * <p>A plain {@code String} filled in by the host rather than a flag set
+     * decoded in {@code core}, because the names belong to a loader
+     * {@code core} must not import — the same wall {@code EntrypointAdapter}
+     * itself exists to keep. It is the one fact about a native mod that no
+     * count can stand in for: "0 listeners" and "not a VibeContext mod at all"
+     * look identical from the outside otherwise.
+     */
+    private volatile String entrypoints;
 
     final List<Tracked> registrations = new ArrayList<>();
     final List<String> commandNames = new ArrayList<>();
@@ -103,6 +117,20 @@ public final class ModHandle {
     /** Resource trees (datapack and/or client pack) installed for this mod (V3 Phase 2). */
     public int contentCount() {
         return countOf(Kind.CONTENT);
+    }
+
+    /**
+     * The loader entrypoints this mod implements, or {@code null} for a curated
+     * {@code VibeContext} mod. Set once, during activation, by the host's
+     * {@code EntrypointAdapter}.
+     */
+    public String entrypoints() {
+        return entrypoints;
+    }
+
+    /** Records which loader entrypoints the mod's main class implements. Host-side, during activation. */
+    public void noteEntrypoints(String names) {
+        this.entrypoints = names == null || names.isBlank() ? null : names;
     }
 
     /** Registrations of every kind currently held on the mod's behalf. */

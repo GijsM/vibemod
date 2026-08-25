@@ -60,11 +60,41 @@ public final class PromptLibrary {
      * the platform the host is actually running.
      */
     public static String systemPrompt(PlatformProfile profile) {
+        return systemPrompt(profile, null);
+    }
+
+    /**
+     * The system prompt plus one short block of facts about <em>this</em>
+     * running host (V3 Phase 4).
+     *
+     * <p>A profile describes a platform; {@code hostFacts} describes the
+     * process. The distinction earns its keep on Fabric, where the same profile
+     * serves a singleplayer client and a dedicated server and several of its
+     * rules branch on which one you are: {@code assets/**} render or are inert,
+     * {@code ClientModInitializer} runs or is skipped, a registered item works
+     * or is refused. Before this existed the prompt stated both branches and
+     * left the model to guess, and the live demo showed what that costs — a
+     * model that followed the prompt perfectly wrote a registered item on a
+     * dedicated server, was refused, and burned a whole repair round rediscovering
+     * a fact the host knew all along.
+     *
+     * <p>It goes in the SYSTEM prompt rather than the request because it is
+     * constant for the life of a host, which is what keeps it cacheable.
+     * {@code null} or blank reproduces {@link #systemPrompt(PlatformProfile)}
+     * byte for byte — asserted, so a host that supplies nothing is not paying
+     * for this.
+     */
+    public static String systemPrompt(PlatformProfile profile, String hostFacts) {
         StringBuilder sb = new StringBuilder();
 
         sb.append(profile.roleLine());
         if (!profile.roleLine().endsWith("\n")) {
             sb.append('\n');
+        }
+        if (hostFacts != null && !hostFacts.isBlank()) {
+            sb.append("\n================ THIS HOST ================\n\n")
+                    .append(hostFacts.strip())
+                    .append('\n');
         }
         sb.append("""
 

@@ -110,9 +110,32 @@ public final class InstallCard {
     public static List<String> verifiedFactLines(ModStore.StoredMod mod, ModHandle live, Map<String, String> values) {
         List<String> lines = new ArrayList<>();
         if (live != null) {
+            // V3 Phase 4: a native mod is not a VibeContext mod wearing zeroes.
+            // It has no curated listeners and no tasks by construction, so
+            // "listeners: 0  tasks: 0" is not a thin answer, it is the wrong
+            // question — the counter that means something for it is the number
+            // of loader-event subscriptions standing behind the host's fanout.
+            // The entrypoint line is what tells the two kinds of mod apart, so
+            // it comes first and only a native mod has one.
+            String entrypoints = live.entrypoints();
+            if (entrypoints != null) {
+                lines.add("entrypoints: " + entrypoints);
+            }
             lines.add("commands: " + joinOrNone(live.commandNames()));
             lines.add("actions: " + joinOrNone(live.actionNames()));
-            lines.add("listeners: " + live.listenerCount() + "  tasks: " + live.taskCount());
+            if (entrypoints == null) {
+                lines.add("listeners: " + live.listenerCount() + "  tasks: " + live.taskCount());
+            } else {
+                lines.add("event subscriptions: " + live.nativeCount());
+            }
+            // Loader-neutral and kind-neutral: a curated mod may ship data/**
+            // too, and when it does the tree is exactly as real as a native
+            // mod's. Omitted rather than printed as zero, because "0" here
+            // would be a claim about a feature the mod simply did not use.
+            if (live.contentCount() > 0) {
+                lines.add("resource trees: " + live.contentCount()
+                        + "  (data/ and assets/, removed on disable)");
+            }
             if (live.degraded()) {
                 lines.add("state: DEGRADED (" + live.errorCount() + " error(s))");
             }

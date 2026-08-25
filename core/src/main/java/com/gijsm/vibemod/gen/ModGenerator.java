@@ -105,6 +105,13 @@ public final class ModGenerator {
      * ask).
      */
     private volatile SymbolOracle oracle;
+    /**
+     * Facts about this running host, appended to the system prompt (V3 Phase 4
+     * §C). Null where no host supplied any — every self-test, and every host
+     * whose profile does not branch on the side it is running — in which case
+     * the prompt is byte-for-byte the one this generator always sent.
+     */
+    private volatile String hostFacts;
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
     public ModGenerator(TickScheduler scheduler, PlatformProfile profile, OpenRouterClient client,
@@ -133,6 +140,15 @@ public final class ModGenerator {
      */
     public void setSymbolOracle(SymbolOracle oracle) {
         this.oracle = oracle;
+    }
+
+    /**
+     * Installs this host's "THIS HOST" prompt block (V3 Phase 4 §C). Optional,
+     * for the same reason {@link #setSymbolOracle} is: with none, the prompt is
+     * exactly the one this generator always sent.
+     */
+    public void setHostFacts(String facts) {
+        this.hostFacts = facts == null || facts.isBlank() ? null : facts;
     }
 
     /** The {@code API HINTS} block for a set of diagnostics, or {@code null} when there is no oracle. */
@@ -300,9 +316,9 @@ public final class ModGenerator {
             String response;
             try {
                 OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
-                        ? client.completeStreaming(PromptLibrary.systemPrompt(profile), messages,
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(profile, hostFacts), messages,
                                 new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
-                        : client.complete(PromptLibrary.systemPrompt(profile), messages)
+                        : client.complete(PromptLibrary.systemPrompt(profile, hostFacts), messages)
                                 .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();

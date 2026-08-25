@@ -46,6 +46,7 @@ public class LlmSelfTest {
         testPromptHygiene();
         testNativeFabricProfile();
         testPromptBudgets();
+        testRepairPromptBudget();
         testSymbolOracle();
         testPromptBuilders();
         testFewShotPlansMatchFiles();
@@ -730,6 +731,22 @@ public class LlmSelfTest {
         check("the Phase 1 few-shot keeps the mapping it was handed back",
                 prompt.contains("toggle.consumeClick()"));
 
+        // V3 Phase 4: found by the live demo. The model wrote a 1.20-era
+        // ingredient object into a smelting recipe, the datapack dropped the
+        // recipe while loading, and NOTHING failed — the mod loaded, reported
+        // success, and simply could not be crafted.
+        check("the native prompt states that an ingredient is a string, not an object",
+                prompt.contains("AN INGREDIENT IS A STRING, NOT AN OBJECT")
+                        && prompt.contains("{\"item\": \"minecraft:redstone\"}"));
+        check("and that it covers the recipe types the few-shot does not show",
+                prompt.contains("smelting/blasting/smoking/campfire/stonecutting"));
+        check("and warns that a bad ingredient fails silently rather than at build time",
+                prompt.contains("does NOT fail your build"));
+        // Phase 3 replaced RubyCharm with RubySword; one sentence still sent the
+        // model looking for an example that is no longer in the prompt.
+        check("the native prompt names an example it actually ships",
+                !prompt.contains("RubyCharm") && prompt.contains("The RubySword example below"));
+
         if (failures == 0) {
             System.out.println("PASS: the native fabric profile teaches an ordinary Fabric mod, "
                     + "with no VibeMod api anywhere in it");
@@ -751,6 +768,80 @@ public class LlmSelfTest {
                     profile.id(), prompt.length(), prompt.length() / 4,
                     profile.fewShots().size(), profile.fewShots().size() == 1 ? "" : "s");
             check(profile.id() + " builds a non-trivial prompt", prompt.length() > 2000);
+        }
+
+        // V3 Phase 4 §D. What a host actually SENDS is the profile plus its
+        // "THIS HOST" block, so that is the number the budget has to hold —
+        // printing the profile alone would under-report every real request.
+        String server = PromptLibrary.systemPrompt(
+                PlatformProfiles.FABRIC, PlatformProfiles.fabricHostFacts(true));
+        String client = PromptLibrary.systemPrompt(
+                PlatformProfiles.FABRIC, PlatformProfiles.fabricHostFacts(false));
+        System.out.printf("  %-14s %7d chars  ~%6d tokens  (as SENT by a dedicated server)%n",
+                "fabric+host", server.length(), server.length() / 4);
+        System.out.printf("  %-14s %7d chars  ~%6d tokens  (as SENT by a client)%n",
+                "fabric+host", client.length(), client.length() / 4);
+        check("the fabric prompt AS SENT still fits its budget ("
+                        + Math.max(server.length(), client.length()) + " <= 30000 chars)",
+                Math.max(server.length(), client.length()) <= 30000);
+
+        // The overload has to be free when nobody uses it, or every host that
+        // supplies no facts is paying for a feature it did not ask for.
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            check(profile.id() + ": a null host-facts block reproduces the prompt byte for byte",
+                    PromptLibrary.systemPrompt(profile, null)
+                            .equals(PromptLibrary.systemPrompt(profile)));
+            check(profile.id() + ": a blank host-facts block does too",
+                    PromptLibrary.systemPrompt(profile, "   \n ")
+                            .equals(PromptLibrary.systemPrompt(profile)));
+        }
+        check("a host-facts block is announced under its own heading",
+                server.contains("================ THIS HOST ================"));
+        check("the dedicated-server block says the registry is refused HERE",
+                server.contains("DEDICATED SERVER")
+                        && server.contains("Registering items or entity types is REFUSED here"));
+        check("the client block says the whole surface works",
+                client.contains("MINECRAFT CLIENT")
+                        && client.contains("registering items and entity types is allowed"));
+        check("the two blocks disagree, which is the entire point",
+                !PromptLibrary.systemPrompt(PlatformProfiles.FABRIC,
+                        PlatformProfiles.fabricHostFacts(true))
+                        .equals(client));
+        check("host facts land BEFORE the frozen api, so they frame what follows",
+                server.indexOf("THIS HOST") < server.indexOf("FROZEN API"));
+    }
+
+    /**
+     * V3 Phase 4 §D: the two prompts that are built at repair time, rather than
+     * at boot, are the ones nobody ever looks at — and a repair round pays for
+     * them on top of a system prompt that is already near budget.
+     */
+    private static void testRepairPromptBudget() {
+        // A deliberately awful diagnostics blob: 40 errors, each with javac's
+        // full three-line shape. Far past anything a real round produces.
+        StringBuilder diagnostics = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            diagnostics.append("[ERROR] string:///vibemod/foo/Foo.java:").append(i)
+                    .append(" - cannot find symbol\n  symbol:   method notAThing")
+                    .append(i).append("(java.lang.String)\n  location: class ")
+                    .append("com.gijsm.vibemod.api.VibeContext\n");
+        }
+        String bare = PromptLibrary.repairPrompt(diagnostics.toString(), null);
+        String hinted = PromptLibrary.repairPrompt(diagnostics.toString(),
+                "API HINTS\n" + "  VibeContext.command(String, String, ModCommandHandler)\n".repeat(60));
+        System.out.printf("  repair prompt  %7d chars bare, %7d chars with hints%n",
+                bare.length(), hinted.length());
+        check("the repair prompt is bounded without hints (" + bare.length() + " < 20000)",
+                bare.length() < 20000);
+        check("the repair prompt stays bounded with a large hint block ("
+                        + hinted.length() + " < 30000)", hinted.length() < 30000);
+        check("a null hint block reproduces the old repair prompt byte for byte",
+                PromptLibrary.repairPrompt(diagnostics.toString(), null)
+                        .equals(PromptLibrary.repairPrompt(diagnostics.toString(), "  ")));
+        check("the repair prompt carries the diagnostics it was given",
+                bare.contains("notAThing39"));
+        if (failures == 0) {
+            System.out.println("PASS: the repair prompt and its hint block stay bounded");
         }
     }
 
@@ -787,6 +878,40 @@ public class LlmSelfTest {
                 ecjHints.contains("API HINTS"));
         check("oracle: ECJ hints name the real method (" + firstLineOf(ecjHints) + ")",
                 ecjHints.contains("configInt"));
+
+        // V3 Phase 4 §C. The shape a SECOND repair round produces: the name is
+        // right, the arguments are not. Verbatim javac wording, from the live
+        // demo's own log (with ServerPlayer.teleportTo swapped for the only
+        // overloaded method on this module's test runtime).
+        String overload = "[ERROR] /vibemod/foo/Foo.java:65 - no suitable method found for "
+                + "repeat(long,long,long,java.lang.Runnable)\n"
+                + "    method com.gijsm.vibemod.api.VibeContext.repeat(long,long,java.lang.Runnable) "
+                + "is not applicable\n"
+                + "      (actual and formal argument lists differ in length)";
+        String overloadHints = oracle.hints(overload);
+        check("oracle: javac's 'is not applicable' produces a hints block",
+                overloadHints.contains("API HINTS"));
+        check("oracle: it does NOT claim the method is missing, because it is not",
+                !overloadHints.contains("has no `repeat`"));
+        check("oracle: it says the name is right and the arguments are not",
+                overloadHints.contains("repeat exists, but NOT with the arguments you passed"));
+        check("oracle: it lists EVERY real overload, shortest first",
+                overloadHints.contains("BukkitTask repeat(long, Runnable)")
+                        && overloadHints.contains("BukkitTask repeat(long, long, Runnable)")
+                        && overloadHints.indexOf("repeat(long, Runnable)")
+                                < overloadHints.indexOf("repeat(long, long, Runnable)"));
+        check("oracle: the overload list is exact-name only, with no fuzzy neighbours",
+                !overloadHints.contains("configInt"));
+
+        // ECJ words the same failure completely differently.
+        String ecjOverload = "[ERROR] Foo.java:65 - The method repeat(long, long, Runnable) in the "
+                + "type VibeContext is not applicable for the arguments (long, long, long, Runnable)\n"
+                + "[ERROR] Foo.java:2 - see com.gijsm.vibemod.api.VibeContext";
+        String ecjOverloadHints = oracle.hints(ecjOverload);
+        check("oracle: ECJ's 'is not applicable for the arguments' produces a hints block",
+                ecjOverloadHints.contains("API HINTS"));
+        check("oracle: and reaches the same verdict as javac's wording",
+                ecjOverloadHints.contains("repeat exists, but NOT with the arguments you passed"));
 
         // Quiet where it has nothing to say, and never throwing.
         check("oracle: no hints for an unrelated diagnostic",

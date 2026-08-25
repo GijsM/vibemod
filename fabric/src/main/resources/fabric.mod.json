@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "vibemod",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "name": "VibeMod",
   "description": "Vibe-code gameplay mods from in-game prompts: describe a mod, an LLM writes the Java, VibeMod compiles it in-process and hot-loads it. No restarts, no external services.",
   "authors": ["gijsm"],

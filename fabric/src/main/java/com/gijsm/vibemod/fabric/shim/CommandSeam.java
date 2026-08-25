@@ -212,6 +212,12 @@ public final class CommandSeam {
                 synchronized (bound.installed) {
                     bound.installed.add(name);
                 }
+                // The same name the curated ctx.command path records, so
+                // /vibe info's "commands:" line is right for a native mod too.
+                // Dropped by ModHandle.drain() with the rest of the mod's
+                // registrations; a reload re-adds it and trackCommandName
+                // de-duplicates.
+                bound.handle.trackCommandName(name);
                 LOG.info("Mod " + bound.modName + " registered /" + name);
                 continue;
             }

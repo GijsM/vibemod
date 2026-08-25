@@ -577,8 +577,8 @@ public final class PlatformProfiles {
               `KeyMappingHelper.registerKeyMapping(new KeyMapping(...))` returns a DIFFERENT
               `KeyMapping` than you passed in - keep the returned one and poll it with
               `consumeClick()`/`isDown()`. The physical key may not be the one you asked
-              for, so say so in the manual and never tell the player a specific key without
-              adding that they can rebind it in Options -> Controls.
+              for, so the manual must never promise one without saying it is rebindable
+              under Options -> Controls.
             - HUD: `HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("yourmod",
               "thing"), (graphics, delta) -> ...)` from `onInitializeClient()`. Draw with
               `graphics.fill(x1, y1, x2, y2, argb)` and
@@ -590,7 +590,7 @@ public final class PlatformProfiles {
               is open.
             - RESOURCE FILES. You may ship the same `data/**` and `assets/**` tree a real mod
               jar would, as extra "files" entries whose "content" is the file's text. They
-              install on load and are removed on disable. The RubyCharm example below shows
+              install on load and are removed on disable. The RubySword example below shows
               the whole shape - copy its layout.
               * YOUR NAMESPACE IS `vibemod_<name lowercased>` - the mod name from the JSON,
                 lowercased, anything not a-z/0-9 replaced by `_`. Use it everywhere: in paths,
@@ -598,13 +598,20 @@ public final class PlatformProfiles {
               * LIVE IMMEDIATELY, gone again on disable: `data/<ns>/recipe/…`,
                 `advancement/…`, `function/<name>.mcfunction`, `loot_table/…`, `predicate/…`,
                 `item_modifier/…`, `tags/…`.
+              * AN INGREDIENT IS A STRING, NOT AN OBJECT. You may remember
+                `{"item": "minecraft:redstone"}`; 26.x REJECTS it. Everywhere a recipe takes
+                one (`ingredient` in smelting/blasting/smoking/campfire/stonecutting, each
+                value of a shaped `key`, each entry of a shapeless `ingredients`) write
+                `"minecraft:redstone"`, a tag `"#minecraft:planks"`, or an array of either.
+                This does NOT fail your build: the recipe is silently dropped as the pack
+                loads and the mod looks fine until a player tries to craft it.
               * ONLY ON THE NEXT WORLD LOAD: enchantments, dialogs, damage types, jukebox
                 songs, painting variants, `worldgen/`. Avoid unless the player asked.
               * CLIENT FILES (`assets/**`) only work on a physical client; on a dedicated
-                server they are stored and inert, which is fine. Text goes in
+                server they are stored and inert. Text goes in
                 `assets/<ns>/lang/en_us.json`; a custom icon needs
                 `assets/<ns>/items/<name>.json`, `assets/<ns>/models/item/<name>.json` and the
-                texture - see the example for the exact 26.x shapes.
+                texture, in the shapes the example uses.
               * TEXTURES ARE PIXEL GRIDS: you cannot emit binary PNG, so write
                 `assets/<ns>/textures/item/<name>.png.grid` = {"palette": {"a": "#8b1a1a",
                 ".": "transparent"}, "rows": ["..aa..", ".abba."]}. Square, at most 64x64
@@ -628,9 +635,9 @@ public final class PlatformProfiles {
                 name in `Item`. Ids are rewritten to your `vibemod_<name>` namespace, so use
                 that namespace in the Java too and your recipe, model and id all agree.
               * AN ITEM IS NOTHING WITHOUT ITS FILES: the two-file model, a `.png.grid`
-                texture, `"item.<ns>.<name>"` in the lang file (that key comes from the id -
-                it must match), and a recipe so a player can get one. Registered items are in
-                the creative INGREDIENTS tab and in creative search automatically.
+                texture, `"item.<ns>.<name>"` in the lang file (derived from the id, so it
+                must match), and a recipe so a player can get one. Registered items reach
+                the creative INGREDIENTS tab and creative search automatically.
               * ENTITY TYPES: `EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)
                 .build(ResourceKey.create(Registries.ENTITY_TYPE, id))`, registered the same
                 way, plus `FabricDefaultAttributeRegistry.register(TYPE, Mob.createAttributes())`
@@ -638,8 +645,7 @@ public final class PlatformProfiles {
                 spawn it yourself: `TYPE.create(level, EntitySpawnReason.COMMAND)` +
                 `level.addFreshEntity(...)`. No spawn eggs, no natural spawning.
               * SINGLEPLAYER AND LAN-HOST ONLY. On a DEDICATED server the host REFUSES the
-                registration and the mod fails to load, because a client joining later would
-                not know the id - use the components-on-a-vanilla-item trick above there.
+                registration - use the components-on-a-vanilla-item trick above instead.
               * NO OTHER REGISTRY: not blocks (their state ids are baked into every loaded
                 chunk when the world opens), not block entities, enchantments, biomes,
                 particles or sounds. Use `data/**` for anything datapack-shaped.
@@ -648,11 +654,10 @@ public final class PlatformProfiles {
               `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
               replays it for you if the server is already running when you are loaded.
             - There is no per-tick scheduler. Count ticks in an `END_SERVER_TICK` handler
-              (`if (++ticks % 200 == 0) { ... }` is once every ten seconds).
+              (`if (++ticks % 200 == 0)` is every ten seconds).
             - MOJANG NAMES, 26.x SPELLINGS. You may remember some of these differently:
               * `World` is `Level`, `PlayerEntity` is `Player`, `ServerPlayerEntity` is
-                `ServerPlayer`, `Text` is `Component`, `ItemStack`/`BlockPos`/`BlockState`/
-                `MinecraftServer` keep their names.
+                `ServerPlayer`, `Text` is `Component`.
               * `ResourceLocation` is now `net.minecraft.resources.Identifier`
                 (`Identifier.withDefaultNamespace("stone")`).
               * Text is `net.minecraft.network.chat.Component`: `Component.literal("hi")`,
@@ -663,10 +668,10 @@ public final class PlatformProfiles {
                 cancels. `PlayerBlockBreakEvents.BEFORE` returns `boolean` instead
                 (`false` cancels).
               * The player list is `server.getPlayerList().getPlayers()`.
-            - Use `net.minecraft.*` types as the game hands them to you: inspect them and act
-              on them. The ONLY ones you may extend are the ones you own an instance of -
-              your own `Item` subclass, your own `Screen`, your own mob class. Never replace
-              or wrap a vanilla singleton.""";
+            - Use `net.minecraft.*` types as the game hands them to you. The ONLY ones you
+              may extend are the ones you own an instance of - your own `Item` subclass,
+              your own `Screen`, your own mob class. Never replace or wrap a vanilla
+              singleton.""";
 
     /**
      * There is no {@code ctx} in a native mod, so there is nowhere to read a
@@ -699,6 +704,37 @@ public final class PlatformProfiles {
             "net.fabricmc.api.ModInitializer",
             NATIVE_FABRIC_CONFIG_CONTRACT,
             NATIVE_FABRIC_FILES);
+
+    /**
+     * The "THIS HOST" block for the native Fabric profile (V3 Phase 4 §C),
+     * given whether this process is a dedicated server.
+     *
+     * <p>Prompt text, so it lives with the prompts rather than in the host that
+     * knows the boolean — which is also what lets {@code LlmSelfTest} budget the
+     * real worst case rather than the profile alone.
+     *
+     * <p>Every sentence restates, in one direction, a rule {@link #FABRIC}
+     * already gives in both. That is the whole point: the profile describes the
+     * platform, this describes the process, and before it existed the model had
+     * to guess. The live demo showed the bill — a model that had followed the
+     * prompt exactly registered an item on a dedicated server, was refused, and
+     * spent a repair round rediscovering what the host knew at boot.
+     */
+    public static String fabricHostFacts(boolean dedicatedServer) {
+        return dedicatedServer
+                ? """
+                  This host is a DEDICATED SERVER, with no client in the process:
+                  - Registering items or entity types is REFUSED here and your mod will fail
+                    to load. Put components on a vanilla item in the result instead.
+                  - `assets/**` are stored but inert - no texture, model or translation you
+                    ship is ever seen. Prefer text players can read.
+                  - A `ClientModInitializer` half is skipped: keybinds, HUD and Screens do
+                    nothing. Do it server-side, or say in the manual it needs a client."""
+                : """
+                  This host is a MINECRAFT CLIENT (singleplayer, or a world opened to LAN).
+                  The whole surface works here: `assets/**` render, a `ClientModInitializer`
+                  half runs, and registering items and entity types is allowed.""";
+    }
 
     /** Every profile this build knows. */
     public static List<PlatformProfile> all() {

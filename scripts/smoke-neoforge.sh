@@ -44,7 +44,9 @@ prop() { grep -E "^$1=" "$ROOT/gradle.properties" | cut -d= -f2- ; }
 MC_VERSION="$(prop minecraftVersion)"
 NEO_VERSION="$(prop neoforgeVersion)"
 
-JAR="$(ls "$ROOT"/neoforge/build/libs/vibemod-neoforge-*.jar 2>/dev/null | grep -v sources | head -1 || true)"
+# NEWEST first: after a version bump the old jar is still in build/libs and
+# sorts before the new one, so a plain `ls` would gate the previous release.
+JAR="$(ls -t "$ROOT"/neoforge/build/libs/vibemod-neoforge-*.jar 2>/dev/null | grep -v sources | head -1 || true)"
 if [[ -z "$JAR" ]]; then
   echo "!! no vibemod-neoforge jar - run ./gradlew :neoforge:build first" >&2
   exit 1

@@ -65,6 +65,13 @@ public final class FabricEntrypointAdapter implements EntrypointAdapter {
                     + ModInitializer.class.getName() + " as well, or generate this mod on a client.",
                     null);
         }
+        // Recorded before anything runs, so /vibe info can say "ModInitializer,
+        // ClientModInitializer" for a mod whose client half was skipped, failed,
+        // or has not been queued onto the render thread yet. It is a fact about
+        // the class, not about how far its activation got.
+        handle.noteEntrypoints((common ? "ModInitializer" : "")
+                + (common && client ? ", " : "")
+                + (client ? "ClientModInitializer" : ""));
         return () -> {
             if (common) {
                 // V3 Phase 3 §A: the registration window. It is around the WHOLE
