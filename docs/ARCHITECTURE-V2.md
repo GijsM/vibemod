@@ -1474,7 +1474,7 @@ rather than rebuilding, because §10.3's whole point is that the installed jar a
 the dev classpath are different animals.
 
 **First run (PR #1, run 32862997059): every one of the seven jobs green, whole
-matrix in 8m37s.** That is the §9 Phase F matrix item closed with evidence
+matrix in 8m42s.** That is the §9 Phase F matrix item closed with evidence
 rather than intent, and it is also the first time Paper 1.20.6, Paper 26.2,
 Fabric and NeoForge have been exercised on anything but one laptop. The NeoForge
 gate is worth calling out because it was the one expected to be slow: cold, with
@@ -1499,6 +1499,51 @@ not a track record, and these are the flakiest thing in the matrix by
 construction — two real game clients, five minutes, software-rendered. Promote
 them to required once they have passed several times; the job's own comment says
 so.
+
+### The bug the matrix found on its second run
+
+Worth its own heading, because it is the argument for having built the matrix at
+all. Run 1 was green. Run 2 — same branch, docs-only commit — went red on the
+NeoForge client gate with **18 failures**, all cascading from one:
+
+```
+WARNING: Skipping classpath entry that could not be cached:
+         .../neoforge/build/classes/java/main
+java.nio.file.NoSuchFileException: .../cpcache/d42ce444...partial
+      at CpCache.cached(CpCache.java:148)     <- Files.move(tmp, target)
+WARNING: HudCanary v1 failed to compile:
+         package com.gijsm.vibemod.api does not exist
+```
+
+`CpCache.cached` writes to `<hash>NNNN.partial` and moves it into place.
+`CpCache.prune` deleted every `.partial` its `keep` set did not name — and
+`keep` only ever holds `.jar` names, so it deleted **every** partial it found,
+including one another thread was writing at that instant. Two mods restoring at
+boot materialize the classpath concurrently on the scheduler's async pool, which
+is exactly what the client gate seeds. Thread B's prune deleted thread A's temp
+file; A's `Files.move` threw; A dropped the classpath entry that happened to
+carry the sdk; both mods then failed to compile against an api sitting right
+there.
+
+**This is not a dev-classpath bug and not a CI bug.** In a shipped jar every
+nested entry — ECJ, all six Adventure jars — goes through the same `cached()`
+path, so two mods compiling at once on a real server can lose a real library the
+same way and get a diagnostic that names a library it can see. It survived
+Phases D and E because all three smoke gates restore exactly **one** mod, and
+because the window is small enough that a laptop wins the race and a four-core
+runner does not.
+
+Fixed by leaving `.partial` files alone unless they are over an hour old (a
+partial is by definition somebody's work in progress; `cached()` already deletes
+its own in a `finally`, and the age floor keeps crash leftovers from
+accumulating without racing anything alive). **Verified by the gate that found
+it**: run 3 green, 30/30, and not one "could not be cached" line in the log —
+which is the only honest way to verify it, because reproducing the race needs
+two concurrent restores and a filesystem slow enough to lose.
+
+The score for the client gates so far is therefore **2 green, 1 red, and the red
+one was right**. That is a better argument for keeping them than a clean sweep
+would have been, and it is also why `continue-on-error` stays on for now.
 
 ### The licence gap §10.4 deferred, closed
 

@@ -83,6 +83,10 @@ listed under **Changed** below.
 
 ### Fixed
 
+- **Two mods compiling at the same time could lose a library off the classpath.** The
+  classpath cache pruned every in-progress temp file it did not recognise, including ones another
+  thread was writing — so a concurrent compile could drop ECJ or Adventure and then report that a
+  package it can see does not exist. Found by the new CI matrix, on its second run.
 - `fabric.mod.json` declared an icon file that has never existed in the repository.
 - The eight keybind slots showed up in the Controls screen as raw translation keys; both loader
   jars now ship an `en_us.json`.
