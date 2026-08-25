@@ -1,4 +1,4 @@
-package com.gijsm.vibemine.llm;
+package com.gijsm.vibemod.llm;
 
 import java.util.List;
 
@@ -9,7 +9,7 @@ import java.util.List;
  * on the curated paid tier, current-model-first ordering with no duplication, {@code
  * priceLabel()} formatting, and the never-empty fallback for an unloaded/empty catalog.
  *
- * <p>Declared in {@code com.gijsm.vibemine.llm} (even though the file lives under {@code
+ * <p>Declared in {@code com.gijsm.vibemod.llm} (even though the file lives under {@code
  * src/test/java}, not a matching subdirectory) so it can reach {@code ModelCatalog}'s
  * package-private {@code parse}/{@code selectFeatured}/{@code ParsedModel}.
  */

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time (idempotent) local dev setup for VibeMine:
+# One-time (idempotent) local dev setup for VibeMod:
 #   - downloads the pinned Paper 1.21.8 build 60 server jar (verified by sha256)
 #   - accepts the Mojang EULA
 #   - generates/reuses an RCON password and writes server/server.properties
@@ -18,7 +18,7 @@ FILL_API_URL="https://fill.papermc.io/v3/projects/paper/versions/${PAPER_VERSION
 
 mkdir -p "$SERVER_DIR"
 
-echo "==> VibeMine dev environment setup"
+echo "==> VibeMod dev environment setup"
 echo "    root: $ROOT"
 
 # --- 1. Paper server jar ---------------------------------------------------
@@ -26,7 +26,7 @@ if [[ -f "$PAPER_JAR_PATH" ]]; then
   echo "==> Paper jar already present: $PAPER_JAR_PATH (skipping download)"
 else
   echo "==> Fetching build metadata from Fill v3 API..."
-  BUILD_JSON="$(curl -fsSL -H 'User-Agent: vibemine-setup/1.0 (local dev)' "$FILL_API_URL")"
+  BUILD_JSON="$(curl -fsSL -H 'User-Agent: vibemod-setup/1.0 (local dev)' "$FILL_API_URL")"
 
   DOWNLOAD_URL="$(node -e '
     const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
@@ -50,7 +50,7 @@ else
 
   echo "==> Downloading $PAPER_JAR_NAME from $DOWNLOAD_URL"
   TMP_JAR="$(mktemp "$SERVER_DIR/.${PAPER_JAR_NAME}.XXXXXX")"
-  curl -fSL -H 'User-Agent: vibemine-setup/1.0 (local dev)' -o "$TMP_JAR" "$DOWNLOAD_URL"
+  curl -fSL -H 'User-Agent: vibemod-setup/1.0 (local dev)' -o "$TMP_JAR" "$DOWNLOAD_URL"
 
   echo "==> Verifying sha256..."
   ACTUAL_SHA256="$(shasum -a 256 "$TMP_JAR" | awk '{print $1}')"
@@ -102,7 +102,7 @@ enable-command-block=true
 max-players=5
 allow-nether=false
 sync-chunk-writes=false
-motd=vibemine
+motd=vibemod
 server-ip=127.0.0.1
 spawn-monsters=true
 EOF

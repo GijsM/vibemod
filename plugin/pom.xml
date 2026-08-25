@@ -6,11 +6,11 @@
 
     <groupId>com.gijsm</groupId>
     <artifactId>vibemod</artifactId>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>VibeMod</name>
-    <description>VibeMine: turn player prompts into hot-loaded Paper mods.</description>
+    <description>VibeMod: turn player prompts into hot-loaded Paper mods.</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

@@ -7,12 +7,12 @@ import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
-import com.gijsm.vibemine.compile.InMemoryCompiler;
-import com.gijsm.vibemine.gen.GeneratedProject;
-import com.gijsm.vibemine.gen.GeneratedProject.ConfigKnob;
-import com.gijsm.vibemine.store.JarExporter;
-import com.gijsm.vibemine.store.ModConfigs;
-import com.gijsm.vibemine.store.ModStore;
+import com.gijsm.vibemod.compile.InMemoryCompiler;
+import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.gen.GeneratedProject.ConfigKnob;
+import com.gijsm.vibemod.store.JarExporter;
+import com.gijsm.vibemod.store.ModConfigs;
+import com.gijsm.vibemod.store.ModStore;
 
 /**
  * Standalone self-test (no test framework) proving ModStore, ModConfigs and
@@ -28,13 +28,12 @@ import com.gijsm.vibemine.store.ModStore;
  */
 public class StoreSelfTest {
 
-    private static final String SCRATCH_ROOT =
-            "/private/tmp/claude-501/-Users-gijsmulder-projects-vibemine/28576c55-1a45-4088-81bb-f47d2e6ed714/scratchpad/store-selftest";
+    private static Path scratchRoot;
 
     private static int failures = 0;
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of(SCRATCH_ROOT));
+        scratchRoot = Files.createTempDirectory("vibemod-store-selftest-");
 
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
@@ -488,8 +487,8 @@ public class StoreSelfTest {
         }
 
         String modSource = "package vibemod.trivial;\n\n"
-                + "import com.gijsm.vibemine.api.VibeContext;\n"
-                + "import com.gijsm.vibemine.api.Mod;\n\n"
+                + "import com.gijsm.vibemod.api.VibeContext;\n"
+                + "import com.gijsm.vibemod.api.Mod;\n\n"
                 + "public class TrivialMod implements Mod {\n"
                 + "    @Override\n"
                 + "    public void onEnable(VibeContext ctx) throws Exception {\n"
@@ -530,13 +529,13 @@ public class StoreSelfTest {
             check("nested StandaloneContext class present",
                     jarFile.getJarEntry("vibemod/trivial/TrivialExportPlugin$StandaloneContext.class") != null);
             check("mod class present", jarFile.getJarEntry("vibemod/trivial/TrivialMod.class") != null);
-            check("api class Mod embedded", jarFile.getJarEntry("com/gijsm/vibemine/api/Mod.class") != null);
+            check("api class Mod embedded", jarFile.getJarEntry("com/gijsm/vibemod/api/Mod.class") != null);
             check("deprecated api class VibeMod bridge embedded (old exported sources link)",
-                    jarFile.getJarEntry("com/gijsm/vibemine/api/VibeMod.class") != null);
+                    jarFile.getJarEntry("com/gijsm/vibemod/api/VibeMod.class") != null);
             check("api class VibeContext embedded",
-                    jarFile.getJarEntry("com/gijsm/vibemine/api/VibeContext.class") != null);
+                    jarFile.getJarEntry("com/gijsm/vibemod/api/VibeContext.class") != null);
             check("api class ModCommandHandler embedded",
-                    jarFile.getJarEntry("com/gijsm/vibemine/api/ModCommandHandler.class") != null);
+                    jarFile.getJarEntry("com/gijsm/vibemod/api/ModCommandHandler.class") != null);
             check("manifest present", jarFile.getJarEntry("META-INF/MANIFEST.MF") != null);
         }
 
@@ -559,8 +558,8 @@ public class StoreSelfTest {
         }
 
         String modSource = "package vibemod.knobby;\n\n"
-                + "import com.gijsm.vibemine.api.VibeContext;\n"
-                + "import com.gijsm.vibemine.api.Mod;\n\n"
+                + "import com.gijsm.vibemod.api.VibeContext;\n"
+                + "import com.gijsm.vibemod.api.Mod;\n\n"
                 + "public class KnobbyMod implements Mod {\n"
                 + "    @Override\n"
                 + "    public void onEnable(VibeContext ctx) throws Exception {\n"
@@ -609,7 +608,7 @@ public class StoreSelfTest {
     }
 
     private static Path tempDir(String prefix) throws Exception {
-        return Files.createTempDirectory(Path.of(SCRATCH_ROOT), prefix + "-");
+        return Files.createTempDirectory(scratchRoot, prefix + "-");
     }
 
     private static String indent(String s) {

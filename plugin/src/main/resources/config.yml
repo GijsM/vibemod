@@ -3,10 +3,10 @@
 # Key resolution order for the OpenRouter API key (never hardcode a key anywhere):
 #   1. openrouter.api-key below
 #   2. environment variable OPENROUTER_API_KEY
-#   3. file ~/.config/vibemine/openrouter.key
+#   3. file ~/.config/vibemod/openrouter.key
 openrouter:
   # OpenRouter API key. Leave blank to fall back to the env var / key file below.
-  api-key: ""            # or env OPENROUTER_API_KEY, or ~/.config/vibemine/openrouter.key
+  api-key: ""            # or env OPENROUTER_API_KEY, or ~/.config/vibemod/openrouter.key
   # Model used to generate/edit/repair mods (OpenRouter model id).
   model: anthropic/claude-sonnet-5
   # How long to wait for a single LLM completion before giving up.

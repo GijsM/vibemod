@@ -16,8 +16,6 @@ if [[ ! -f "$BUILT_JAR" ]]; then
 fi
 
 mkdir -p "$PLUGINS_DIR"
-# Remove a stale pre-rename jar so both plugins never load side by side.
-rm -f "$PLUGINS_DIR/VibeCore.jar"
 cp "$BUILT_JAR" "$PLUGINS_DIR/VibeMod.jar"
 
 echo "==> Built and installed: $PLUGINS_DIR/VibeMod.jar"

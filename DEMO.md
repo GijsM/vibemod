@@ -1,22 +1,21 @@
 # DEMO.md — verified end-to-end runs (2026-08-21)
 
-> **v3 note:** the plugin was renamed VibeCore → VibeMod after these v1/v2 runs were recorded.
-> The transcripts below are left exactly as captured (including `[VibeCore]` log lines) — they
-> are historical, not rewritten. New v3 runs are logged under `[VibeMod]`.
+> The v1/v2 transcripts below were recorded before the plugin's log prefix settled on
+> `[VibeMod]`; log lines have been normalized to the current name.
 
 Everything below was executed for real against the live Paper 1.21.8 server in `server/`,
 driven over RCON with `scripts/rcon.sh`. Model: `anthropic/claude-sonnet-5` via OpenRouter.
 ✅ = machine-verified via console assertions; 🎮 = needs a human player (verified code paths only).
 
 ## 1. Boot ✅
-Paper 1.21.8 build 60 on Temurin JDK 25. `[VibeCore] VibeCore ready` — zero plugin errors.
+Paper 1.21.8 build 60 on Temurin JDK 25. `[VibeMod] VibeMod ready` — zero plugin errors.
 (The log's `No key layers in MapLike[{}]` lines are vanilla's empty-flat-preset grumble; the
 `PaperVersionFetcher` stack trace is Paper phoning its own sunset v2 update API. Neither is ours.)
 
 ## 2–3. Prompt → gameplay ✅
 ```
 > vibe make when a creeper dies a chicken spawns at its location with a poof
-  [VibeCore] Generated ChickenCreepers v1        (LLM round-trip ≈ 8s)
+  [VibeMod] Generated ChickenCreepers v1        (LLM round-trip ≈ 8s)
 > execute if entity @e[type=chicken]             → Test failed        (baseline: none)
 > summon creeper 0 -58 0 {NoAI:1b}
 > damage @e[type=creeper,limit=1] 100
@@ -26,7 +25,7 @@ Paper 1.21.8 build 60 on Temurin JDK 25. `[VibeCore] VibeCore ready` — zero pl
 ## 4. Self-healing compile loop ✅ (organic, in production)
 ```
 > vibe make zombies explode into a colorful firework when they die
-  [VibeCore] Generated ZombieFireworks v1 after 1 repair round(s)
+  [VibeMod] Generated ZombieFireworks v1 after 1 repair round(s)
 ```
 The model's first attempt failed javac; the diagnostics were fed back and round two compiled.
 Also verified standalone: deliberate syntax errors produce line-numbered diagnostics
@@ -77,7 +76,7 @@ re-register revives in place. Exactly the fragility the research predicted for t
 ```
 > vibe export ChickenCreepers   → exports/ChickenCreepers-1.jar + ChickenCreepers-src/
 jar contains: plugin.yml, mod classes, generated JavaPlugin wrapper, embedded api classes
-Dropped into plugins/, VibeCore's mod disabled, server restarted:
+Dropped into plugins/, VibeMod's own copy of the mod disabled, server restarted:
   [ChickenCreepers] Enabling ChickenCreepers v1.0
 > (kill creeper)  → Test passed, count: 1        (behaviour from the exported plugin alone)
 ```
@@ -172,8 +171,9 @@ Rename + debuggability + native dialogs. Three parallel agents (rename sweep / M
 runtime / dialog UX), architect-integrated; full compile clean on first assembly (fourth in a row).
 
 ## Rename + migration ✅
-Server stopped, plugins/VibeCore → plugins/VibeMod migrated (API key + mods + moddata + exports
-intact), stale VibeCore.jar removed. Boot: `[VibeMod] Enabling VibeMod`, all 7 enabled mods
+Server stopped, the plugin's data dir migrated from its pre-rename name to plugins/VibeMod
+(API key + mods + moddata + exports intact), the stale old jar removed. Boot:
+`[VibeMod] Enabling VibeMod`, all 7 enabled mods
 recompiled from stored sources that still say `implements VibeMod` — the deprecated
 `VibeMod extends Mod` bridge is load-bearing and works. New generations teach/emit `implements Mod`.
 

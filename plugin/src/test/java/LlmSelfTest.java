@@ -11,9 +11,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-import com.gijsm.vibemine.gen.GeneratedProject;
-import com.gijsm.vibemine.llm.PromptLibrary;
-import com.gijsm.vibemine.llm.StreamScanner;
+import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.llm.PromptLibrary;
+import com.gijsm.vibemod.llm.StreamScanner;
 
 /**
  * Standalone self-test (no test framework, no network) proving PromptLibrary's
@@ -424,15 +424,15 @@ public class LlmSelfTest {
 
         checkEmbeddedMatches(prompt, "Mod.java",
                 Path.of(baseDir, "Mod.java"),
-                "--- com/gijsm/vibemine/api/Mod.java ---",
-                "--- com/gijsm/vibemine/api/VibeContext.java ---");
+                "--- com/gijsm/vibemod/api/Mod.java ---",
+                "--- com/gijsm/vibemod/api/VibeContext.java ---");
         checkEmbeddedMatches(prompt, "VibeContext.java",
                 Path.of(baseDir, "VibeContext.java"),
-                "--- com/gijsm/vibemine/api/VibeContext.java ---",
-                "--- com/gijsm/vibemine/api/ModCommandHandler.java ---");
+                "--- com/gijsm/vibemod/api/VibeContext.java ---",
+                "--- com/gijsm/vibemod/api/ModCommandHandler.java ---");
         checkEmbeddedMatches(prompt, "ModCommandHandler.java",
                 Path.of(baseDir, "ModCommandHandler.java"),
-                "--- com/gijsm/vibemine/api/ModCommandHandler.java ---",
+                "--- com/gijsm/vibemod/api/ModCommandHandler.java ---",
                 "================ OUTPUT CONTRACT ================");
     }
 

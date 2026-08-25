@@ -1,4 +1,4 @@
-package com.gijsm.vibemine.runtime;
+package com.gijsm.vibemod.runtime;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -14,20 +14,19 @@ import java.util.regex.Pattern;
  * {@code lastSeen} first), disk persistence round-trip, {@code report()}
  * formatting, and vibemod-frame-priority stack truncation.
  *
- * Declared in {@code com.gijsm.vibemine.runtime} (even though the file lives
+ * Declared in {@code com.gijsm.vibemod.runtime} (even though the file lives
  * under {@code src/test/java}, not a matching subdirectory) so it can reach
  * the package-private, Bukkit-free test constructor
  * {@code ModErrors(Path, Consumer<Runnable>, Consumer<Runnable>)}.
  */
 public class ErrorsSelfTest {
 
-    private static final String SCRATCH_ROOT =
-            "/private/tmp/claude-501/-Users-gijsmulder-projects-vibemine/28576c55-1a45-4088-81bb-f47d2e6ed714/scratchpad/errors-selftest";
+    private static Path scratchRoot;
 
     private static int failures = 0;
 
     public static void main(String[] args) throws Exception {
-        Files.createDirectories(Path.of(SCRATCH_ROOT));
+        scratchRoot = Files.createTempDirectory("vibemod-errors-selftest-");
 
         testDedupSameClassAndFrameMerges();
         testDistinctRecordsForDifferentFrames();
@@ -290,7 +289,7 @@ public class ErrorsSelfTest {
     }
 
     private static Path tempDir(String prefix) throws Exception {
-        return Files.createTempDirectory(Path.of(SCRATCH_ROOT), prefix + "-");
+        return Files.createTempDirectory(scratchRoot, prefix + "-");
     }
 
     private static void check(String label, boolean condition) {

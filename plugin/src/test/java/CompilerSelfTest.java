@@ -3,8 +3,8 @@ import java.net.URLClassLoader;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import com.gijsm.vibemine.compile.CompileResult;
-import com.gijsm.vibemine.compile.InMemoryCompiler;
+import com.gijsm.vibemod.compile.CompileResult;
+import com.gijsm.vibemod.compile.InMemoryCompiler;
 
 /**
  * Standalone self-test (no test framework) proving InMemoryCompiler works
@@ -118,8 +118,8 @@ public class CompilerSelfTest {
         String source = """
                 package vibemod.selftest;
 
-                import com.gijsm.vibemine.api.VibeContext;
-                import com.gijsm.vibemine.api.Mod;
+                import com.gijsm.vibemod.api.VibeContext;
+                import com.gijsm.vibemod.api.Mod;
 
                 public class ApiMod implements Mod {
                     @Override
@@ -153,8 +153,8 @@ public class CompilerSelfTest {
         String source = """
                 package vibemod.selftest;
 
-                import com.gijsm.vibemine.api.VibeContext;
-                import com.gijsm.vibemine.api.VibeMod;
+                import com.gijsm.vibemod.api.VibeContext;
+                import com.gijsm.vibemod.api.VibeMod;
 
                 public class BridgeMod implements VibeMod {
                     @Override

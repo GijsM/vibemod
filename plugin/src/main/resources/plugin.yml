@@ -1,6 +1,6 @@
 name: VibeMod
-version: 0.1.0
-main: com.gijsm.vibemine.VibeMod
+version: 1.0.0
+main: com.gijsm.vibemod.VibeMod
 api-version: '1.21'
 author: gijsm
 description: "Vibe-code gameplay mods from in-game prompts"
@@ -15,5 +15,5 @@ permissions:
     description: "Use read-only /vibe subcommands (list, source, help)"
     default: op
   vibe.admin:
-    description: "Full control of VibeMine: make, edit, enable/disable, export, panic, etc."
+    description: "Full control of VibeMod: make, edit, enable/disable, export, panic, etc."
     default: op

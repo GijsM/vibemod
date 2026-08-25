@@ -1,13 +1,16 @@
-# VibeMine architecture contract (FROZEN — implement exactly these surfaces)
+# VibeMod architecture contract
 
-> **v3 note:** the plugin below is described under its v1/v2 name, VibeCore; it was renamed to
-> **VibeMod** in v3 (see the V3 ADDENDUM at the bottom of this file), and the api contract's
-> `VibeMod` interface was itself renamed to `Mod` at the same time (deprecated `VibeMod extends
-> Mod` bridge kept for compatibility). Mentions of "VibeMod" below the fold now refer to the
-> plugin, per that rename; api-interface mentions ("implements VibeMod", "api/VibeMod.java") are
-> the v1/v2-era name for what is now `Mod`.
+This file records the frozen implementation contracts each iteration (v1, v2, v3) was built
+against — the exact public surfaces, addendum by addendum. It is the reference for how the
+plugin fits together.
 
-VibeMine = one Paper 1.21.8 plugin, **VibeMod** (`com.gijsm.vibemine`), that turns a player prompt
+> **Naming note:** in v1/v2 the api contract interface that generated mods implement was itself
+> named `VibeMod`; in v3 it was renamed to `Mod` (with a deprecated `VibeMod extends Mod` bridge
+> kept so older generated sources keep compiling). Api-interface mentions below ("implements
+> VibeMod", "api/VibeMod.java") are the v1/v2-era name for what is now `Mod`; every other
+> "VibeMod" refers to the plugin.
+
+VibeMod = one Paper 1.21.8 plugin (`com.gijsm.vibemod`) that turns a player prompt
 (`/vibe make "sheep can fly"`) into LLM-generated Java, compiles it **in-process** with `javax.tools`,
 and hot-loads it as a "mod" in a child `URLClassLoader` under VibeMod's plugin identity.
 Generated mods are NOT Bukkit plugins (runtime plugin loading is unsupported on modern Paper).
@@ -19,18 +22,18 @@ Ground rules for ALL code in this repo:
 - Only `org.bukkit.*` / `io.papermc.paper.*` API — never `net.minecraft.*` / CraftBukkit internals,
   EXCEPT the one sanctioned reflection site in `DynamicCommands` described below.
 - Every public class gets a short javadoc. Match the style of the frozen files in
-  `plugin/src/main/java/com/gijsm/vibemine/api/`.
+  `plugin/src/main/java/com/gijsm/vibemod/api/`.
 - Thread rule: all Bukkit API calls on the main thread. LLM/HTTP work off-thread,
   hopping back via `Bukkit.getScheduler().runTask(plugin, ...)`.
 - Never hardcode any API key anywhere. Key resolution order: config.yml `openrouter.api-key`
-  → env `OPENROUTER_API_KEY` → file `~/.config/vibemine/openrouter.key`.
+  → env `OPENROUTER_API_KEY` → file `~/.config/vibemod/openrouter.key`.
 
-## Frozen files (already written — read them, do not modify)
+## Frozen files (the shared contract)
 - `api/VibeMod.java`, `api/VibeContext.java`, `api/ModCommandHandler.java`
 - `gen/GeneratedProject.java` (record: `name, description, mainClass, files[path,content]`)
 - `compile/CompileResult.java` (record: `success, classes(Map<String,byte[]>), diagnostics`)
 
-## Frozen public surfaces (each owner implements EXACTLY these signatures)
+## Frozen public surfaces (exact signatures)
 
 ### compile/InMemoryCompiler.java
 ```java
@@ -59,8 +62,8 @@ public final class OpenRouterClient {
     public String model(); public void setModel(String model);
 }
 ```
-JDK HttpClient only. Include headers `HTTP-Referer: https://github.com/gijsm/vibemine` and
-`X-Title: VibeMine`. Surface API errors as failed futures with the response body in the message.
+JDK HttpClient only. Include headers `HTTP-Referer: https://github.com/gijsm/vibemod` and
+`X-Title: VibeMod`. Surface API errors as failed futures with the response body in the message.
 
 ### llm/PromptLibrary.java
 ```java
@@ -129,8 +132,8 @@ public final class DynamicCommands {
 }
 ```
 Implementation: `Bukkit.getCommandMap()` (public on Paper) + a `Command` subclass instance, prefix
-"vibemine". Unregister = reflectively remove from `SimpleCommandMap#knownCommands` ("name" and
-"vibemine:name" and aliases) + `command.unregister(map)`. After ANY change call
+"vibemod". Unregister = reflectively remove from `SimpleCommandMap#knownCommands` ("name" and
+"vibemod:name" and aliases) + `command.unregister(map)`. After ANY change call
 `Bukkit.getOnlinePlayers().forEach(Player::updateCommands)`. Wrap everything in try/catch: on any
 Throwable, log a warning and return false / degrade silently. Refuse to override a command that
 already exists and wasn't registered by us (return false).
@@ -185,7 +188,7 @@ public final class JarExporter {
 }
 ```
 
-### gen/ModGenerator.java — owned by the architect (do NOT implement), callers use:
+### gen/ModGenerator.java — the surface callers use:
 ```java
 public final class ModGenerator {
     public interface ProgressListener { void phase(String label); void detail(String line); }
@@ -196,7 +199,7 @@ public final class ModGenerator {
 }
 ```
 
-### ui/ + command/ (owner: UI agent)
+### ui/ + command/
 ```java
 public final class Progress {          // ui/Progress.java
     public Progress(Plugin plugin, CommandSender viewer, String title)
@@ -227,7 +230,7 @@ public final class VibeCommand implements TabExecutor {  // command/VibeCommand.
 ```
 `/vibe list` prints hoverable/clickable lines using Paper's Adventure API (net.kyori.adventure, part of paper-api).
 
-## Wiring (owned by architect in VibeMod.java — for reference only)
+## Wiring (VibeMod.java)
 onEnable: read config → construct compiler/client/store/watchdog/dynCommands/registry/generator/ui →
 register /vibe (declared in plugin.yml) → async boot-restore: for each StoredMod enabled=true, compile
 sources(current version) and registry.load on main thread.
@@ -235,7 +238,7 @@ sources(current version) and registry.load on main thread.
 ## config.yml (defaults)
 ```yaml
 openrouter:
-  api-key: ""            # or env OPENROUTER_API_KEY, or ~/.config/vibemine/openrouter.key
+  api-key: ""            # or env OPENROUTER_API_KEY, or ~/.config/vibemod/openrouter.key
   model: anthropic/claude-sonnet-5
   timeout-seconds: 120
 generation:
@@ -256,7 +259,7 @@ v2 theme: per-mod config knobs with LIVE reads, model-written manuals + introspe
 facts, writable-book workflows, a teaching GUI, diff-based repair rounds, /vibe reload.
 Everything in the v1 sections above still holds unless amended here.
 
-## Amended frozen files (already rewritten — read them, do not modify)
+## Amended frozen files
 - `api/VibeContext.java`: gains `configBool/configInt/configDouble/configString(String key)`.
   Resolution: stored value → knob default → type zero + one-time warning. Prompt rule: mods read
   config at the moment of use, never cache in fields.
@@ -266,7 +269,7 @@ Everything in the v1 sections above still holds unless amended here.
   boolean|integer|decimal|text|choice) and `EditBlock(path, find, replace)`, plus
   `isEditResponse()`. usage/manual/config/edits all optional.
 
-## store/ModStore.java v2 (owner: agent B)
+## store/ModStore.java v2
 ```java
 public record StoredVersion(int version, String prompt, String model, long createdAt) {}  // unchanged
 public record StoredMod(String name, String description, String usage, String manual,
@@ -283,7 +286,7 @@ public void setConfigValue(String name, String key, String rawValue)  // validat
 public Map<String,String> resolvedConfigValues(String name)  // schema defaults overlaid with stored values
 ```
 
-## store/ModConfigs.java — NEW (owner: agent B)
+## store/ModConfigs.java — NEW in v2
 In-memory live-read cache the runtime contexts hit on every event; persistence via ModStore.
 ```java
 public final class ModConfigs {
@@ -301,14 +304,14 @@ public final class ModConfigs {
 ```
 Thread-safety: reads are hot-path (event handlers) — ConcurrentHashMap, no locks on read.
 
-## store/JarExporter.java v2 (owner: agent B)
+## store/JarExporter.java v2
 - Generated `StandaloneContext` implements the four config accessors by reading the exported
   plugin's own Bukkit config (`plugin.getConfig().getBoolean/Long/Double/String(key, <default>)`),
   defaults baked from the schema at export time.
 - Export embeds a `config.yml` seeded with the mod's current resolved values, each key preceded
   by a `# <description>` comment line. plugin wrapper calls `saveDefaultConfig()` in onEnable.
 
-## runtime/ModRegistry.java v2 (owner: agent C)
+## runtime/ModRegistry.java v2
 ```java
 public ModRegistry(Plugin plugin, DynamicCommands commands, Watchdog watchdog, ModConfigs configs)
 public ModHandle load(String name, int version, String description, String mainClassFqcn,
@@ -321,15 +324,15 @@ public ModHandle load(String name, int version, String description, String mainC
   disable(): keep registered (values still viewable/settable while off).
 - VibeContextImpl implements the four accessors → configs.bool(displayName, key) etc.
 
-## runtime reload setters (owner: agent C)
+## runtime reload setters
 - `Watchdog`: `public void setBudgets(long singleInvocationMs, long perSecondBudgetMs)` — volatile
   fields; 0/negative single budget = disabled (same semantics as constructor).
 - `DynamicCommands`: `public void setAllowTopLevel(boolean allow)` — volatile; affects future
   registrations only.
-- `OpenRouterClient` (owner: agent A): `public void setTimeout(Duration timeout)` — volatile,
+- `OpenRouterClient`: `public void setTimeout(Duration timeout)` — volatile,
   used for subsequent requests.
 
-## llm/PromptLibrary.java v2 (owner: agent A)
+## llm/PromptLibrary.java v2
 - systemPrompt(): update the embedded VibeContext source to the REAL current file content
   (copy it verbatim from api/VibeContext.java); output contract adds:
   `"usage"`: one-line "try this" hint (e.g. "Kill a creeper and watch"),
@@ -358,7 +361,7 @@ public ModHandle load(String name, int version, String description, String mainC
   ModCommandHandler constants match the real api/*.java files ignoring leading/trailing whitespace
   per line — read the real files from disk relative to a base dir passed as args[0].
 
-## ui/BookFlows.java + ui/ConfigBookParser.java — NEW (owner: agent D)
+## ui/BookFlows.java + ui/ConfigBookParser.java — NEW in v2
 PDC keys (NamespacedKey(plugin,...)): `book-kind` (prompt|edit|config), `book-mod`,
 `book-mod-version` (int), `book-owner` (player UUID string), `book-id` (random UUID string).
 Capture must work from PDC alone (restart-safe); soft session map only for hints.
@@ -377,7 +380,7 @@ public final class BookFlows implements Listener {
     public void giveConfigBook(Player p, String modName, int modVersion, List<ConfigEntry> entries);
 }
 ```
-Behavior (validated against Paper source — see plan):
+Behavior (validated against Paper source):
 - PlayerEditBookEvent is main-thread; isSigning() distinguishes Done vs Sign; PDC survives the
   round-trip (read it from event.getNewBookMeta().getPersistentDataContainer()).
 - prompt/edit books: Done = ignore (vanilla draft save). Sign = read pages + title, setCancelled(true),
@@ -405,7 +408,7 @@ suggestion (edit distance <=2 or prefix); duplicate key -> last wins + warning e
 Self-test: plugin/src/test/java/BookParserSelfTest.java (plain main, pure JVM) covering grammar,
 comments, suggestions, duplicates, partial updates, §-stripping, empty input.
 
-## ui v2 + command (owner: agent E)
+## ui v2 + command
 ```java
 public record GuiCallbacks(BiConsumer<Player,String> export,
                            BiConsumer<Player,String> applyVersion,
@@ -465,8 +468,8 @@ public final class VibeCommand implements TabExecutor {   // REWORK — new cons
 - On successful generation, onGenerationDone prints the InstallCard (fetch store.get(result.modName())).
 - help updated; keep every v1 subcommand working.
 
-## gen/ModGenerator v2 + VibeMod v2 (owner: ARCHITECT — do not implement)
-For reference: ModGenerator applies EditBlocks to the previous round's sources (exact-unique match
+## gen/ModGenerator v2 + VibeMod v2 (wiring)
+ModGenerator applies EditBlocks to the previous round's sources (exact-unique match
 per file; failure -> next round uses PromptLibrary.demandFullProject), carries forward
 usage/manual/config when an edit response omits them, and calls the 7-arg registry.load with the
 schema+values (values from store after save). VibeMod constructs ModConfigs, BookFlows, GuiCallbacks,
@@ -496,17 +499,18 @@ its finish() dedupe.
   Applies to the main list item AND the detail-panel header item.
 
 ============================================================================
-# V3 ADDENDUM — rename to VibeMod, debuggability, native dialogs
+# V3 ADDENDUM — the VibeMod rename, debuggability, native dialogs
 ============================================================================
-The approved v3 plan (rename + degraded/fix/debug + dialog UX) is frozen in
-/Users/gijsmulder/.claude/plans/this-is-actually-a-synthetic-lampson.md — read it FIRST; its
-"Design" section IS the frozen spec (surfaces quoted there are exact). Extra implementation
-contracts not fully spelled out there:
+v3 theme: the plugin's public rename to VibeMod, runtime debuggability (per-mod error logs, a
+degraded state, `/vibe fix`, `/vibe debug`), and native Paper dialogs replacing book-based UI.
+Everything in the v1/v2 sections above still holds unless amended here.
 
-## Already done by the architect (do not modify)
-- api/Mod.java (the renamed interface) + api/VibeMod.java (deprecated bridge `VibeMod extends Mod`).
+## api rename
+- The api contract interface generated mods implement was renamed `VibeMod` → `Mod`
+  (api/Mod.java). A deprecated bridge `VibeMod extends Mod` (api/VibeMod.java) is kept so
+  pre-v3 generated sources keep compiling; new generations teach and emit `implements Mod`.
 
-## Style helper (owner: agent U) — ui/Style.java
+## Style helper — ui/Style.java
 ```java
 public final class Style {
     public static Component prefix()                       // "⬡ vibe " gradient-ish (two-tone), non-italic
@@ -521,7 +525,7 @@ public final class Style {
 ALL user-facing chat lines in ui/ + command/ route through Style. Semantic colors: GREEN success,
 GOLD degraded/warn, RED error, AQUA clickable/actions, GRAY info.
 
-## Dialogs (owner: agent U) — implementation notes beyond the plan
+## Dialogs — ui/Dialogs.java implementation notes
 - Imports: io.papermc.paper.dialog.Dialog, io.papermc.paper.registry.data.dialog.{DialogBase,ActionButton},
   .input.DialogInput (+TextDialogInput.MultilineOptions), .body.DialogBody, .type.DialogType,
   .action.DialogAction; net.kyori.adventure.text.event.ClickCallback.
@@ -540,16 +544,16 @@ GOLD degraded/warn, RED error, AQUA clickable/actions, GRAY info.
   prepend "Name hint: <v>\n" to the prompt text (same convention BookFlows used).
 - WAIT_FOR_RESPONSE afterAction on prompt/edit submit buttons; config uses CLOSE.
 
-## Virtual books (owner: agent U) — ui/VirtualBooks.java
-Replaces ManualBook + SourceBook giving; DELETE ManualBook.java and SourceBook.java (fold their
-pagination logic in; keep the 256-char/13-line page budget as static helpers). Book building:
+## Virtual books — ui/VirtualBooks.java
+Replaces ManualBook + SourceBook giving; ManualBook.java and SourceBook.java were deleted (their
+pagination logic folded in; the 256-char/13-line page budget kept as static helpers). Book building:
 net.kyori.adventure.inventory.Book.book(Component title, Component author, List<Component> pages);
-player.openBook(book). Signatures exactly as in the plan (openManual/openSource/openErrors).
+player.openBook(book). Surface: openManual/openSource/openErrors.
 openErrors pages: one error per section — "3× NullPointerException", where-line, relative time,
 then the truncated stack lines. VibeCommand console paths keep chat dumps (move the dump helpers
 into VibeCommand or VirtualBooks statics taking CommandSender).
 
-## GUI callbacks (owner: agent U) — ui/GuiCallbacks.java v3 (replaces v2 record)
+## GUI callbacks — ui/GuiCallbacks.java v3 (replaces the v2 record)
 ```java
 public record GuiCallbacks(BiConsumer<Player,String> export,
                            BiConsumer<Player,String> applyVersion,     // = per-mod [reload]
@@ -564,7 +568,7 @@ public record GuiCallbacks(BiConsumer<Player,String> export,
 ```
 ModBrowserGui ctor: (Plugin, ModRegistry, ModStore, ModConfigs, ModErrors, DebugEcho, GuiCallbacks).
 
-## ModErrors detail (owner: agent D)
+## ModErrors — runtime/ModErrors.java detail
 - errors.json shape: {"records":[ErrorRecord...]} Gson pretty; file lives at <modsDir>/<Name>/errors.json.
 - report(mod,n): "== <mod> errors ==\n" + per record "N× <cls>: <msg>\n  at <topFrame> (<where>, last <rel-time>)\n<indented stack>".
 - Relative-time helper package-private static (also used by UI via recent() records' lastSeen).
@@ -575,7 +579,7 @@ ModBrowserGui ctor: (Plugin, ModRegistry, ModStore, ModConfigs, ModErrors, Debug
   make the Bukkit scheduler hop injectable (Consumer<Runnable> mainThreadRunner param defaulting to
   Runnable::run in a test ctor) — implementer's choice, but the self-test must run without Bukkit).
 
-## VibeCommand v3 (owner: agent U) — behavior notes
+## VibeCommand v3 — behavior notes
 - `make`/`edit` argless + player -> dialogs.openPrompt/openEdit; console argless -> usage error.
 - `fix <mod>`: sender==Player -> dialogs.openFixConfirm; console -> run fix immediately
   (generator.fix with errors.report(mod,8)) — console needs no confirm.
