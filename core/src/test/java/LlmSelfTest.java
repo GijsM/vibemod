@@ -37,6 +37,7 @@ public class LlmSelfTest {
         testParseEditShape();
         testParseBothShapesThrows();
         testParseNeitherShapeThrows();
+        testParseResourceFiles();
         testConfigKnobParsing();
         testParseIconMapping();
         testParseChangelogMapping();
@@ -167,6 +168,59 @@ public class LlmSelfTest {
             System.out.println("PASS: parse() rejects BOTH files+edits: " + expected.getMessage());
         } catch (Exception e) {
             fail("both-shapes input threw wrong exception type: " + e.getClass() + ": " + e);
+        }
+    }
+
+    /**
+     * V3 Phase 2 §A: {@code files[]} carries resources, and the malformed ones
+     * are refused HERE — where the refusal becomes a self-heal round with the
+     * model's own text in it, rather than a stack trace at load time.
+     */
+    private static void testParseResourceFiles() {
+        String ok = "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                + "{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"},"
+                + "{\"path\":\"data/foo/recipe/thing.json\",\"content\":\"{}\"},"
+                + "{\"path\":\"assets/foo/textures/item/t.png.grid\","
+                + "\"content\":\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"aa\\\",\\\"aa\\\"]}\"}]}";
+        var project = PromptLibrary.parse(ok);
+        check("parse() accepts data/ and assets/ paths alongside .java",
+                project.files().size() == 3);
+        check("parse() keeps a resource file's full path",
+                project.files().get(1).path().equals("data/foo/recipe/thing.json"));
+
+        expectParseFailure("a path that is neither .java nor a resource root",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"notes.txt\",\"content\":\"x\"}]}");
+        expectParseFailure("a resource path that escapes its root",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"data/foo/../../evil.json\",\"content\":\"{}\"}]}");
+        expectParseFailure("a resource path with no file in it",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"data/foo\",\"content\":\"{}\"}]}");
+        expectParseFailure("a non-square pixel grid",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"assets/foo/textures/item/t.png.grid\",\"content\":"
+                        + "\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"aaa\\\",\\\"aaa\\\"]}\"}]}");
+        expectParseFailure("a pixel grid using a character it never declared",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"assets/foo/textures/item/t.png.grid\",\"content\":"
+                        + "\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"ab\\\",\\\"aa\\\"]}\"}]}");
+
+        // The edit shape learned resources too, or an edit round could never
+        // touch a recipe it had already written.
+        var edited = PromptLibrary.parse("{\"name\":\"Foo\",\"edits\":[{"
+                + "\"path\":\"data/foo/recipe/thing.json\",\"find\":\"a\",\"replace\":\"b\"}]}");
+        check("parse() accepts an edit block that targets a resource file",
+                edited.isEditResponse()
+                        && edited.edits().get(0).path().equals("data/foo/recipe/thing.json"));
+    }
+
+    private static void expectParseFailure(String what, String json) {
+        try {
+            PromptLibrary.parse(json);
+            fail("parse() accepted " + what);
+        } catch (IllegalArgumentException expected) {
+            System.out.println("PASS: parse() rejects " + what + ": " + expected.getMessage());
         }
     }
 
@@ -490,9 +544,9 @@ public class LlmSelfTest {
         check("the fabric-legacy prompt counts its own few-shots (three)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC_LEGACY)
                         .contains("The following three examples show"));
-        check("the native fabric prompt counts its own few-shots (two)",
+        check("the native fabric prompt counts its own few-shots (three)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC)
-                        .contains("The following two examples show"));
+                        .contains("The following three examples show"));
 
         if (failures == 0) {
             System.out.println("PASS: Bukkit vocabulary is confined to the Paper profiles, and every "
@@ -554,8 +608,57 @@ public class LlmSelfTest {
         check("the native prompt restates the singleplayer shared-JVM race",
                 prompt.contains("share one JVM") && prompt.contains("NEVER read or")
                         && prompt.contains("write server state from client code"));
-        check("the native prompt still refuses registries and resources",
+        check("the native prompt still refuses registries",
                 prompt.contains("STILL NOT AVAILABLE") && prompt.contains("Registry.register"));
+
+        // ---- V3 Phase 2 §E: resources ----
+        check("the native prompt lifts the resource ban and teaches the two roots",
+                prompt.contains("RESOURCE FILES")
+                        && prompt.contains("`data/**` and `assets/**`")
+                        && !prompt.contains("resource packs, and `ClientCommandRegistrationCallback`"));
+        check("the native prompt states the canonical namespace rule",
+                prompt.contains("YOUR NAMESPACE IS `vibemod_<name lowercased>`"));
+        check("the native prompt says which data types are live and which wait for a world load",
+                prompt.contains("LIVE IMMEDIATELY, gone again on disable")
+                        && prompt.contains("ONLY ON THE NEXT WORLD LOAD")
+                        && prompt.contains("enchantments, dialogs, damage types"));
+        check("the native prompt teaches the .png.grid texture format",
+                prompt.contains(".png.grid") && prompt.contains("\"palette\"")
+                        && prompt.contains("at most 64x64"));
+        check("the native prompt says assets are inert on a dedicated server",
+                prompt.contains("stored and inert"));
+        check("the native prompt teaches the registry-free custom item",
+                prompt.contains("A \"CUSTOM ITEM\" WITHOUT A REGISTRY")
+                        && prompt.contains("minecraft:item_model"));
+        check("the native prompt allows resource paths in files[]",
+                prompt.contains("or a RESOURCE FILE whose \"path\" starts with"));
+        check("every other profile still accepts .java files ONLY",
+                PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                        .contains("has a \"path\" ending in \".java\"")
+                        && !PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                                .contains("RESOURCE FILE"));
+
+        // The Phase 2 few-shot, and specifically the JSON shapes that were read
+        // off the 26.2 jar rather than recalled — the two-file item model layout
+        // is the one a model trained on 1.20 gets wrong.
+        check("the Phase 2 few-shot ships a recipe, an advancement, a model and a grid texture",
+                prompt.contains("data/vibemod_rubycharm/recipe/ruby.json")
+                        && prompt.contains("data/vibemod_rubycharm/advancement/ruby.json")
+                        && prompt.contains("assets/vibemod_rubycharm/models/item/ruby.json")
+                        && prompt.contains("assets/vibemod_rubycharm/textures/item/ruby.png.grid"));
+        check("the Phase 2 few-shot uses the 26.x two-file item model layout",
+                prompt.contains("assets/vibemod_rubycharm/items/ruby.json")
+                        && prompt.contains("minecraft:item/generated"));
+        check("the Phase 2 few-shot's recipe is the 26.2 shape (verified against vanilla data)",
+                prompt.contains("minecraft:crafting_shaped")
+                        && prompt.contains("minecraft:custom_name")
+                        && prompt.contains("minecraft:item_model"));
+        check("the Phase 2 few-shot's advancement uses the real recipe_crafted trigger field",
+                prompt.contains("minecraft:recipe_crafted") && prompt.contains("recipe_id"));
+        check("the Phase 2 few-shot's namespace is the canonical one",
+                prompt.contains("vibemod_rubycharm") && !prompt.contains("\"rubycharm:"));
+        check("the native prompt fits its budget (" + prompt.length() + " <= 26000 chars)",
+                prompt.length() <= 26000);
         check("the native prompt no longer names the era's non-existent KeyBindingHelper",
                 !prompt.contains("KeyBindingHelper"));
         check("the native prompt carries the Yarn -> Mojang rename table",

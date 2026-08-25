@@ -12,6 +12,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.store.ModResources;
+import com.gijsm.vibemod.store.PixelGrid;
 
 /**
  * Builds the prompts sent to the LLM and parses its responses back into a
@@ -127,11 +129,18 @@ public final class PromptLibrary {
         sb.append("""
                 - "mainClass" is the simple (no package) name of the one public class that
                   implements ENTRYPOINT, and must have a public no-arg constructor.
-                - Every entry in "files" has a "path" ending in ".java" and "content" holding the
-                  complete, compilable source of that file (proper escaping of quotes/newlines
-                  since this is a JSON string).
-                - ALL files declare `package vibemod.<name lowercased>;` at the top (the mod name
-                  from the JSON, lowercased, no dots, no dashes).
+                """.replace("ENTRYPOINT", profile.entrypointName()));
+
+        // What may be in files[] is profile data (V3 Phase 2 §E): every profile
+        // but the native Fabric one accepts .java and nothing else, and saying
+        // "paths end in .java" AND "here is how to write a recipe" in the same
+        // prompt would be a contradiction the model has to resolve for itself.
+        sb.append(profile.filesContract());
+        if (!profile.filesContract().endsWith("\n")) {
+            sb.append('\n');
+        }
+
+        sb.append("""
                 - Exactly one public class across all files implements ENTRYPOINT.
                 - "config" is an array of tunable knobs, one object per knob:
                   {"key", "type", "default", "description", "min"?, "max"?, "step"?, "choices"?}.
@@ -514,7 +523,21 @@ public final class PromptLibrary {
             JsonObject fileObj = element.getAsJsonObject();
             String path = requireString(fileObj, "path");
             String content = requireString(fileObj, "content");
-            if (!path.endsWith(".java")) {
+            // V3 Phase 2 §A: files[] carries resources as well as sources now.
+            // Both halves are validated HERE rather than at the store, because a
+            // rejection here is a self-heal round with the model's own text in
+            // it, and a rejection at the store is a stack trace after the money
+            // has already been spent.
+            if (ModResources.isResourcePath(path)) {
+                ModResources.validate(path);
+                if (ModResources.isGridPath(path)) {
+                    try {
+                        PixelGrid.parse(content);
+                    } catch (IllegalArgumentException bad) {
+                        throw new IllegalArgumentException(path + ": " + bad.getMessage());
+                    }
+                }
+            } else if (!path.endsWith(".java")) {
                 throw new IllegalArgumentException("File path must end with .java, got: " + path);
             }
             files.add(new GeneratedProject.GeneratedFile(path, content));
@@ -536,8 +559,9 @@ public final class PromptLibrary {
             }
             JsonObject editObj = element.getAsJsonObject();
             String path = requireString(editObj, "path");
-            if (!path.endsWith(".java")) {
-                throw new IllegalArgumentException("Edit \"path\" must end with .java, got: " + path);
+            if (!path.endsWith(".java") && !ModResources.isResourcePath(path)) {
+                throw new IllegalArgumentException("Edit \"path\" must end with .java, or name a "
+                        + "data/ or assets/ resource file, got: " + path);
             }
             String find = requireString(editObj, "find");
             if (find.isEmpty()) {

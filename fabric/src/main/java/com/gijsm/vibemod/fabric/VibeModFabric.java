@@ -43,6 +43,10 @@ import com.gijsm.vibemod.loader.LoaderMessenger;
 import com.gijsm.vibemod.loader.LoaderModHost;
 import com.gijsm.vibemod.loader.LoaderSender;
 import com.gijsm.vibemod.loader.LoaderTickScheduler;
+import com.gijsm.vibemod.loader.content.ClientReloader;
+import com.gijsm.vibemod.loader.content.ClientResourceSink;
+import com.gijsm.vibemod.loader.content.LoaderModContent;
+import com.gijsm.vibemod.loader.content.ReloadCoordinator;
 import com.gijsm.vibemod.platform.ClientEventBridge;
 import com.gijsm.vibemod.platform.CompilerProvider;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -124,12 +128,16 @@ public final class VibeModFabric implements ModInitializer {
      *
      * <p>A record rather than a direct reference so that this class — which runs
      * on dedicated servers — never names a client-only type. Only
-     * {@link ClientEventBridge} (platform-api) and {@link ClientContext}
-     * (sdk-client, pure JDK) appear here, and both exist on every side.
+     * {@link ClientEventBridge} (platform-api), {@link ClientContext}
+     * (sdk-client, pure JDK) and V3 Phase 2's {@link ClientResourceSink} /
+     * {@link ClientReloader} (loader-common, deliberately free of client types
+     * for exactly this reason) appear here, and all four exist on every side.
      */
     public record ClientHooks(ClientEventBridge bridge,
                               Function<ModHandle, ClientContext> contexts,
-                              Watchdog renderWatchdog) {
+                              Watchdog renderWatchdog,
+                              ClientResourceSink resources,
+                              ClientReloader reloader) {
     }
 
     /**
@@ -141,7 +149,7 @@ public final class VibeModFabric implements ModInitializer {
     public record Services(MinecraftServer server, FabricPlatformInfo platform, ModLifecycle lifecycle,
                            ModStore store, ModErrors errors, LoaderMessenger messenger,
                            LoaderTickScheduler scheduler, UiRenderer ui, VibeRouter router,
-                           ChatRenderer chatRenderer) {
+                           ChatRenderer chatRenderer, ReloadCoordinator reloads) {
     }
 
     /** The live services, or null when no server is running. */
@@ -231,6 +239,10 @@ public final class VibeModFabric implements ModInitializer {
             Services live = services;
             if (live != null) {
                 live.scheduler().tick();
+                // V3 Phase 2 §C: the reload debounce rides the subscription that
+                // already exists rather than making a second one, and inherits
+                // its "null between worlds" lifetime for free.
+                live.reloads().tick();
             }
         });
 
@@ -427,6 +439,7 @@ public final class VibeModFabric implements ModInitializer {
         private ChatRenderer chatRenderer;
         private UiRenderer ui;
         private ModGenerator generator;
+        private ReloadCoordinator reloads;
         private FormScreens forms;
         private HubScreens hub;
         private InfoScreens info;
@@ -481,6 +494,16 @@ public final class VibeModFabric implements ModInitializer {
                     new FabricEntrypointAdapter());
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
 
+            // V3 Phase 2 §B/§C. Both halves are loader-neutral: the datapack
+            // channel is pure vanilla API (vanilla's own folder RepositorySource
+            // already scans <world>/datapacks/, so nothing is injected on the
+            // server side), and the client half is reached through two
+            // interfaces that name no client type, so this whole block is
+            // identical on NeoForge.
+            reloads = new ReloadCoordinator(server, hooks == null ? null : hooks.reloader());
+            lifecycle.setContent(new LoaderModContent(server, store, reloads,
+                    hooks == null ? null : hooks.resources()));
+
             // The render-thread watchdog reports to the same lifecycle and shares
             // its budgets: watchdogging a HUD renderer differs from watchdogging a
             // listener only in which thread is being measured (§8.4).
@@ -533,7 +556,7 @@ public final class VibeModFabric implements ModInitializer {
             commandBridge.reinstallInto(server.getCommands().getDispatcher());
 
             services = new Services(server, platform, lifecycle, store, modErrors, messenger,
-                    scheduler, ui, router, chatRenderer);
+                    scheduler, ui, router, chatRenderer, reloads);
 
             restoreModsFromDisk();
             LOG.info("VibeMod ready — /vibe make \"something wonderful\"");

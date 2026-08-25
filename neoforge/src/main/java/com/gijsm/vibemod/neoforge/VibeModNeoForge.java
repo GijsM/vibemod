@@ -54,6 +54,8 @@ import com.gijsm.vibemod.loader.LoaderMessenger;
 import com.gijsm.vibemod.loader.LoaderModHost;
 import com.gijsm.vibemod.loader.LoaderSender;
 import com.gijsm.vibemod.loader.LoaderTickScheduler;
+import com.gijsm.vibemod.loader.content.LoaderModContent;
+import com.gijsm.vibemod.loader.content.ReloadCoordinator;
 import com.gijsm.vibemod.loader.surgeon.BytecodeSurgeon;
 import com.gijsm.vibemod.loader.surgeon.SurgeonPolicy;
 import com.gijsm.vibemod.platform.ClientEventBridge;
@@ -147,7 +149,7 @@ public final class VibeModNeoForge {
     public record Services(MinecraftServer server, NeoForgePlatformInfo platform, ModLifecycle lifecycle,
                            ModStore store, ModErrors errors, LoaderMessenger messenger,
                            LoaderTickScheduler scheduler, UiRenderer ui, VibeRouter router,
-                           ChatRenderer chatRenderer) {
+                           ChatRenderer chatRenderer, ReloadCoordinator reloads) {
     }
 
     /** The live services, or null when no server is running. */
@@ -197,6 +199,8 @@ public final class VibeModNeoForge {
             Services live = services;
             if (live != null) {
                 live.scheduler().tick();
+                // V3 Phase 2 §C, on the subscription that already exists.
+                live.reloads().tick();
             }
         });
 
@@ -434,6 +438,7 @@ public final class VibeModNeoForge {
         private final DebugEcho debugEcho;
 
         private ModLifecycle lifecycle;
+        private ReloadCoordinator reloads;
         private ChatRenderer chatRenderer;
         private UiRenderer ui;
         private ModGenerator generator;
@@ -493,6 +498,16 @@ public final class VibeModNeoForge {
                     EntrypointAdapter.NONE);
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
 
+            // V3 Phase 2 §B/§C, and it is the SAME two lines the Fabric host
+            // runs, which is the whole claim: the datapack channel is vanilla
+            // API only (vanilla's folder RepositorySource already scans
+            // <world>/datapacks/), so NeoForge gets it for free. The client half
+            // is null here — NeoForge's client would need its own injection into
+            // the client PackRepository, so assets/** are stored and logged as
+            // inert (LoaderModContent says so, once, per mod).
+            reloads = new ReloadCoordinator(server, null);
+            lifecycle.setContent(new LoaderModContent(server, store, reloads, null));
+
             // The render-thread watchdog reports to the same lifecycle and shares
             // its budgets: watchdogging a HUD renderer differs from watchdogging a
             // listener only in which thread is being measured (§8.4).
@@ -544,7 +559,7 @@ public final class VibeModNeoForge {
             commandBridge.reinstallInto(server.getCommands().getDispatcher());
 
             services = new Services(server, platform, lifecycle, store, modErrors, messenger,
-                    scheduler, ui, router, chatRenderer);
+                    scheduler, ui, router, chatRenderer, reloads);
 
             restoreModsFromDisk();
             LOG.info("VibeMod ready — /vibe make \"something wonderful\"");

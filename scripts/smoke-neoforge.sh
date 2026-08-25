@@ -116,6 +116,9 @@ rcon.password=$RCON_PASSWORD
 level-type=minecraft\:flat
 level-seed=1
 spawn-protection=0
+# No players ever join this gate, and since 1.21.2 an empty server STOPS TICKING
+# after a minute — which would freeze V3 Phase 2's tick-driven reload debounce.
+pause-when-empty-seconds=0
 max-players=5
 view-distance=4
 simulation-distance=4
@@ -233,6 +236,93 @@ meta = {
 open(sys.argv[1], "w").write(json.dumps(meta, indent=2))
 META
 
+# ----------------------------------------------------- the V3 resource canary
+# V3 Phase 2 §F. The datapack channel is loader-common and vanilla API only —
+# vanilla's own folder RepositorySource already scans <world>/datapacks/, so
+# nothing had to be injected on the server side — which means NeoForge should
+# get it for free. This canary is the claim, checked: same files, same
+# assertions, on a host that shares not one line of Fabric code.
+#
+# Mod flavor rather than a native entrypoint, because NeoForge has no bytecode
+# seams yet (see FabricOnNeo below); the resource half is the part under test
+# and it is identical either way.
+mkdir -p "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/recipe" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang"
+
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/ResourceCanary.java" <<'RES'
+package vibemod.resourcecanary;
+
+import com.gijsm.vibemod.api.Mod;
+import com.gijsm.vibemod.api.VibeContext;
+
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.item.crafting.RecipeHolder;
+
+/**
+ * Ships a datapack and reports whether it reached the live game.
+ *
+ * <p>It asks the vanilla RecipeManager, which is the object that would be
+ * unchanged if the datapack channel did nothing here.
+ */
+public final class ResourceCanary implements Mod {
+
+    private static final String NS = "vibemod_resourcecanary";
+
+    @Override
+    public void onEnable(VibeContext ctx) {
+        ctx.command("rescanary", "V3 resource canary", (src, args) -> {
+            boolean recipe = false;
+            for (RecipeHolder<?> holder : src.getServer().getRecipeManager().getRecipes()) {
+                if (holder.id().identifier().toString().equals(NS + ":ruby")) {
+                    recipe = true;
+                    break;
+                }
+            }
+            src.sendSystemMessage(Component.literal("resource-canary recipe=" + recipe));
+        });
+    }
+}
+RES
+
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/recipe/ruby.json" <<'RECIPE'
+{
+  "type": "minecraft:crafting_shaped",
+  "key": {"#": "minecraft:redstone", "X": "minecraft:amethyst_shard"},
+  "pattern": [" # ", "#X#", " # "],
+  "result": {
+    "id": "minecraft:amethyst_shard",
+    "components": {
+      "minecraft:custom_name": {"text": "Ruby Charm", "color": "red", "italic": false}
+    }
+  }
+}
+RECIPE
+
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function/hello.mcfunction" <<'FN'
+say resource-canary-fn-ok
+FN
+
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang/en_us.json" <<'LANG'
+{"item.vibemod_resourcecanary.ruby": "Ruby Charm"}
+LANG
+
+python3 - "$RUN/vibemod/mods/ResourceCanary/meta.json" "$MC_VERSION" <<'META4'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "neoforge", "mcVersion": sys.argv[2], "side": "server",
+    "name": "ResourceCanary",
+    "description": "A mod that ships a datapack: a recipe and a function.",
+    "usage": "", "manual": "", "icon": "AMETHYST_SHARD",
+    "mainClass": "vibemod.resourcecanary.ResourceCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V3 resource canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First resource canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META4
+
 # ------------------------------------------------- the wrong-loader-API canary
 # V3 Phase 0 gave Fabric bytecode seams for `Event.register`; NeoForge has none
 # yet. So a mod written against the Fabric API is a mod this host cannot honour,
@@ -344,6 +434,16 @@ for i in $(seq 1 180); do
   grep -q 'SmokeCanary v1 is live' "$LOG" 2>/dev/null && { note "canary live after ${i}s"; break; }
   sleep 1
 done
+for i in $(seq 1 180); do
+  grep -q 'ResourceCanary v1 is live' "$LOG" 2>/dev/null && { note "resource canary live after ${i}s"; break; }
+  sleep 1
+done
+# V3 Phase 2 §C: the datapack is written during the load, but the reload that
+# makes it LIVE is debounced by 40 ticks. Nothing about it is true until then.
+for i in $(seq 1 60); do
+  grep -q 'Server data reloaded in' "$LOG" 2>/dev/null && { note "first data reload after ${i}s"; break; }
+  sleep 1
+done
 
 # ------------------------------------------------------------------ asserts
 note "asserting on the boot log"
@@ -357,6 +457,7 @@ assert "the hot-load class-file ceiling is the JVM's own version" \
   in_file "$LOG" 'load through BytesClassLoader'
 assert "generated mods target the running JVM's release" in_file "$LOG" 'target=java25'
 assert "the canned mod compiled and hot-loaded" in_file "$LOG" 'SmokeCanary v1 is live'
+assert "the V3 resource canary compiled and hot-loaded" in_file "$LOG" 'ResourceCanary v1 is live'
 assert "the mod's own onEnable ran" in_file "$LOG" 'SmokeCanary enabled'
 assert "ctx.client() was inert on a dedicated server" in_file "$LOG" 'hasClient=false'
 assert "native dialogs were chosen as the renderer" in_file "$LOG" 'UI: native dialogs'
@@ -423,6 +524,45 @@ assert "re-enabling re-registered the command in the live dispatcher" \
 
 note "asserting the teardown actually ran"
 assert "onDisable ran on disable" in_file "$LOG" 'SmokeCanary disabled after'
+
+# ------------------------------------------------- V3 Phase 2: the datapack
+# The claim: the channel is loader-common and vanilla API only, so NeoForge got
+# it for free. Same canary, same files, same assertions as the Fabric gate.
+note "asserting on the V3 resource canary's datapack (V3 Phase 2 F)"
+PACK_DIR="$RUN/world/datapacks/vibemod-resourcecanary"
+assert "a mod's data/** was materialized as a world datapack on NeoForge too" \
+  test -d "$PACK_DIR"
+assert "the pack carries a manifest" test -f "$PACK_DIR/pack.mcmeta"
+assert "the host logged the materialization" \
+  in_file "$LOG" 'Datapack vibemod-resourcecanary materialized'
+assert "the coordinator ran a reload for it" in_file "$LOG" 'Server data reloaded in'
+assert "assets/** were stored but reported inert (no client pack on this host)" \
+  in_file "$LOG" 'this host has no client resource pack'
+
+PRCON="$RUN/pack-rcon.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "datapack list enabled" \
+  "rescanary" \
+  "function vibemod_resourcecanary:hello" \
+  | tee "$PRCON"
+assert "the world enabled the pack" in_file "$PRCON" 'vibemod-resourcecanary'
+assert "the recipe is in the LIVE recipe manager" in_file "$PRCON" 'recipe=true'
+assert "the mod's mcfunction runs" in_file "$LOG" 'resource-canary-fn-ok'
+
+DONE_BEFORE="$(grep -c 'Server data reloaded in' "$LOG" || true)"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe disable ResourceCanary" \
+  > /dev/null
+assert "disabling removed the datapack directory immediately" test ! -d "$PACK_DIR"
+for i in $(seq 1 30); do
+  test "$(grep -c 'Server data reloaded in' "$LOG")" -gt "$DONE_BEFORE" && break
+  sleep 1
+done
+GRCON="$RUN/pack-gone.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "datapack list enabled" "function vibemod_resourcecanary:hello" | tee "$GRCON"
+assert "the pack is no longer selected" not_in_file "$GRCON" 'file/vibemod-resourcecanary'
+assert "and its function no longer resolves" in_file "$GRCON" 'Unknown function'
+assert "no missing-data-pack warning was produced" not_in_file "$LOG" 'Missing data pack'
 
 cleanup
 trap - EXIT

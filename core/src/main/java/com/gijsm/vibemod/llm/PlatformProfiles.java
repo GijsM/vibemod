@@ -119,6 +119,35 @@ public final class PlatformProfiles {
               silent.""";
 
     /**
+     * The {@code files[]} rule for every profile that has only ever accepted
+     * Java (V3 Phase 2 §E). Byte-for-byte the two bullets that used to be
+     * hardcoded in {@code PromptLibrary}'s skeleton, so the four profiles that
+     * did not change produce a byte-identical prompt.
+     */
+    private static final String JAVA_ONLY_FILES = """
+            - Every entry in "files" has a "path" ending in ".java" and "content" holding the
+              complete, compilable source of that file (proper escaping of quotes/newlines
+              since this is a JSON string).
+            - ALL files declare `package vibemod.<name lowercased>;` at the top (the mod name
+              from the JSON, lowercased, no dots, no dashes).""";
+
+    /**
+     * The native Fabric profile's {@code files[]} rule (V3 Phase 2 §A/§E): Java
+     * plus a real {@code data/**}/{@code assets/**} resource tree.
+     *
+     * <p>The namespace is stated rather than left to the model. It is rewritten
+     * onto the canonical one either way ({@code ModResources.canonicalize}), but
+     * a model that writes the right one produces a mod whose Java and whose
+     * lang keys agree — and Java is not rewritten.
+     */
+    private static final String NATIVE_FABRIC_FILES = """
+            - Every "files" entry is either a JAVA SOURCE - "path" ending in ".java", "content"
+              the complete compilable source - or a RESOURCE FILE whose "path" starts with
+              "data/" or "assets/" (see RESOURCE FILES below).
+            - ALL java files declare `package vibemod.<name lowercased>;` at the top (the mod
+              name from the JSON, lowercased, no dots, no dashes).""";
+
+    /**
      * The config-knob contract for every profile that HAS config: expose the
      * tunables, and read them live rather than caching them.
      *
@@ -235,7 +264,8 @@ public final class PlatformProfiles {
             "1.20",
             PAPER_ICON_INSTRUCTION,
             "Mod",
-            CTX_CONFIG_CONTRACT);
+            CTX_CONFIG_CONTRACT,
+            JAVA_ONLY_FILES);
 
     /**
      * Paper 1.20.6-1.21.6. {@code api-version: '1.20'} — the floor VibeMod
@@ -254,7 +284,8 @@ public final class PlatformProfiles {
             "1.20",
             PAPER_ICON_INSTRUCTION,
             "Mod",
-            CTX_CONFIG_CONTRACT);
+            CTX_CONFIG_CONTRACT,
+            JAVA_ONLY_FILES);
 
     // ------------------------------------------------------------------
     // The two loaders (MC 26.1+). Phase D wrote this half expecting NeoForge to
@@ -421,7 +452,8 @@ public final class PlatformProfiles {
             "",
             LOADER_ICON_INSTRUCTION,
             "Mod",
-            CTX_CONFIG_CONTRACT);
+            CTX_CONFIG_CONTRACT,
+            JAVA_ONLY_FILES);
 
     /**
      * NeoForge on MC 26.1+ (§6.2, Phase E).
@@ -450,7 +482,8 @@ public final class PlatformProfiles {
             "",
             LOADER_ICON_INSTRUCTION,
             "Mod",
-            CTX_CONFIG_CONTRACT);
+            CTX_CONFIG_CONTRACT,
+            JAVA_ONLY_FILES);
 
     // ------------------------------------------------------------------
     // V3: the native Fabric profile (Phase 0 §E)
@@ -509,9 +542,10 @@ public final class PlatformProfiles {
               `net.fabricmc.fabric.mixin.*`).
             - NEVER call `Event.addPhaseOrdering(...)`. Phase order is global and permanent,
               so it cannot be undone when your mod is disabled.
-            - NEVER register content: no items, no blocks, no entity types, no recipes, no
+            - NEVER register content in JAVA: no items, no blocks, no entity types, no
               `Registry.register` of any kind. Registries are frozen long before your mod
-              loads.""";
+              loads. (Recipes, advancements, models, textures and lang are RESOURCE FILES
+              instead - see RESOURCE FILES below.)""";
 
     private static final String NATIVE_FABRIC_THREADING = """
             - `onInitialize()` and every SERVER callback you register run on the MAIN SERVER
@@ -554,9 +588,33 @@ public final class PlatformProfiles {
             - SCREENS: you may subclass `net.minecraft.client.gui.screens.Screen` and open it
               from client code. The host closes it for you if your mod is disabled while it
               is open.
+            - RESOURCE FILES. You may ship the same `data/**` and `assets/**` tree a real mod
+              jar would, as extra "files" entries whose "content" is the file's text. They
+              install on load and are removed on disable. The RubyCharm example below shows
+              the whole shape - copy its layout.
+              * YOUR NAMESPACE IS `vibemod_<name lowercased>` - the mod name from the JSON,
+                lowercased, anything not a-z/0-9 replaced by `_`. Use it everywhere: in paths,
+                in ids inside the JSON, and in any translation key your Java names.
+              * LIVE IMMEDIATELY, gone again on disable: `data/<ns>/recipe/…`,
+                `advancement/…`, `function/<name>.mcfunction`, `loot_table/…`, `predicate/…`,
+                `item_modifier/…`, `tags/…`.
+              * ONLY ON THE NEXT WORLD LOAD: enchantments, dialogs, damage types, jukebox
+                songs, painting variants, `worldgen/`. Avoid unless the player asked.
+              * CLIENT FILES (`assets/**`) only work on a physical client; on a dedicated
+                server they are stored and inert, which is fine. Text goes in
+                `assets/<ns>/lang/en_us.json`; a custom icon needs
+                `assets/<ns>/items/<name>.json`, `assets/<ns>/models/item/<name>.json` and the
+                texture - see the example for the exact 26.x shapes.
+              * TEXTURES ARE PIXEL GRIDS: you cannot emit binary PNG, so write
+                `assets/<ns>/textures/item/<name>.png.grid` = {"palette": {"a": "#8b1a1a",
+                ".": "transparent"}, "rows": ["..aa..", ".abba."]}. Square, at most 64x64
+                (16x16 is the vanilla item size), every row as long as the row count, every
+                character in the palette. The host encodes the PNG.
+            - A "CUSTOM ITEM" WITHOUT A REGISTRY: put components on a vanilla item in a recipe
+              result - `minecraft:custom_name`, `minecraft:lore`, `minecraft:item_model`,
+              `minecraft:enchantment_glint_override`. Craftable, with your own name and icon.
             - STILL NOT AVAILABLE: `Registry.register` of any kind (items, blocks, entity
-              types, recipes), resource packs, and `ClientCommandRegistrationCallback`. The
-              host refuses these today.
+              types) and `ClientCommandRegistrationCallback`. The host refuses these today.
             - If your mod does its setup when the server starts, register
               `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
               replays it for you if the server is already running when you are loaded.
@@ -608,7 +666,8 @@ public final class PlatformProfiles {
             "",
             LOADER_ICON_INSTRUCTION,
             "net.fabricmc.api.ModInitializer",
-            NATIVE_FABRIC_CONFIG_CONTRACT);
+            NATIVE_FABRIC_CONFIG_CONTRACT,
+            NATIVE_FABRIC_FILES);
 
     /** Every profile this build knows. */
     public static List<PlatformProfile> all() {

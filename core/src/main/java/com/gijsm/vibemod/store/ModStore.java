@@ -195,12 +195,33 @@ public final class ModStore {
 
         int nextVersion = existing == null ? 1 : maxVersion(existing) + 1;
 
+        // V3 Phase 2 §A: the same files[] carries Java sources and resource
+        // files. They are split here rather than at the call site because the
+        // rules differ in kind — a source is a bare simple name in the version
+        // directory, a resource is a whole subtree whose namespace is rewritten
+        // onto this mod's canonical one before a single byte reaches disk.
+        Map<String, String> rawResources = new LinkedHashMap<>();
+        List<GeneratedProject.GeneratedFile> javaFiles = new ArrayList<>();
+        for (GeneratedProject.GeneratedFile file : project.files()) {
+            if (ModResources.isResourcePath(file.path())) {
+                rawResources.put(ModResources.validate(file.path()), file.content());
+            } else {
+                javaFiles.add(file);
+            }
+        }
+        Map<String, String> resources = ModResources.canonicalize(name, rawResources);
+
         Path versionDir = dir.resolve("v" + nextVersion);
         try {
             Files.createDirectories(versionDir);
-            for (GeneratedProject.GeneratedFile file : project.files()) {
+            for (GeneratedProject.GeneratedFile file : javaFiles) {
                 String fileName = sanitizeFileName(file.path());
                 Files.writeString(versionDir.resolve(fileName), file.content(), StandardCharsets.UTF_8);
+            }
+            for (Map.Entry<String, String> resource : resources.entrySet()) {
+                Path target = versionDir.resolve(resource.getKey());
+                Files.createDirectories(target.getParent());
+                Files.writeString(target, resource.getValue(), StandardCharsets.UTF_8);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -239,7 +260,48 @@ public final class ModStore {
         return updated;
     }
 
-    /** Sources for one version of a mod: FQCN -> source text. */
+    /**
+     * Non-Java files for one version of a mod: {@code data/**}/{@code assets/**}
+     * relative path -> text content (V3 Phase 2 §A).
+     *
+     * <p>The paths and bodies are already on the mod's canonical namespace —
+     * {@link #saveNewVersion} rewrites them on the way in, so every reader of
+     * this map (the datapack channel, the client resource pack, the gates) sees
+     * one namespace and nobody has to remember to normalize.
+     */
+    public synchronized Map<String, String> resources(String name, int version) {
+        Path dir = resolveDir(name);
+        if (dir == null) {
+            return Map.of();
+        }
+        Path versionDir = dir.resolve("v" + version);
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String root : new String[] {ModResources.DATA_ROOT, ModResources.ASSETS_ROOT}) {
+            Path rootDir = versionDir.resolve(root);
+            if (!Files.isDirectory(rootDir)) {
+                continue;
+            }
+            try (var walk = Files.walk(rootDir)) {
+                List<Path> files = walk.filter(Files::isRegularFile).sorted().toList();
+                for (Path file : files) {
+                    result.put(versionDir.relativize(file).toString().replace('\\', '/'),
+                            Files.readString(file, StandardCharsets.UTF_8));
+                }
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Sources for one version of a mod: FQCN -> source text.
+     *
+     * <p>The {@code "*.java"} glob is on a NON-recursive directory stream, which
+     * is what keeps V3 Phase 2's {@code data/**}/{@code assets/**} subtrees out
+     * of the compiler's input without a second filter: resources always live at
+     * least two directories down, and sources are always bare names here.
+     */
     public synchronized Map<String, String> sources(String name, int version) {
         Path dir = resolveDir(name);
         if (dir == null) {

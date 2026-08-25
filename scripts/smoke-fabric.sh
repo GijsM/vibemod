@@ -98,6 +98,11 @@ rcon.password=$RCON_PASSWORD
 level-type=minecraft\:flat
 level-seed=1
 spawn-protection=0
+# No players ever join this gate, and since 1.21.2 an empty server STOPS TICKING
+# after a minute. Every tick-counting assertion here (and V3 Phase 2's whole
+# reload debounce, which is ticked) would then be measuring a paused server. Not
+# a weakening: the assertions get MORE deterministic, not less.
+pause-when-empty-seconds=0
 max-players=5
 view-distance=4
 simulation-distance=4
@@ -301,6 +306,133 @@ open(sys.argv[1], "w").write(json.dumps({
 }, indent=2))
 META3
 
+# ----------------------------------------------------- the V3 resource canary
+# V3 Phase 2. A plain Fabric mod whose interesting content is NOT Java: a
+# recipe, an advancement, an mcfunction and a lang file, shipped the way a real
+# mod jar ships them. The Java is eleven lines whose only job is to ANSWER the
+# question this gate cannot ask over RCON any other way — "is the recipe really
+# in the live RecipeManager, and the advancement in the live tree?" — because
+# `/recipe give @a <id>` resolves its target selector before its recipe
+# argument (verified by disassembling RecipeCommand), so with no players online
+# it fails identically for a real recipe and a made-up one.
+#
+# The files are written in the CANONICAL namespace already. A generated mod's
+# would be rewritten there by ModStore.saveNewVersion; this canary is written
+# straight to disk, so it has to arrive canonical. The rewrite itself is gated
+# in :core:selfTestStore, against the same helper.
+mkdir -p "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/recipe" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/advancement" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang"
+
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/ResourceCanary.java" <<'RES'
+package vibemod.resourcecanary;
+
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.item.crafting.RecipeHolder;
+
+/**
+ * Reports whether this mod's own datapack content reached the live game.
+ *
+ * <p>No VibeMod import anywhere, exactly like the other native canaries: it
+ * asks the vanilla RecipeManager and the vanilla advancement tree, which are
+ * the two objects that would be empty if the datapack channel did not work.
+ */
+public final class ResourceCanary implements ModInitializer {
+
+    private static final String NS = "vibemod_resourcecanary";
+
+    @Override
+    public void onInitialize() {
+        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
+                dispatcher.register(Commands.literal("rescanary").executes(ctx -> {
+                    MinecraftServer server = ctx.getSource().getServer();
+                    boolean recipe = false;
+                    for (RecipeHolder<?> holder : server.getRecipeManager().getRecipes()) {
+                        if (holder.id().identifier().toString().equals(NS + ":ruby")) {
+                            recipe = true;
+                            break;
+                        }
+                    }
+                    boolean advancement = server.getAdvancements()
+                            .get(Identifier.fromNamespaceAndPath(NS, "ruby")) != null;
+                    ctx.getSource().sendSystemMessage(Component.literal(
+                            "resource-canary recipe=" + recipe + " advancement=" + advancement));
+                    return 1;
+                })));
+    }
+}
+RES
+
+# The recipe shape is vanilla's own, read out of the 26.2 server jar
+# (data/minecraft/recipe/golden_apple.json for the pattern, and
+# suspicious_stew_from_blue_orchid.json for the result components block).
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/recipe/ruby.json" <<'RECIPE'
+{
+  "type": "minecraft:crafting_shaped",
+  "key": {"#": "minecraft:redstone", "X": "minecraft:amethyst_shard"},
+  "pattern": [" # ", "#X#", " # "],
+  "result": {
+    "id": "minecraft:amethyst_shard",
+    "components": {
+      "minecraft:custom_name": {"text": "Ruby Charm", "color": "red", "italic": false},
+      "minecraft:item_model": "vibemod_resourcecanary:ruby"
+    }
+  }
+}
+RECIPE
+
+# The `recipe_id` criterion field was read off RecipeCraftedTrigger$TriggerInstance's
+# codec, not recalled.
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/advancement/ruby.json" <<'ADV'
+{
+  "parent": "minecraft:adventure/root",
+  "criteria": {
+    "crafted": {
+      "trigger": "minecraft:recipe_crafted",
+      "conditions": {"recipe_id": "vibemod_resourcecanary:ruby"}
+    }
+  },
+  "display": {
+    "icon": {"id": "minecraft:amethyst_shard"},
+    "title": "A Warm Glow",
+    "description": "Craft a ruby charm."
+  }
+}
+ADV
+
+# The one observable that is pure datapack, with no mod code in the path at all.
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function/hello.mcfunction" <<'FN'
+say resource-canary-fn-ok
+FN
+
+# assets/** on a dedicated server: stored, inert, and SAID SO once.
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang/en_us.json" <<'LANG'
+{"advancements.vibemod_resourcecanary.ruby.title": "A Warm Glow"}
+LANG
+
+python3 - "$RUN/vibemod/mods/ResourceCanary/meta.json" <<'META4'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
+    "name": "ResourceCanary",
+    "description": "A plain Fabric mod that ships a datapack: a recipe, an advancement and a function.",
+    "usage": "", "manual": "", "icon": "AMETHYST_SHARD",
+    "mainClass": "vibemod.resourcecanary.ResourceCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V3 resource canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First resource canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META4
+
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
 cat > "$RUN/vibemod/mods/WrongPlatform/v1/WrongPlatform.java" <<'WRONG'
@@ -375,6 +507,17 @@ for i in $(seq 1 180); do
   grep -q 'NativeCanary v1 is live' "$LOG" 2>/dev/null && { note "native canary live after ${i}s"; break; }
   sleep 1
 done
+for i in $(seq 1 180); do
+  grep -q 'ResourceCanary v1 is live' "$LOG" 2>/dev/null && { note "resource canary live after ${i}s"; break; }
+  sleep 1
+done
+# V3 Phase 2 §C: the datapack is materialized during the load, but the reload
+# that makes it LIVE is debounced by 40 ticks and only runs once the server is
+# ticking. Nothing below is true until it has.
+for i in $(seq 1 60); do
+  grep -q 'Server data reloaded in' "$LOG" 2>/dev/null && { note "first data reload after ${i}s"; break; }
+  sleep 1
+done
 # "Live" is not "dispatching": restore-on-boot runs inside SERVER_STARTING, so
 # the mod is loaded a beat before the server begins ticking at all. Wait for the
 # first tick through the fanout, or the disable half of the gate below has no
@@ -408,6 +551,11 @@ assert "its END_SERVER_TICK subscription dispatches" in_file "$LOG" 'native-tick
 assert "nothing it registered was refused" not_in_file "$LOG" 'UnsupportedOperationException'
 assert "the mod source really has no VibeMod import" \
   not_in_file "$RUN/vibemod/mods/NativeCanary/v1/NativeCanary.java" 'com.gijsm.vibemod'
+assert "the V3 resource canary compiled and hot-loaded" in_file "$LOG" 'ResourceCanary v1 is live'
+assert "its resource files never reached the compiler" \
+  not_in_file "$LOG" 'ResourceCanary v1 failed to compile'
+assert "the resource canary's own source has no VibeMod import either" \
+  not_in_file "$RUN/vibemod/mods/ResourceCanary/v1/ResourceCanary.java" 'com.gijsm.vibemod'
 
 # V3 Phase 1 B: the client half of a two-entrypoint mod, on a machine with no
 # client. The mod must still load, the client entrypoint must not run, and the
@@ -543,11 +691,115 @@ RRCON="$RUN/cmd-reload.log"
 sleep 5
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "nativecmd" "smokeping" "vibe list" \
   | tee -a "$RRCON"
-assert "the host replayed the mod's command registration into the new dispatcher" \
-  in_file "$LOG" 'Replaying 1 mod command registration'
+# Two now, not one: the V3 Phase 2 resource canary registers /rescanary as well.
+assert "the host replayed both mods' command registrations into the new dispatcher" \
+  in_file "$LOG" 'Replaying 2 mod command registration'
 assert "the mod's own command still runs after /reload" in_file "$RRCON" 'native-cmd-ok'
 assert "and the v2 command bridge survived the same reload" in_file "$RRCON" 'smoke-pong howdy'
 assert "and /vibe itself survived the same reload" in_file "$RRCON" 'SmokeCanary'
+
+# ------------------------------------------------- V3 Phase 2: the datapack
+# The half that cannot be faked: a recipe and an advancement that exist in the
+# LIVE managers, asked of the managers themselves, and gone again when the mod
+# is. `/function` is the same claim with no mod code in the path at all — if
+# the datapack were merely written to disk and never reloaded, the function
+# would not resolve.
+note "asserting on the V3 resource canary's datapack (V3 Phase 2 B/C)"
+PACK_DIR="$RUN/world/datapacks/vibemod-resourcecanary"
+assert "a mod's data/** was materialized as a world datapack" test -d "$PACK_DIR"
+assert "the pack carries a manifest the running game wrote the format for" \
+  test -f "$PACK_DIR/pack.mcmeta"
+assert "the recipe landed in the pack at its canonical namespace" \
+  test -f "$PACK_DIR/data/vibemod_resourcecanary/recipe/ruby.json"
+assert "the host logged the materialization" \
+  in_file "$LOG" 'Datapack vibemod-resourcecanary materialized'
+assert "the coordinator ran a reload for it" in_file "$LOG" 'Server data reloaded in'
+assert "assets/** were stored but reported inert on a dedicated server" \
+  in_file "$LOG" 'this host has no client resource pack'
+
+PRCON="$RUN/pack-rcon.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "datapack list enabled" \
+  "rescanary" \
+  "function vibemod_resourcecanary:hello" \
+  | tee "$PRCON"
+assert "the world enabled the pack (no operator ever touched it)" \
+  in_file "$PRCON" 'vibemod-resourcecanary'
+assert "the recipe is in the LIVE recipe manager" in_file "$PRCON" 'recipe=true'
+assert "the advancement is in the LIVE advancement tree" in_file "$PRCON" 'advancement=true'
+assert "the mod's mcfunction runs" in_file "$LOG" 'resource-canary-fn-ok'
+
+# level.dat is where "Missing data pack" comes from: reloadResources writes the
+# surviving selection back through WorldData#setDataConfiguration, and the world
+# save persists it. Asserted in BOTH directions — remembered while the mod is
+# live, forgotten once it is not — because only the pair proves the write
+# happened rather than the read being broken.
+in_level_dat() {
+  python3 -c "import gzip,sys;print('yes' if b'$1' in gzip.open('$RUN/world/level.dat','rb').read() else 'no')"
+}
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "save-all flush" > /dev/null
+assert "level.dat remembers the pack while the mod is live" \
+  test "$(in_level_dat vibemod-resourcecanary)" = "yes"
+
+# Reload economy (§C): restoring four mods, three of which are live, must not
+# have cost one reload each. Asserted as <=, not ==, exactly as the brief says.
+RELOADS_BEFORE="$(grep -c 'Reloading server data' "$LOG" || true)"
+DONE_BEFORE="$(grep -c 'Server data reloaded in' "$LOG" || true)"
+assert "boot restore coalesced its reloads (${RELOADS_BEFORE} <= 2)" \
+  test "$RELOADS_BEFORE" -le 2
+
+note "asserting the datapack goes away with the mod"
+URCON="$RUN/pack-unload.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe disable ResourceCanary" \
+  | tee "$URCON"
+# The teardown only MARKS a reload pending — it must not run one inline, because
+# drain() is timed by the 250ms watchdog and a reload takes 200ms-2s. So the
+# directory goes at once and the reload lands a couple of seconds later.
+assert "disabling removed the datapack directory immediately" test ! -d "$PACK_DIR"
+# Waiting on the COMPLETION line, not the start line, and the difference is not
+# pedantry: reloadResources called on the server thread managed-blocks, and
+# managedBlock pumps the server's task queue — so an RCON command sent between
+# the two lines executes against the OLD function library and answers as if
+# nothing had changed. The first run of this gate asserted on the start line and
+# saw exactly that.
+for i in $(seq 1 30); do
+  test "$(grep -c 'Server data reloaded in' "$LOG")" -gt "$DONE_BEFORE" && break
+  sleep 1
+done
+assert "and a final reload was scheduled, not skipped" \
+  test "$(grep -c 'Reloading server data' "$LOG")" -gt "$RELOADS_BEFORE"
+assert "and that final reload finished" \
+  test "$(grep -c 'Server data reloaded in' "$LOG")" -gt "$DONE_BEFORE"
+assert "the watchdog never tripped on the teardown" not_in_file "$LOG" 'auto-disabled by the watchdog'
+
+GRCON="$RUN/pack-gone.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "datapack list enabled" \
+  "function vibemod_resourcecanary:hello" \
+  | tee "$GRCON"
+assert "the pack is no longer selected" not_in_file "$GRCON" 'file/vibemod-resourcecanary'
+assert "and its function no longer resolves" in_file "$GRCON" 'Unknown function'
+# The reason the final reload is not optional: reloadResources writes the
+# surviving selection back through WorldData#setDataConfiguration, so an id
+# whose folder is gone stops being remembered. Skip it and every future world
+# load warns about a missing pack forever.
+assert "no missing-data-pack warning was produced" not_in_file "$LOG" 'Missing data pack'
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "save-all flush" > /dev/null
+assert "and level.dat has FORGOTTEN the pack id, so a later boot cannot warn about it" \
+  test "$(in_level_dat vibemod-resourcecanary)" = "no"
+
+note "asserting the datapack comes back with the mod"
+BRCON="$RUN/pack-back.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe enable ResourceCanary" \
+  | tee "$BRCON"
+for i in $(seq 1 40); do
+  "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "rescanary" >> "$BRCON" 2>&1 || true
+  grep -q 'recipe=true' "$BRCON" && break
+  sleep 1
+done
+assert "re-enabling put the datapack directory back" test -d "$PACK_DIR"
+assert "re-enabling put the recipe back in the live manager" in_file "$BRCON" 'recipe=true'
+assert "nothing in the resource channel threw" not_in_file "$LOG" 'Could not write the datapack'
 
 cleanup
 trap - EXIT

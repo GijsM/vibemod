@@ -3,6 +3,7 @@ package com.gijsm.vibemod.fabric.client;
 import java.util.logging.Logger;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.fabric.shim.ClientShims;
@@ -43,10 +44,17 @@ public final class VibeModFabricClient implements ClientModInitializer {
     private static final long DEFAULT_BUDGET_MS = 500;
 
     private static volatile FabricClientEventBridge bridge;
+    /** The process-lived runtime resource pack (V3 Phase 2 §D); built once, here. */
+    private static volatile FabricClientPacks packs;
 
     /** The live client bridge, for the acceptance gate's state assertions. */
     public static FabricClientEventBridge bridge() {
         return bridge;
+    }
+
+    /** The runtime resource pack, for the acceptance gate's state assertions. */
+    public static FabricClientPacks packs() {
+        return packs;
     }
 
     @Override
@@ -89,10 +97,30 @@ public final class VibeModFabricClient implements ClientModInitializer {
         Shims.installClient(created);
         ClientShims.install(created);
 
+        // V3 Phase 2 §D. Built here for the same "process-lived, before the first
+        // mod" reason — and RESET here, which is the stale guard: at client init
+        // no world is loaded, so no mod is live, so the pack must be empty.
+        // Anything on disk at this moment is residue from a crash.
+        FabricClientPacks createdPacks =
+                new FabricClientPacks(FabricLoader.getInstance().getGameDir().resolve("vibemod"));
+        try {
+            createdPacks.resetOnClientInit();
+            // Best-effort: Minecraft's own repository field may not be assigned
+            // yet at this point in its constructor. The coordinator joins again
+            // before every reload, so "not yet" is never "not at all".
+            createdPacks.joinRepository();
+        } catch (Throwable t) {
+            LOG.warning("Could not prepare VibeMod's runtime resource pack: " + t);
+        }
+        packs = createdPacks;
+
         VibeModFabric.setClientHooks(new VibeModFabric.ClientHooks(
                 created,
                 handle -> new LoaderClientContext(created, handle),
-                renderWatchdog));
-        LOG.info("VibeMod client hooks installed (" + created.describeState() + ")");
+                renderWatchdog,
+                createdPacks,
+                createdPacks));
+        LOG.info("VibeMod client hooks installed (" + created.describeState()
+                + " " + createdPacks.describeState() + ")");
     }
 }

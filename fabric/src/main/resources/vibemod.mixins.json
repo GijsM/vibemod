@@ -3,6 +3,7 @@
   "package": "com.gijsm.vibemod.fabric.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": ["ServerCommonPacketListenerMixin"],
+  "client": ["client.PackRepositoryAccessor"],
   "injectors": {
     "defaultRequire": 1
   }

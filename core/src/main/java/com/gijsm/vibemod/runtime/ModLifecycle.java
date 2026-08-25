@@ -18,6 +18,7 @@ import com.gijsm.vibemod.gen.GeneratedProject;
 import com.gijsm.vibemod.platform.CommandBridge;
 import com.gijsm.vibemod.platform.Messenger;
 import com.gijsm.vibemod.platform.ModFailure;
+import com.gijsm.vibemod.platform.Registration;
 import com.gijsm.vibemod.platform.Sender;
 import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.store.ModConfigs;
@@ -48,6 +49,8 @@ public final class ModLifecycle implements ModFailure {
     private final DebugEcho debug;
     private final ModDispatch dispatch;
     private final LinkedHashMap<String, LoadedMod> mods = new LinkedHashMap<>();
+    /** V3 Phase 2 §B: the host's resource channel, or {@link ModContent#NONE}. */
+    private volatile ModContent content = ModContent.NONE;
 
     public ModLifecycle(ModHost host, TickScheduler scheduler, Messenger messenger, Watchdog watchdog,
                         ModConfigs configs, ModErrors errors, DebugEcho debug) {
@@ -68,6 +71,14 @@ public final class ModLifecycle implements ModFailure {
     /** The shared guarded-entry helper, for host bridges that dispatch into mod code. */
     public ModDispatch dispatch() {
         return dispatch;
+    }
+
+    /**
+     * Installs the host's resource channel (V3 Phase 2 §B). Null clears it back
+     * to {@link ModContent#NONE}; a host that has none simply never calls this.
+     */
+    public void setContent(ModContent content) {
+        this.content = content == null ? ModContent.NONE : content;
     }
 
     /** Compile output -> live mod. Replaces (tears down) an existing mod of the same name. Main thread. */
@@ -244,6 +255,26 @@ public final class ModLifecycle implements ModFailure {
             throw e;
         }
         lm.handle.enabled = true;
+
+        // V3 Phase 2 §B, and it happens AFTER the entrypoint on purpose: a mod's
+        // own code has to be running before its recipes appear, not the other
+        // way round, and the CONTENT registration then lands last in the
+        // handle's list, which is the order ModHandle.drain() guarantees anyway.
+        //
+        // A content failure degrades the mod rather than failing the load. The
+        // Java half is already live and working; refusing the whole mod because
+        // one recipe file could not be written would be a worse answer than a
+        // journalled error and a mod that runs.
+        try {
+            Registration installed = content.install(lm.handle);
+            if (installed != null) {
+                lm.handle.track(ModHandle.Kind.CONTENT, installed);
+            }
+        } catch (Throwable t) {
+            Logger.getLogger("VibeMod." + lm.displayName)
+                    .log(Level.WARNING, "Could not install resources for " + lm.displayName, t);
+            errors.note(lm.displayName, t, "resources");
+        }
     }
 
     /** Full teardown: onDisable, then revoke everything. Never throws. */

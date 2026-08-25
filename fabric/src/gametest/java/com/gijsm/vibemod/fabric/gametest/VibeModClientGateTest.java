@@ -16,9 +16,11 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 
 import net.minecraft.client.gui.screens.dialog.DialogScreen;
+import net.minecraft.resources.Identifier;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.fabric.client.FabricClientEventBridge;
+import com.gijsm.vibemod.fabric.client.FabricClientPacks;
 import com.gijsm.vibemod.fabric.client.VibeModFabricClient;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
 import com.gijsm.vibemod.runtime.ModHandle;
@@ -103,6 +105,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             testDialogOpensForARealPlayer(context);
             testRenderWatchdogTrips(context, bridge);
             testNativeClientCanary(context, bridge);
+            testResourceCanary(context);
         } finally {
             report();
         }
@@ -538,6 +541,180 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         context.waitTicks(5);
     }
 
+    // ------------------------------------------------------------------ V3 Phase 2
+
+    /**
+     * The resource half, in a real client (V3 Phase 2 §D/§F).
+     *
+     * <p>Seeded mid-session, so the whole channel runs live: the mod's
+     * {@code data/**} becomes a world datapack, its {@code assets/**} are merged
+     * into VibeMod's runtime resource pack, the pack joins the client's
+     * {@code PackRepository} through the accessor mixin, the coordinator
+     * debounces one reload of each side, and then a model, a texture and a
+     * translation that did not exist when the client started are resolvable by
+     * the game's own resource manager.
+     *
+     * <p>Then it is disabled, and all of it goes — asserted as ABSENCE after a
+     * second reload, which is the only form of that claim worth anything.
+     */
+    private void testResourceCanary(ClientGameTestContext context) {
+        String ns = "vibemod_resourceclientcanary";
+
+        FabricClientPacks packs = VibeModFabricClient.packs();
+        check("the runtime resource pack was built at client init", packs != null);
+        if (packs == null) {
+            return;
+        }
+        check("and it started empty (the stale guard ran)", packs.filesOf("ResourceClientCanary").isEmpty());
+
+        seedWithResources("ResourceClientCanary", RESOURCE_CANARY_SOURCE, RESOURCE_CANARY_META,
+                java.util.Map.of(
+                        "data/" + ns + "/recipe/ruby.json", RESOURCE_CANARY_RECIPE.replace("NS", ns),
+                        "assets/" + ns + "/lang/en_us.json",
+                        "{\"item." + ns + ".ruby\": \"Client Ruby\"}\n",
+                        "assets/" + ns + "/models/item/ruby.json",
+                        "{\"parent\":\"minecraft:item/generated\",\"textures\":"
+                                + "{\"layer0\":\"" + ns + ":item/ruby\"}}\n",
+                        "assets/" + ns + "/textures/item/ruby.png.grid", RESOURCE_CANARY_GRID));
+
+        VibeModFabric.services().scheduler().runOnMain(() -> VibeModFabric.services().router()
+                .run(consoleSender(), new String[] {"enable", "ResourceClientCanary"}));
+        awaitLoaded(context, "ResourceClientCanary");
+
+        Identifier model = Identifier.fromNamespaceAndPath(ns, "models/item/ruby.json");
+        Identifier texture = Identifier.fromNamespaceAndPath(ns, "textures/item/ruby.png");
+
+        check("the pack registered itself in the client's PackRepository",
+                awaitClient(context, client -> client.getResourcePackRepository()
+                        .getAvailableIds().contains(FabricClientPacks.PACK_ID), true));
+        check("and the client SELECTED it (required=true, so no operator has to)",
+                context.computeOnClient(client -> client.getResourcePackRepository()
+                        .getSelectedIds().contains(FabricClientPacks.PACK_ID)));
+        check("the mod's files are tracked for exact cleanup (" + packs.describeState() + ")",
+                packs.filesOf("ResourceClientCanary").size() == 3);
+
+        // Waiting for the reload to FINISH, not to start, and the difference is
+        // load-bearing: ReloadableResourceManager swaps its pack list at the
+        // beginning of a reload, so getResource() answers from the new packs
+        // immediately while the reload listeners — LanguageManager among them —
+        // have not run yet. The first run of this gate asserted too early and
+        // saw a model that resolved next to a translation key that did not.
+        check("the client resource reload completed",
+                awaitTrue(context, () -> !VibeModFabric.services().reloads()
+                        .describeState().contains("clientReloads=0")));
+        check("the mod's model resolves through the game's own resource manager",
+                awaitClient(context, client -> client.getResourceManager()
+                        .getResource(model).isPresent(), true));
+        check("its .png.grid was encoded into a real PNG the client can find",
+                context.computeOnClient(client -> client.getResourceManager()
+                        .getResource(texture).isPresent()));
+        check("the PNG really is a PNG (signature read back off the resource)",
+                context.computeOnClient(client -> {
+                    try (var in = client.getResourceManager().getResourceOrThrow(texture).open()) {
+                        byte[] head = in.readNBytes(8);
+                        return head.length == 8 && (head[0] & 0xff) == 0x89 && head[1] == 'P'
+                                && head[2] == 'N' && head[3] == 'G';
+                    } catch (Exception e) {
+                        return false;
+                    }
+                }));
+        check("its lang file translates a key that did not exist at client start",
+                "Client Ruby".equals(context.computeOnClient(
+                        client -> net.minecraft.client.resources.language.I18n.get("item." + ns + ".ruby"))));
+
+        // The server half, in the same process: a datapack in the integrated
+        // server's world, and a recipe in the live manager.
+        check("its data/** became a world datapack",
+                java.nio.file.Files.isDirectory(VibeModFabric.services().server()
+                        .getWorldPath(net.minecraft.world.level.storage.LevelResource.DATAPACK_DIR)
+                        .resolve("vibemod-resourceclientcanary")));
+        check("and its recipe reached the integrated server's recipe manager",
+                awaitServerRecipe(context, ns + ":ruby", true));
+
+        String state = VibeModFabric.services().reloads().describeState();
+        check("the coordinator ran a reload on each side (" + state + ")",
+                !state.contains("serverReloads=0") && !state.contains("clientReloads=0"));
+        check("and it is idle afterwards (" + state + ")",
+                state.contains("serverDirty=false") && state.contains("clientDirty=false"));
+
+        // ---- and now take it all away ----
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().disable("ResourceClientCanary"));
+
+        check("disabling forgot the mod's files",
+                awaitTrue(context, () -> packs.filesOf("ResourceClientCanary").isEmpty()));
+        check("disabling removed the world datapack at once",
+                awaitTrue(context, () -> !java.nio.file.Files.isDirectory(VibeModFabric.services().server()
+                        .getWorldPath(net.minecraft.world.level.storage.LevelResource.DATAPACK_DIR)
+                        .resolve("vibemod-resourceclientcanary"))));
+        // A SECOND completed client reload, not just a deleted file: without one,
+        // "the resource is gone" would only be saying that PathPackResources
+        // cannot open a path that no longer exists, which was never in doubt.
+        check("the teardown ran a second client reload",
+                awaitTrue(context, () -> VibeModFabric.services().reloads()
+                        .describeState().contains("clientReloads=2")));
+        check("the model is gone from the client after the teardown reload",
+                awaitClient(context, client -> client.getResourceManager()
+                        .getResource(model).isPresent(), false));
+        check("the texture is gone too",
+                context.computeOnClient(client -> !client.getResourceManager()
+                        .getResource(texture).isPresent()));
+        check("and the translation fell back to its key",
+                ("item." + ns + ".ruby").equals(context.computeOnClient(
+                        client -> net.minecraft.client.resources.language.I18n.get("item." + ns + ".ruby"))));
+        check("and the recipe is gone from the integrated server",
+                awaitServerRecipe(context, ns + ":ruby", false));
+        check("the pack itself is still registered, and simply contributes nothing",
+                context.computeOnClient(client -> client.getResourcePackRepository()
+                        .getAvailableIds().contains(FabricClientPacks.PACK_ID)));
+        String after = VibeModFabric.services().reloads().describeState();
+        check("the coordinator owns no packs and is idle again (" + after + ")",
+                after.contains("ownedPacks=0") && after.contains("serverDirty=false")
+                        && after.contains("clientDirty=false"));
+    }
+
+    /** Polls a client-thread predicate until it answers {@code want}. */
+    private static boolean awaitClient(ClientGameTestContext context,
+                                       java.util.function.Predicate<net.minecraft.client.Minecraft> test,
+                                       boolean want) {
+        for (int i = 0; i < 600; i++) {
+            if (context.computeOnClient(test::test) == want) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
+    /** Polls a plain predicate on the test thread until it is true. */
+    private boolean awaitTrue(ClientGameTestContext context, java.util.function.BooleanSupplier test) {
+        for (int i = 0; i < 600; i++) {
+            if (test.getAsBoolean()) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
+    /** Polls the integrated server's recipe manager for an id until it is (not) there. */
+    private boolean awaitServerRecipe(ClientGameTestContext context, String id, boolean want) {
+        for (int i = 0; i < 600; i++) {
+            boolean found = false;
+            for (var holder : VibeModFabric.services().server().getRecipeManager().getRecipes()) {
+                if (holder.id().identifier().toString().equals(id)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found == want) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
     /** Waits for the open screen's class name to (not) contain {@code needle}. */
     private static boolean awaitScreen(ClientGameTestContext context, String needle, boolean present) {
         for (int i = 0; i < 120; i++) {
@@ -576,6 +753,30 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
     private static void seedOne(String name, String source, String meta) {
         write(FabricLoader.getInstance().getGameDir().resolve("vibemod").resolve("mods"),
                 name, source, meta);
+    }
+
+    /**
+     * Seeds a mod that ships resource files as well as Java (V3 Phase 2 §A).
+     *
+     * <p>The paths arrive in the CANONICAL namespace already: a generated mod's
+     * would be rewritten there by {@code ModStore.saveNewVersion}, and this
+     * writes straight to disk. The rewrite itself is gated in
+     * {@code :core:selfTestStore}.
+     */
+    private static void seedWithResources(String name, String source, String meta,
+                                          java.util.Map<String, String> resources) {
+        Path mods = FabricLoader.getInstance().getGameDir().resolve("vibemod").resolve("mods");
+        write(mods, name, source, meta);
+        try {
+            Path version = mods.resolve(name).resolve("v1");
+            for (var entry : resources.entrySet()) {
+                Path file = version.resolve(entry.getKey());
+                Files.createDirectories(file.getParent());
+                Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     private static void write(Path mods, String name, String source, String meta) {
@@ -907,4 +1108,50 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             meta("NativeCanary", "A plain Fabric ModInitializer, hot-loaded through the bytecode seam.");
     private static final String NATIVE_CLIENT_META = meta("NativeClientCanary",
             "A plain Fabric mod using both entrypoints: command, keybind, HUD and its own screen.");
+
+    // ---------------------------------------------------------- V3 Phase 2
+
+    /**
+     * The Phase 2 canary's Java, and there is deliberately almost none of it:
+     * everything interesting about this mod is in its resource files.
+     */
+    private static final String RESOURCE_CANARY_SOURCE = """
+            package vibemod.resourceclientcanary;
+
+            import java.util.logging.Logger;
+
+            import net.fabricmc.api.ModInitializer;
+
+            /** A mod whose content is data. The Java only says it loaded. */
+            public final class ResourceClientCanary implements ModInitializer {
+
+                @Override
+                public void onInitialize() {
+                    Logger.getLogger("VibeMod.ResourceClientCanary").info("resource-client-canary-init");
+                }
+            }
+            """;
+
+    private static final String RESOURCE_CANARY_META = meta("ResourceClientCanary",
+            "A plain Fabric mod that ships a datapack and a resource pack.");
+
+    /** Vanilla's own 26.2 shape, read out of data/minecraft/recipe/golden_apple.json. */
+    private static final String RESOURCE_CANARY_RECIPE = """
+            {
+              "type": "minecraft:crafting_shaped",
+              "key": {"#": "minecraft:redstone", "X": "minecraft:amethyst_shard"},
+              "pattern": [" # ", "#X#", " # "],
+              "result": {
+                "id": "minecraft:amethyst_shard",
+                "components": {"minecraft:item_model": "NS:ruby"}
+              }
+            }
+            """;
+
+    /** A four-colour 8x8 grid: small enough to read, big enough to be a real texture. */
+    private static final String RESOURCE_CANARY_GRID = """
+            {"palette": {".": "transparent", "d": "#5a1010", "r": "#b31c1c"},
+             "rows": ["..dddd..", ".drrrrd.", "drrrrrrd", "drrrrrrd",
+                      "drrrrrrd", "drrrrrrd", ".drrrrd.", "..dddd.."]}
+            """;
 }

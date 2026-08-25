@@ -32,6 +32,10 @@ import java.util.List;
  *                           has no {@code VibeContext} and therefore no {@code ctx.configX} to read
  *                           knobs with — telling it to read them anyway would produce a mod that
  *                           cannot compile
+ * @param filesContract      what may appear in {@code files[]}. Profile-level since V3 Phase 2 §E:
+ *                           every profile but the native Fabric one accepts {@code .java} and
+ *                           nothing else, and that one also accepts a {@code data/**}/{@code assets/**}
+ *                           resource tree
  */
 public record PlatformProfile(
         String id,
@@ -45,7 +49,8 @@ public record PlatformProfile(
         String pluginDescriptor,
         String iconInstruction,
         String entrypointName,
-        String configContract) {
+        String configContract,
+        String filesContract) {
 
     /** One worked example pair shown to the model. */
     public record FewShot(String user, String assistant) {

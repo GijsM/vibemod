@@ -32,9 +32,16 @@ public final class ModHandle {
      * behind a real, permanently-registered loader event — and because "3
      * listeners" meaning two different things in the same UI line would be a
      * lie.
+     *
+     * <p>{@code CONTENT} is V3 Phase 2: the mod's {@code data/**}/{@code assets/**}
+     * files, materialized as a world datapack and/or merged into the client's
+     * runtime resource pack. It is drained LAST (see {@link #drain()}) because
+     * its close only marks a reload pending — everything else has to be gone
+     * before that reload runs, or the reload would rebuild recipes for a mod
+     * whose listeners are still attached.
      */
     public enum Kind {
-        LISTENER, TASK, COMMAND, CLIENT, NATIVE
+        LISTENER, TASK, COMMAND, CLIENT, NATIVE, CONTENT
     }
 
     private final String name;
@@ -91,6 +98,11 @@ public final class ModHandle {
     /** Loader-event subscriptions the bytecode seam routed into the host's fanout (V3 Phase 0). */
     public int nativeCount() {
         return countOf(Kind.NATIVE);
+    }
+
+    /** Resource trees (datapack and/or client pack) installed for this mod (V3 Phase 2). */
+    public int contentCount() {
+        return countOf(Kind.CONTENT);
     }
 
     /** Registrations of every kind currently held on the mod's behalf. */
@@ -155,11 +167,31 @@ public final class ModHandle {
         }
     }
 
-    /** Closes every tracked registration and forgets it. Never throws. */
+    /**
+     * Closes every tracked registration and forgets it. Never throws.
+     *
+     * <p>Order is registration order, with one exception: {@link Kind#CONTENT}
+     * closes last. In practice content is registered last anyway (it is
+     * installed after the mod's own entrypoint has run), but "in practice" is
+     * not a guarantee, and a datapack removal that marked a reload pending
+     * before the mod's listeners were detached would have the reload land on a
+     * half-torn-down mod.
+     */
     void drain() {
         List<Tracked> snapshot;
         synchronized (registrations) {
-            snapshot = List.copyOf(registrations);
+            List<Tracked> ordered = new ArrayList<>(registrations.size());
+            for (Tracked t : registrations) {
+                if (t.kind != Kind.CONTENT) {
+                    ordered.add(t);
+                }
+            }
+            for (Tracked t : registrations) {
+                if (t.kind == Kind.CONTENT) {
+                    ordered.add(t);
+                }
+            }
+            snapshot = List.copyOf(ordered);
             registrations.clear();
         }
         for (Tracked t : snapshot) {

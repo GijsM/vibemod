@@ -43,6 +43,8 @@ public class StoreSelfTest {
 
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
+        testResourceFilesRoundTripAndNamespaceRewrite();
+        testPixelGridEncoding();
         testNullFieldMetaJsonNormalized();
         testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
@@ -150,6 +152,153 @@ public class StoreSelfTest {
         check("delete removes mod from all()", store.all().isEmpty());
 
         System.out.println("PASS: ModStore round-trip, FQCN derivation, rollback, enable/delete");
+    }
+
+    /**
+     * V3 Phase 2 §A. The claim under test is the one that makes collisions
+     * structurally impossible: whatever namespace the model wrote, what lands on
+     * disk is {@code vibemod_<mod>} — in the path AND in every id inside the
+     * bodies — while {@code minecraft:} is left alone, and the compiler never
+     * sees any of it.
+     */
+    private static void testResourceFilesRoundTripAndNamespaceRewrite() throws Exception {
+        Path modsDir = tempDir("modstore-resources");
+        ModStore store = new ModStore(modsDir);
+
+        String recipe = "{\"type\":\"minecraft:crafting_shaped\","
+                + "\"key\":{\"#\":\"minecraft:redstone\"},"
+                + "\"result\":{\"id\":\"minecraft:amethyst_shard\","
+                + "\"components\":{\"minecraft:item_model\":\"charm:ruby\"}}}";
+        GeneratedProject project = new GeneratedProject("RubyCharm", "a charm", "craft it", "manual",
+                null, "AMETHYST_SHARD", "RubyCharm", List.of(
+                new GeneratedProject.GeneratedFile("RubyCharm.java",
+                        "package vibemod.rubycharm;\n\npublic class RubyCharm {}\n"),
+                new GeneratedProject.GeneratedFile("data/charm/recipe/ruby.json", recipe),
+                new GeneratedProject.GeneratedFile("assets/charm/lang/en_us.json",
+                        "{\"item.charm.ruby\":\"Ruby\"}")),
+                List.of(), null);
+        store.saveNewVersion("RubyCharm", "a charm", "RubyCharm", "gijs",
+                "make it", "model-x", null, null, 0.0, null, project);
+
+        Map<String, String> sources = store.sources("RubyCharm", 1);
+        check("sources() hands the compiler ONLY the java file", sources.size() == 1
+                && sources.containsKey("vibemod.rubycharm.RubyCharm"));
+
+        Map<String, String> resources = store.resources("RubyCharm", 1);
+        check("resources() returns both non-java files", resources.size() == 2);
+        check("the model's namespace was rewritten in the data path",
+                resources.containsKey("data/vibemod_rubycharm/recipe/ruby.json"));
+        check("the model's namespace was rewritten in the assets path",
+                resources.containsKey("assets/vibemod_rubycharm/lang/en_us.json"));
+        String storedRecipe = resources.get("data/vibemod_rubycharm/recipe/ruby.json");
+        check("an id inside the body was rewritten too",
+                storedRecipe.contains("\"vibemod_rubycharm:ruby\"")
+                        && !storedRecipe.contains("\"charm:ruby\""));
+        check("minecraft: ids were left alone",
+                storedRecipe.contains("\"minecraft:redstone\"")
+                        && storedRecipe.contains("\"minecraft:crafting_shaped\""));
+        check("a dotted translation key is NOT rewritten (java names it, and java is not)",
+                resources.get("assets/vibemod_rubycharm/lang/en_us.json").contains("item.charm.ruby"));
+        check("the canonical namespace is derived from the mod name",
+                "vibemod_rubycharm".equals(
+                        com.gijsm.vibemod.store.ModResources.canonicalNamespace("RubyCharm")));
+        check("a mod name with punctuation still yields a legal namespace",
+                "vibemod_my_mod_2".equals(
+                        com.gijsm.vibemod.store.ModResources.canonicalNamespace("My-Mod 2")));
+
+        // §F: a version that changes ONLY a resource still round-trips.
+        GeneratedProject v2 = new GeneratedProject("RubyCharm", "a charm", "craft it", "manual",
+                null, "AMETHYST_SHARD", "RubyCharm", List.of(
+                new GeneratedProject.GeneratedFile("RubyCharm.java",
+                        "package vibemod.rubycharm;\n\npublic class RubyCharm {}\n"),
+                new GeneratedProject.GeneratedFile("data/charm/recipe/ruby.json",
+                        recipe.replace("amethyst_shard", "emerald")),
+                new GeneratedProject.GeneratedFile("assets/charm/lang/en_us.json",
+                        "{\"item.charm.ruby\":\"Ruby\"}")),
+                List.of(), null);
+        ModStore.StoredMod saved2 = store.saveNewVersion("RubyCharm", "a charm", "RubyCharm", "gijs",
+                "swap the result", "model-x", null, null, 0.0, null, v2);
+        check("a resource-only change makes a new version", saved2.currentVersion() == 2);
+        check("v2's resource carries the change",
+                store.resources("RubyCharm", 2).get("data/vibemod_rubycharm/recipe/ruby.json")
+                        .contains("emerald"));
+        check("v1's resource is untouched by v2",
+                store.resources("RubyCharm", 1).get("data/vibemod_rubycharm/recipe/ruby.json")
+                        .contains("amethyst_shard"));
+        check("resources() of a mod with none is empty", store.resources("NoSuchMod", 1).isEmpty());
+
+        System.out.println("PASS: resource files round-trip, and the canonical namespace is enforced");
+    }
+
+    /**
+     * The hand-rolled PNG encoder (§D). Asserted on the bytes, because the only
+     * consumer that matters is a texture loader that will reject a malformed
+     * one silently.
+     */
+    private static void testPixelGridEncoding() {
+        com.gijsm.vibemod.store.PixelGrid grid = com.gijsm.vibemod.store.PixelGrid.parse(
+                "{\"palette\":{\".\":\"transparent\",\"r\":\"#ff0000\",\"g\":\"#00ff0080\"},"
+                        + "\"rows\":[\".r\",\"g.\"]}");
+        check("a grid knows its size", grid.size() == 2);
+        byte[] png = grid.toPng();
+        check("the PNG starts with the 8-byte signature",
+                png.length > 8 && (png[0] & 0xff) == 0x89 && png[1] == 'P' && png[2] == 'N'
+                        && png[3] == 'G' && png[4] == '\r' && png[5] == '\n' && png[6] == 0x1a
+                        && png[7] == '\n');
+        String asLatin1 = new String(png, java.nio.charset.StandardCharsets.ISO_8859_1);
+        check("the PNG carries IHDR, IDAT and IEND", asLatin1.contains("IHDR")
+                && asLatin1.contains("IDAT") && asLatin1.contains("IEND"));
+        check("the IHDR declares 8-bit RGBA (colour type 6)",
+                png[24] == 8 && png[25] == 6);
+        // IHDR data starts at 16 (8 signature + 4 length + 4 type): width is
+        // 16..19, height 20..23, then depth and colour type.
+        check("the IHDR declares the right dimensions", png[19] == 2 && png[23] == 2);
+        check("every chunk's CRC checks out", crcsAreValid(png));
+
+        // The failure modes the prompt promises are caught at generation time.
+        expectGridFailure("a grid with a rows array that is not square",
+                "{\"palette\":{\"a\":\"#ff0000\"},\"rows\":[\"aaa\",\"aaa\"]}");
+        expectGridFailure("a grid bigger than 64x64",
+                "{\"palette\":{\"a\":\"#ff0000\"},\"rows\":[" + "\"a\",".repeat(64) + "\"a\"]}");
+        expectGridFailure("a palette key that is not one character",
+                "{\"palette\":{\"ab\":\"#ff0000\"},\"rows\":[\"a\"]}");
+        expectGridFailure("a colour that is not hex", "{\"palette\":{\"a\":\"#gggggg\"},\"rows\":[\"a\"]}");
+        expectGridFailure("a grid that is not JSON at all", "not json");
+
+        System.out.println("PASS: the pixel-grid PNG encoder produces a CRC-valid RGBA PNG");
+    }
+
+    private static void expectGridFailure(String what, String json) {
+        try {
+            com.gijsm.vibemod.store.PixelGrid.parse(json);
+            check("PixelGrid rejects " + what, false);
+        } catch (IllegalArgumentException expected) {
+            // the message is the point: it is what the model is shown
+            check("PixelGrid rejects " + what + " (" + expected.getMessage() + ")", true);
+        }
+    }
+
+    /** Walks a PNG's chunk list and verifies every CRC32, the way a decoder would. */
+    private static boolean crcsAreValid(byte[] png) {
+        int at = 8;
+        while (at + 8 <= png.length) {
+            int length = ((png[at] & 0xff) << 24) | ((png[at + 1] & 0xff) << 16)
+                    | ((png[at + 2] & 0xff) << 8) | (png[at + 3] & 0xff);
+            int typeAt = at + 4;
+            int crcAt = typeAt + 4 + length;
+            if (crcAt + 4 > png.length) {
+                return false;
+            }
+            java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+            crc.update(png, typeAt, 4 + length);
+            int stored = ((png[crcAt] & 0xff) << 24) | ((png[crcAt + 1] & 0xff) << 16)
+                    | ((png[crcAt + 2] & 0xff) << 8) | (png[crcAt + 3] & 0xff);
+            if (stored != (int) crc.getValue()) {
+                return false;
+            }
+            at = crcAt + 4;
+        }
+        return at == png.length;
     }
 
     private static void testPathTraversalRejected() throws Exception {
