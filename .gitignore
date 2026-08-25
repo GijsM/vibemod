@@ -11,6 +11,10 @@ build/
 # --- run-paper / smoke-gate servers (downloaded jars, worlds, generated mods) ---
 paper/run/
 
+# --- Loom run directories + the throwaway Fabric server the Phase D gate downloads ---
+fabric/run/
+fabric/smoke/
+
 # --- Node tooling for scripts/ ---
 scripts/node_modules/
 scripts/.rcon-password
