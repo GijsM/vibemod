@@ -23,6 +23,10 @@ public final class PlatformProfiles {
     public static final String PAPER_MODERN_ID = "paper-modern";
     /** {@code PlatformInfo.profileId()} value for Paper 1.20.6 through 1.21.6. */
     public static final String PAPER_LEGACY_ID = "paper-legacy";
+    /** {@code PlatformInfo.profileId()} value for the Fabric host (MC 26.1+). */
+    public static final String FABRIC_ID = "fabric";
+    /** {@code PlatformInfo.profileId()} value for the NeoForge host (MC 26.1+, Phase E). */
+    public static final String NEOFORGE_ID = "neoforge";
 
     private PlatformProfiles() {
     }
@@ -173,9 +177,150 @@ public final class PlatformProfiles {
             "1.20",
             PAPER_ICON_INSTRUCTION);
 
+    // ------------------------------------------------------------------
+    // Fabric (MC 26.1+). Shared verbatim with NeoForge in Phase E: both run
+    // official Mojang names on 26.1+, so both consume the same sdk mod flavor
+    // and the same worked examples. Only the import bans differ.
+    // ------------------------------------------------------------------
+
+    private static final String LOADER_API_SOURCE_BLOCK =
+            "--- com/gijsm/vibemod/api/Mod.java ---\n"
+                    + GeneratedApiSources.MOD + "\n"
+                    + "--- com/gijsm/vibemod/api/VibeContext.java ---\n"
+                    + GeneratedApiSources.MOD_VIBE_CONTEXT + "\n"
+                    + "--- com/gijsm/vibemod/api/ModCommandHandler.java ---\n"
+                    + GeneratedApiSources.MOD_MOD_COMMAND_HANDLER + "\n"
+                    + "--- com/gijsm/vibemod/api/TaskHandle.java ---\n"
+                    + GeneratedApiSources.MOD_TASK_HANDLE + "\n"
+                    + "--- com/gijsm/vibemod/api/client/ClientContext.java ---\n"
+                    + GeneratedApiSources.CLIENT_CONTEXT + "\n"
+                    + "--- com/gijsm/vibemod/api/client/HudCanvas.java ---\n"
+                    + GeneratedApiSources.HUD_CANVAS + "\n";
+
+    private static final String FABRIC_ROLE = """
+            You are an expert Minecraft 26.1+ gameplay-mod author working against the
+            official (unobfuscated) Mojang names. You write small, delightful,
+            self-contained mods entirely in Java, targeting exactly one API: the
+            Mod/VibeContext contract shown below. You never touch anything else.
+
+            Your mods run hot-loaded inside a host mod called VibeMod. A mod is NOT a
+            Fabric mod: it has no fabric.mod.json, no entrypoint, no mixins and no
+            registrations of its own. It is one or more plain Java classes, exactly one of
+            which implements Mod, compiled in-process and loaded into a child class
+            loader. Everything your mod does must be routed through the VibeContext
+            instance you are handed in onEnable, so the host can cleanly tear your mod
+            down later - including while the game is running.""";
+
+    /**
+     * The import rules loader mods live under. The {@code net.fabricmc.*} ban is
+     * the load-bearing one and the javadoc on {@code FabricEventBridge} explains
+     * why: a Fabric event cannot be unregistered, so a mod that subscribed
+     * directly could never be torn down.
+     */
+    private static final String LOADER_IMPORT_RULES = """
+            - Imports are limited to `java.*`, `com.gijsm.vibemod.api.*` (including
+              `com.gijsm.vibemod.api.client.*`) and `net.minecraft.*` ONLY.
+            - NEVER import `net.fabricmc.*` or `net.neoforged.*`. Every registration goes
+              through the VibeContext you are handed - the loader's own event, command,
+              keybind and HUD registries are the host's business, not yours, and its events
+              cannot be unregistered, so a mod that subscribed directly could never be
+              disabled.
+            - NEVER write a mixin, subclass `Screen`, hook world/entity rendering, open a
+              socket (`java.net.*`), or use reflection (`java.lang.reflect.*`).
+            - NEVER register content: no items, no blocks, no entity types, no recipes, no
+              data components, no registry entries of any kind. Registries are frozen after
+              startup and your mod loads long after that.
+            - Use `net.minecraft.*` types read-only: the game objects handed to your hooks
+              (ServerPlayer, BlockPos, BlockState, LivingEntity, MinecraftServer) are yours
+              to inspect and act on, not to extend or replace.""";
+
+    /**
+     * §8.4, restated for the model. This is the paragraph that prevents the
+     * single worst failure mode of a client-capable mod: in singleplayer the
+     * server thread and the render thread live in one JVM, so touching the wrong
+     * one from a HUD renderer produces a race that never throws and never
+     * reproduces.
+     */
+    private static final String LOADER_THREADING = """
+            - onEnable/onDisable, every ctx.on* hook, every ctx.command/ctx.action handler
+              and every Runnable passed to ctx.repeat/ctx.later run on the MAIN SERVER
+              THREAD. Do not spawn threads and do not hop threads yourself.
+            - Everything you register inside `ctx.client(...)` - hud, tick, key presses,
+              clientCommand - runs on the RENDER THREAD instead. Inside those callbacks use
+              ONLY the ClientContext's own getters and your mod's own fields. NEVER touch
+              server state (a ServerPlayer, a level, anything a ctx.on* hook gave you) from
+              a client callback, or client state from a server hook: in singleplayer both
+              sides share one JVM, so such a race is silent and unreproducible.
+            - Fields shared between the two sides must be `volatile` (or an
+              `AtomicInteger`/`ConcurrentHashMap`). `ctx.config*` reads are thread-safe
+              everywhere and can be called from either side.""";
+
+    private static final String FABRIC_CHEAT_SHEET = """
+            - THE ctx.on* HOOKS ARE THE ENTIRE EVENT SURFACE. There is no listener object
+              and no event bus. They are: onPlayerJoin, onPlayerQuit, onServerTick, onChat,
+              onBlockBreak, onUseBlock, onUseItem, onEntityDeath, onPlayerDeath, onRespawn.
+              If a request needs an event that is not on that list, build the closest
+              tasteful approximation out of the ones that are (onServerTick can poll for a
+              great deal) rather than inventing a hook.
+            - The cancelling hooks (onChat, onBlockBreak, onUseBlock, onUseItem) return
+              `boolean`: return `true` to let it happen, `false` to cancel. There is no
+              `setCancelled`.
+            - MC 26.x renamed things you may remember differently:
+              * `ResourceLocation` is now `net.minecraft.resources.Identifier`
+                (`Identifier.withDefaultNamespace("stone")`,
+                `Identifier.fromNamespaceAndPath("minecraft", "stone")`).
+              * Text is `net.minecraft.network.chat.Component`: `Component.literal("hi")`,
+                `Component.translatable("key")`. Send it with
+                `player.sendSystemMessage(component)` or, in a command,
+                `src.sendSuccess(() -> component, false)`.
+              * A command's source is `CommandSourceStack`: `src.getPlayer()` (null for the
+                console), `src.getServer()`, `src.sendSystemMessage(...)`.
+              * Permission levels are gone from CommandSourceStack; do not check permissions
+                yourself, the host already did.
+            - Client features go inside `ctx.client(c -> { ... })` and NOWHERE else. That
+              block does not run at all on a dedicated server, so a mod with client
+              features still works there - it just has no HUD. Never import
+              `net.minecraft.client.*` yourself: use the ClientContext getters shown below,
+              which are the same on every version.
+            - `c.hud(id, (canvas, tickDelta) -> ...)` draws with the HudCanvas shown below.
+              Keep it cheap: it runs every frame and the host times it.
+            - `c.key(label, "G", () -> ...)` leases one of 8 shared key slots. There are 8
+              in total across ALL loaded mods, so lease one only if the mod is really about
+              a key.
+            - If your mod uses `ctx.client(...)`, say so in the manual: "This is a client
+              feature: it draws on your own screen and does nothing on a dedicated server."
+            """;
+
+    private static final String LOADER_ICON_INSTRUCTION = """
+            - "icon" is ONE thematic, obtainable ITEM name from vanilla Minecraft, in
+              UPPER_SNAKE_CASE, that best represents the mod to a player browsing a menu
+              (e.g. "CHICKEN" for a mod about chickens, "SUGAR" for a speed effect, "TNT"
+              for an explosion mod, "DIAMOND_SWORD" for a combat mod). It must be a real
+              obtainable item a player could hold, NEVER a block-only or technical material
+              (never "BEDROCK", "COMMAND_BLOCK", "AIR", "STRUCTURE_VOID"), and NEVER "AIR".""";
+
+    /**
+     * Fabric on MC 26.1+. The {@code pluginDescriptor} is deliberately empty:
+     * {@code /vibe export} is not supported on the loaders in v1 (§6.3), and
+     * {@link com.gijsm.vibemod.store.JarExporter#supported()} gates on the
+     * profile id rather than on this field, so there is nothing honest to put
+     * here.
+     */
+    public static final PlatformProfile FABRIC = new PlatformProfile(
+            FABRIC_ID,
+            "Fabric 26.1+",
+            FABRIC_ROLE,
+            LOADER_API_SOURCE_BLOCK,
+            LOADER_IMPORT_RULES,
+            FABRIC_CHEAT_SHEET,
+            LOADER_THREADING,
+            LoaderExamples.LOADER_FEW_SHOTS,
+            "",
+            LOADER_ICON_INSTRUCTION);
+
     /** Every profile this build knows. */
     public static List<PlatformProfile> all() {
-        return List.of(PAPER_MODERN, PAPER_LEGACY);
+        return List.of(PAPER_MODERN, PAPER_LEGACY, FABRIC);
     }
 
     /** The profile for an id, falling back to {@link #PAPER_MODERN} with a logged warning. */
@@ -185,10 +330,13 @@ public final class PlatformProfiles {
                 return p;
             }
         }
+        StringBuilder known = new StringBuilder();
+        for (PlatformProfile p : all()) {
+            known.append(known.isEmpty() ? "" : ", ").append(p.id());
+        }
         java.util.logging.Logger.getLogger(PlatformProfiles.class.getName()).warning(
-                "Unknown platform profile '" + id + "' (this build ships "
-                        + PAPER_MODERN_ID + " and " + PAPER_LEGACY_ID
-                        + "; fabric/neoforge arrive in Phases D/E) - falling back to " + PAPER_MODERN_ID);
+                "Unknown platform profile '" + id + "' (this build ships " + known
+                        + "; " + NEOFORGE_ID + " arrives in Phase E) - falling back to " + PAPER_MODERN_ID);
         return PAPER_MODERN;
     }
 

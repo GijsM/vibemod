@@ -67,14 +67,24 @@ fun javaStringExpression(text: String, indent: String): String {
 }
 
 val sdkApiDir = project(":sdk").layout.projectDirectory.dir("src/main/java/com/gijsm/vibemod/api")
+val sdkModApiDir = project(":sdk").layout.projectDirectory.dir("src/mod/java/com/gijsm/vibemod/api")
 val sdkClientApiDir =
     project(":sdk-client").layout.projectDirectory.dir("src/main/java/com/gijsm/vibemod/api/client")
 
+// The MOD_* constants are the loader flavor of the same contract (ARCHITECTURE-V2
+// 4.1) - Mojang-typed, and shared verbatim by Fabric and NeoForge. Mod.java has
+// one flavor and is not repeated. Emitting both flavors from their real sources
+// is what keeps the fabric profile's api block from drifting the way the
+// hand-copied Paper constants used to.
 val promptSourceFiles = mapOf(
     "MOD" to sdkApiDir.file("Mod.java").asFile,
     "VIBE_CONTEXT" to sdkApiDir.file("VibeContext.java").asFile,
     "MOD_COMMAND_HANDLER" to sdkApiDir.file("ModCommandHandler.java").asFile,
     "CLIENT_CONTEXT" to sdkClientApiDir.file("ClientContext.java").asFile,
+    "MOD_VIBE_CONTEXT" to sdkModApiDir.file("VibeContext.java").asFile,
+    "MOD_MOD_COMMAND_HANDLER" to sdkModApiDir.file("ModCommandHandler.java").asFile,
+    "MOD_TASK_HANDLE" to sdkModApiDir.file("TaskHandle.java").asFile,
+    "HUD_CANVAS" to sdkClientApiDir.file("HudCanvas.java").asFile,
 )
 
 val generatedPromptSourcesDir: Provider<Directory> =

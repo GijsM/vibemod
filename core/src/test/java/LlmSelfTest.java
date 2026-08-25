@@ -12,6 +12,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.llm.PlatformProfile;
+import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.llm.StreamScanner;
@@ -329,6 +331,67 @@ public class LlmSelfTest {
                 prompt.contains("\"plan\" MUST be the FIRST key"));
         if (failures == 0) {
             System.out.println("PASS: systemPrompt() contains all required markers");
+        }
+        testFabricProfilePrompt();
+    }
+
+    /**
+     * The fabric profile (ARCHITECTURE-V2 6.2), asserted where it differs from
+     * Paper's. Every check below is something that, if it silently went missing,
+     * would show up as a mod that does not compile and a self-heal round of real
+     * money - the import bans, the curated hook list, the three loader few-shots,
+     * and above all the absence of any Bukkit vocabulary.
+     */
+    private static void testFabricProfilePrompt() {
+        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_ID);
+        check("byId('fabric') resolves the fabric profile, not the paper fallback",
+                PlatformProfiles.FABRIC_ID.equals(fabric.id()));
+
+        String prompt = PromptLibrary.systemPrompt(fabric);
+        System.out.println("fabric systemPrompt() length = " + prompt.length() + " chars");
+
+        // The api block is the MOD flavor, generated from sdk/src/mod/java.
+        check("fabric prompt embeds the Mojang-typed VibeContext",
+                prompt.contains("MinecraftServer server();"));
+        check("fabric prompt embeds the CommandSourceStack-typed handler",
+                prompt.contains("void run(CommandSourceStack src, String[] args)"));
+        check("fabric prompt embeds the ClientContext", prompt.contains("KeyLease key(String label"));
+        check("fabric prompt embeds the HudCanvas", prompt.contains("int textWidth(String s);"));
+        check("fabric prompt never embeds the Paper flavor",
+                !prompt.contains("void listen(Listener listener)") && !prompt.contains("BukkitTask"));
+
+        // The curated hook table is the whole event surface; a missing entry is a
+        // hook the model will never use.
+        for (String hook : new String[] {"onPlayerJoin", "onPlayerQuit", "onServerTick", "onChat",
+                "onBlockBreak", "onUseBlock", "onUseItem", "onEntityDeath", "onPlayerDeath", "onRespawn"}) {
+            check("fabric prompt teaches ctx." + hook, prompt.contains(hook));
+        }
+
+        check("fabric prompt bans net.fabricmc.*", prompt.contains("NEVER import `net.fabricmc.*`"));
+        check("fabric prompt bans registry content", prompt.contains("NEVER register content"));
+        check("fabric prompt bans mixins and Screen", prompt.contains("NEVER write a mixin, subclass `Screen`"));
+        check("fabric prompt teaches the 26.x Identifier rename",
+                prompt.contains("net.minecraft.resources.Identifier"));
+        check("fabric prompt carries the render-thread contract",
+                prompt.contains("RENDER THREAD") && prompt.contains("silent and unreproducible"));
+        check("fabric prompt says a mod is not a Fabric mod",
+                prompt.contains("A mod is NOT a\nFabric mod"));
+
+        check("fabric prompt carries the HUD few-shot", prompt.contains("WorldTimer"));
+        check("fabric prompt carries the keybind few-shot", prompt.contains("CoordToggle"));
+        check("fabric prompt carries the gameplay few-shot", prompt.contains("BlockTally"));
+        // By few-shot MARKER, not by mod name: the shared prompt body uses
+        // "ChickenCreepers"/"SpeedPulse" as PascalCase naming examples on every
+        // platform, so their absence is not the question - the absence of the
+        // Paper EXAMPLES is.
+        check("fabric few-shots are the three loader ones, not Paper's",
+                !prompt.contains("\"icon\":\"CHICKEN\"") && !prompt.contains("\"icon\":\"SUGAR\""));
+        check("fabric prompt has no Bukkit vocabulary at all",
+                !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
+
+        if (failures == 0) {
+            System.out.println("PASS: the fabric profile's prompt teaches the mod flavor, "
+                    + "the curated hooks, the loader bans and the render-thread contract");
         }
     }
 
