@@ -32,7 +32,7 @@ jobs:
 
       # 25: the two loader modules require it (MC 26.x). Everything else still
       # compiles at --release 21 through the root build's toolchain.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"

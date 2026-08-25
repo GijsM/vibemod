@@ -46,7 +46,7 @@ jobs:
       # building on what actually runs. Every other module still COMPILES at
       # --release 21 via the root build's toolchain, which the foojay resolver
       # provisions on its own when the runner has no 21.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
@@ -128,7 +128,7 @@ jobs:
       # run on it - which is not an assumption: it is what the local machine
       # these gates were developed on has, and how §10.2's 1.20.6 gate was run
       # green in the first place.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
@@ -214,7 +214,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"

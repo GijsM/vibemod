@@ -52,6 +52,22 @@ public final class CpCache {
     /** How many hex characters of the SHA-256 name a cached file. 16 = 64 bits. */
     private static final int NAME_HEX_CHARS = 16;
 
+    /**
+     * How long an orphaned {@code .partial} has to sit before {@link #prune} will
+     * delete it.
+     *
+     * <p>A {@code .partial} is a temp file some thread is <em>writing right
+     * now</em>, and {@link #cached} deletes its own in a {@code finally}. Two
+     * mods restoring at boot materialize the classpath concurrently, so a prune
+     * that deleted every {@code .partial} it did not recognise was deleting the
+     * other thread's live temp file — after which its {@code Files.move} failed
+     * with {@code NoSuchFileException}, the entry was dropped from the classpath
+     * with a warning, and the mod failed to compile against a library that was
+     * right there. The one-hour floor keeps the leak fixed (a JVM that dies
+     * mid-write still gets cleaned up eventually) without racing anything alive.
+     */
+    private static final long PARTIAL_ORPHAN_AGE_MS = 60 * 60 * 1000L;
+
     private final Path cacheDir;
 
     public CpCache(Path cacheDir) {
@@ -152,18 +168,24 @@ public final class CpCache {
         return target;
     }
 
-    /** Deletes every {@code .jar} in the cache directory that {@code keep} does not name. */
+    /**
+     * Deletes every {@code .jar} in the cache directory that {@code keep} does not
+     * name, plus any {@code .partial} old enough to be a crash leftover rather
+     * than another thread's work in progress ({@link #PARTIAL_ORPHAN_AGE_MS}).
+     */
     private void prune(Set<String> keep) {
         if (!Files.isDirectory(cacheDir)) {
             return;
         }
+        long now = System.currentTimeMillis();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(cacheDir)) {
             for (Path entry : stream) {
                 String name = entry.getFileName().toString();
-                if (!name.endsWith(".jar") && !name.endsWith(".partial")) {
-                    continue;
-                }
-                if (keep.contains(name)) {
+                if (name.endsWith(".partial")) {
+                    if (!isStalePartial(entry, now)) {
+                        continue;
+                    }
+                } else if (!name.endsWith(".jar") || keep.contains(name)) {
                     continue;
                 }
                 try {
@@ -175,6 +197,16 @@ public final class CpCache {
             }
         } catch (IOException e) {
             LOG.log(Level.FINE, "Could not prune the cpcache", e);
+        }
+    }
+
+    /** Whether a {@code .partial} is old enough that no live materialize can still own it. */
+    private static boolean isStalePartial(Path partial, long now) {
+        try {
+            return now - Files.getLastModifiedTime(partial).toMillis() > PARTIAL_ORPHAN_AGE_MS;
+        } catch (IOException gone) {
+            // Already deleted by whoever created it. Nothing to prune.
+            return false;
         }
     }
 
