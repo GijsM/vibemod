@@ -159,8 +159,19 @@ public final class VibeModFabric implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTING.register(VibeModFabric::start);
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> stop());
 
-        FabricEventBridge.installDispatchers(() -> eventBridge);
+        // ORDER MATTERS, and it is the one line in this file that is a decision
+        // rather than a sequence. Both of these register an ALLOW_CHAT_MESSAGE
+        // listener; Fabric runs them in registration order and the first `false`
+        // wins. The chat bridge is the form-capture path — when a player is
+        // filling in a text field on a chat-rendered screen, that line is form
+        // input, not chat, and no generated mod has any business seeing it.
+        // Registering the capture FIRST means a captured line is swallowed
+        // before the event bridge offers it to anybody's onChat hook, which is
+        // exactly what NeoForge does with EventPriority.HIGHEST. Phase E called
+        // the divergence out (§10.4 deviation 7) and named NeoForge's order the
+        // better one; this is Phase F taking it.
         FabricChatBridge.installDispatcher(() -> chatBridge);
+        FabricEventBridge.installDispatchers(() -> eventBridge);
 
         // fabric-permission-api-v1 injects checkPermission onto CommandSourceStack;
         // NeoForge answers the same question through PermissionAPI, so which one
