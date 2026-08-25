@@ -20,6 +20,8 @@ neoforge/run/
 neoforge/runs/
 neoforge/smoke/
 neoforge/smoke-cache/
+# The client gate's game directory: a world, a config, and the mods it seeds.
+neoforge/clientgate-run/
 
 # --- Node tooling for scripts/ ---
 scripts/node_modules/

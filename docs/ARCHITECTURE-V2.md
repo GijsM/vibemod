@@ -1100,6 +1100,327 @@ listing wrap correctly at 400px in the vanilla dialog widget" needs a human
 looking at it. This is the same item Phase C left open for Paper, for the same
 reason.
 
+## 10.4 Phase E record (NeoForge) — what actually landed
+
+**Everything on the §9 Phase E checklist landed.** The target is **MC 26.2**,
+NeoForge **26.2.0.67**, FML **11.0.16**, ModDevGradle **2.0.144**, Java **25** —
+the same game version Phase D targets, deliberately, so the two loader hosts can
+be compared jar to jar.
+
+Phase E was smaller than Phase D, and the reason is worth stating first: **most
+of a loader host is not loader code.**
+
+### `loader-common`: the third of the codebase that is neither Fabric nor NeoForge
+
+Fourteen of the Fabric module's twenty-one classes named no Fabric type at all.
+Both loaders run official Mojang names on 26.1+ and both consume the same sdk
+mod flavor, so the dialog renderer, the mod host, the Brigadier command bridge,
+the Adventure↔vanilla text and audience adapters, the tick scheduler, the config
+reader, the dialog-click token table and the entire client surface below the
+loader's own hooks are the same work twice. Transposing them would have been
+~2700 duplicated lines, and the 17-screen dialog mapping would then have drifted
+between the two hosts silently.
+
+They now live in **`loader-common/src/main/java`** (package
+`com.gijsm.vibemod.loader`), which is **a shared SOURCE directory, not a Gradle
+module**, added as a `srcDir` by both `fabric` and `neoforge`.
+
+A module was considered and rejected: a module needs a plugin, and the only two
+candidates are Loom and ModDevGradle. Whichever one it applied, the *other*
+loader would compile its host against a game jar produced by its rival's
+toolchain — and NeoForge's jar is patched, so that is not a theoretical
+difference. As a source directory each loader compiles the shared code against
+**its own** game jar, which means a NeoForge patch that moves a vanilla
+signature is a compile error in `neoforge` rather than a runtime surprise on
+someone's server. This is exactly how `sdk/src/mod/java` was already wired in
+Phase D, so it is a pattern this build already had.
+
+Three classes were ~90% shared and ~10% subscriptions, and split into an
+abstract base plus a thin loader subclass:
+
+| shared (`loader-common`) | fabric | neoforge |
+|---|---|---|
+| `LoaderEventBridge` — the ten curated per-mod registries, revocation, dispatch policy | `FabricEventBridge` (event wiring) | `NeoForgeEventBridge` (bus wiring) |
+| `LoaderChatBridge` — captures, the hop, the one-per-player rule | `FabricChatBridge` | `NeoForgeChatBridge` |
+| `LoaderClientEventBridge` — HUD/tick dispatch, key pool, `/vibec` registry, storm policy | `FabricClientEventBridge` | `NeoForgeClientEventBridge` |
+
+Per-loader after all that: `PlatformInfo`, `ClasspathProvider`, the three bridge
+subclasses, the two entrypoints, and (Fabric only) one mixin. Nine files on
+NeoForge against Fabric's twenty-one.
+
+**The one thing in `loader-common` that was NOT loader-neutral was permissions.**
+`CommandSourceStack#checkPermission(Identifier, PermissionLevel)` is not vanilla
+— fabric-permission-api-v1 *injects* it. NeoForge answers the identical question
+(node first, op level when no permission manager answers) through
+`PermissionAPI` plus `PermissionNode`s registered at `PermissionGatherEvent`. So
+`LoaderSender` takes a `PermissionOracle` the host installs at boot rather than
+branching on a platform, and the two hosts stay one shape.
+
+### `/vibec` is the only client code that genuinely differs
+
+Fabric's client commands take a `FabricClientCommandSource` and are registered
+through `ClientCommands.literal`; NeoForge's take an ordinary
+`CommandSourceStack` and `Commands.literal`. That is the whole difference, and
+it is why the Brigadier tree is the one part of the client bridge that is
+written twice.
+
+Two consequences worth recording. NeoForge's `RegisterClientCommandsEvent`
+**re-fires on every connection** where Fabric's callback fires once per client —
+which costs nothing, because the `/vibec` root is static by design (§8.3) and
+its suggestion providers read the live registry. And NeoForge's
+`refreshCompletions()` is **deliberately empty**: Fabric needs
+`ClientCommands.refreshCommandCompletions()` because that call is what merges
+the client tree into the connection's dispatcher, but a client command's
+suggestions are computed locally on every keystroke and this root never changes,
+so there is nothing to invalidate. Calling a getter there to look busy would
+have been worse than saying so.
+
+### Dialogs: NeoForge does not need the mixin
+
+§8.5 said one mixin on `ServerCommonPacketListenerImpl` was unavoidable
+"unless NeoForge exposes an event". **It does.**
+
+Vanilla's own handler for a dialog button's `custom_click_action` packet is a
+`LOGGER.debug` no-op that does not receive the player, which is the entire
+reason Fabric needs a mixin. NeoForge **patches that method**: it forwards to
+`MinecraftServer#handleCustomClickAction(Identifier, Optional<Tag>, ServerPlayer,
+GameProfile)`, where `CommonHooks.onCustomClickAction` posts
+`net.neoforged.neoforge.event.entity.player.CustomClickActionEvent` carrying the
+player, the identifier and the payload — **after**
+`PacketUtils.ensureRunningOnSameThread`, so already on the server thread.
+
+So the whole mixin, its `vibemod.mixins.json`, its `@Shadow` of the server
+field and its explicit `server.execute` hop reduce to one `addListener` at
+`EventPriority.HIGHEST`, cancelling the event when the token was ours.
+`neoforge/` ships **no mixins at all**, and `DialogClicks` — the one-shot,
+per-player, TTL'd token table — is shared between the two hosts unchanged.
+
+Everything else in §8.5 transposed exactly, including both vanilla traps Phase D
+flagged: `CommonDialogData`'s codec still rejects `pause=true` with a
+never-unpausing after-action, and `ItemBody.item` is still an
+`ItemStackTemplate`.
+
+### `union:` URLs are gone, and the translation is kept anyway
+
+§7.1 asked Phase E for `union:` URL translation. **FML 11 no longer produces
+them.** SecureJarHandler is not on the classpath at all; its replacement is
+`net.neoforged.fml.jarcontents.JarContents`, whose `getContentRoots()` returns
+ordinary `Path`s, and a full-tree string search of `fml-loader-11.0.16.jar` for
+"union" comes back empty.
+
+`LoaderUris` implements it regardless, generalized to `file:`, `jar:file:…!/`
+and `union:…%23n!/`, and unit-tested by `UriSelfTest` (wired into
+`:neoforge:check`). It costs nine lines, module locations are the one place a
+loader can still hand out something exotic, and a classpath provider that
+silently drops an entry it cannot parse produces "VibeMod cannot compile
+anything" — the worst failure this mod has.
+
+### The classpath, for ModLauncher
+
+§10.3 told Phase E to answer for ModLauncher what Phase D had to answer for
+Knot: **the loader's classpath is not `java.class.path`.** It is not, for the
+same reason — on a real NeoForge server `java.class.path` holds the bootstrap
+and FML builds a module layer for the game and its ~60 libraries itself.
+
+`NeoForgeClasspathProvider` unions four sources, then `LoaderUris`, then
+`CpCache`:
+
+1. **the game module layer** — `FMLLoader.getCurrent().getGameLayer()`, whose
+   resolved modules' locations are exactly what ModLauncher loaded. This is the
+   ModLauncher equivalent of Knot's `FabricLauncher#getClassPath()`, and unlike
+   that one it is **public API**, so no reflection is needed here;
+2. **every mod file's content roots** — `JarContents#getContentRoots()` rather
+   than `IModFile#getFilePath()`, because a mod loaded from directories in dev
+   has several and the file path then names none of them;
+3. **`ClasspathResourceUtils.getAllClasspathItems`**, FML's own enumeration of
+   the loading class loader;
+4. **a `libraries/` walk** beside the game dir, plus `java.class.path` and the
+   code source of `MinecraftServer` as the last belt.
+
+On the real installed server this resolves **151 entries**; the canary compiles
+and hot-loads against them.
+
+### `maxTargetRelease()` on NeoForge — the §10.3 question, answered
+
+**The runtime's own feature version, and nothing lower — same as Fabric, unlike
+Paper.** §10.3 warned this might differ, because ModLauncher transforms far more
+aggressively than Knot and Paper's answer is genuinely lower than its JVM's.
+
+It does not differ, and the reason is structural rather than incidental. FML's
+class processors — access transformers, mixin, the coremod pipeline — run inside
+the transforming class loader's own `findClass`. They see only classes it is
+asked to **load**. `ModLifecycle.BytesClassLoader` is a child that calls
+`defineClass` on bytes it already holds, so it never enters that path, and
+nothing between the compiler output and the JVM's verifier reads the class file.
+
+**This was measured, not reasoned.** `ClassFileCeiling` hand-assembles a minimal
+class file at the running JVM's own class-file version and defines it through
+`ModLifecycle.BytesClassLoader` itself — not a lookalike, so there is no gap
+between the probe and the real path. It runs at every boot and the gate asserts
+on the line:
+
+```
+Platform: neoforge 26.2 · profile=neoforge · dialogs=true · physicalClient=false
+          · dedicated=true · target=java25 · java.compiler=present
+Hot-load class-file ceiling: java25 class files (major 69) load through
+          BytesClassLoader — the loader does not read hot-loaded bytecode
+```
+
+`InMemoryCompiler` still clamps to `min(runtime, backend, host)`, so a bundled
+ECJ that lags the JVM lowers it on its own — which remains the case that
+actually bites.
+
+### The `java.compiler` module probe
+
+`NeoForgePlatformInfo.hasJavaCompilerModule()`, printed in the boot line on
+every start like Fabric's. On this machine it reads `java.compiler=present` on
+both the dedicated server and the dev client, and no contingency is needed.
+**Still not observed on a Mojang-launcher jlink runtime** — the same open item
+Phase D left, for the same reason.
+
+### The prompt profile is the Fabric one with a different role line
+
+§6.2 allowed the neoforge profile its own cheat sheet with NeoForge event names.
+It does not get one, on purpose: **a generated mod never sees a loader event.**
+The ten curated `ctx.on*` hooks are its entire event surface, and which bus event
+the host subscribed to on its behalf is the host's business — teaching the model
+`PlayerLoggedInEvent` would be teaching it a name it is forbidden to write.
+
+So the api source block, the import bans, the threading contract, the cheat
+sheet and all three worked examples are the same text on both loaders, and
+`LlmSelfTest` now asserts exactly that: the two prompts must differ **only** in
+the loader's name and its manifest file. That is the guard on the real claim —
+the sdk mod flavor is loader-neutral, so a mod generated for one loader compiles
+unchanged on the other. The dedicated-server gates check the same claim from the
+other end: **the Fabric and NeoForge canaries are byte-identical sources.**
+
+### Jar-in-Jar
+
+`jarJar` insists on a version *range* per nested module (a nested jar's metadata
+is a dependency declaration FML resolves against every other mod's nested jars,
+so two mods shipping the same library must be able to agree on one copy) — and,
+exactly like Loom's `include`, **it nests only the coordinates it is handed, not
+their transitives.** Adventure is a seven-jar graph; nesting the four named
+modules produces a mod that boots and dies with
+`NoClassDefFoundError: net/kyori/examination/Examinable`. The nesting is
+therefore driven off the resolved artifact graph, the same shape
+`fabric/build.gradle.kts` uses, and ships the same ten jars. Gson is not nested
+(the game has it) and ECJ is nested unrelocated.
+
+### The dedicated-server gate — 28/28
+
+`scripts/smoke-neoforge.sh`, the exact twin of the Fabric one: run NeoForge's own
+installer into a cached template, copy it into a throwaway server, install the
+built jar beside a pre-seeded canned mod, boot, and drive the whole flow over
+RCON with assertions on every reply.
+
+It runs against the **installed jar**, not MDG's dev classpath, for the same
+reason Phase D's does: on the dev classpath Adventure and ECJ are plain
+classpath entries, while in the shipped jar they are nested under
+`META-INF/jarjar` and must be found through FML and materialized by the cpcache
+before javac can read them.
+
+### The client gate — no NeoForge equivalent existed, so one was built
+
+**NeoForge has nothing like fabric-client-gametest.** Its GameTest framework
+runs on a dedicated server (`gameTestServer`) and never starts a client; MDG's
+`unitTest` support runs JUnit against the game classpath with no window. Neither
+can answer §8.1's question — *does a throwing HUD renderer crash the render
+loop* — which is the entire point of a client gate.
+
+So the gate is a **self-driving mod**: `neoforge/src/clientgate`, mod id
+`vibemodgate`, its own source set and its own MDG run (`runClientGate`), and
+never in the shipped jar. `scripts/clientgate-neoforge.sh` runs it from a clean
+directory and turns its verdict file into an exit code.
+
+Its shape is forced by where it runs. Everything happens inside
+`ClientTickEvent.Post` on the render thread, so **nothing may block** — a
+`waitTicks` would freeze the client under test. The test is therefore a list of
+stages (a readiness condition, a timeout, a body) advanced one per tick, which
+reads top-to-bottom as the same narrative as the Fabric test's method bodies.
+It creates its own world through `WorldOpenFlows#createFreshLevel` — the call
+fabric-client-gametest's world builder makes — rather than depending on
+`--quickPlaySingleplayer` and a save copied in from somewhere.
+
+Four things it found that are worth the next person's time:
+
+- **`Minecraft#screen` is gone on 26.x**; the current screen lives on `Gui`
+  (`mc.gui.screen()` / `mc.gui.setScreen(...)`). Add it to §10.3's rename list.
+- **A first launch does not show the title screen**, it shows
+  `AccessibilityOnboardingScreen`. A gate that waits for `TitleScreen` waits
+  forever. The trigger is now "the client has been ticking a while and has no
+  level", and the runner seeds an `options.txt` as well.
+- **`ExecutorService#submit` buried a compile failure.** `LoaderTickScheduler.async`
+  now logs a throwing task before rethrowing, and restore-on-boot logs its
+  outcome to the log rather than only to the requesting audience. Both are real
+  host bugs on every platform — a mod that fails to compile at boot was leaving
+  no trace anywhere a human looks — and the gate is what surfaced them.
+- **A mod's classes must not be on a second source set's runtime classpath.**
+  Declaring `clientgateImplementation(sourceSets.main.output)` registers
+  `build/classes/java/main` both as the `vibemod` mod file and as a plain
+  classpath entry, under different loaders. Everything starts, and then every
+  generated mod fails with *"HudCanary does not implement
+  com.gijsm.vibemod.api.Mod"* — because by then there are two `Mod` interfaces.
+  `compileOnly` is the correct declaration, not a workaround.
+
+**The gate needs a display.** There is no headless mode, because the point is
+that a HUD renderer really renders.
+
+### Deviations, flagged
+
+1. **`loader-common` is new** (§1's module list does not have it). It is a
+   source directory, not a module, and it is shared by exactly the two loader
+   hosts. Justified above; the alternative was 2700 duplicated lines including
+   the entire dialog mapping.
+2. **No mixin on NeoForge** (§8.5 assumed one). `CustomClickActionEvent` exists;
+   §8.5's own "unless NeoForge exposes an event" clause covers this.
+3. **`union:` translation is dead code on FML 11** (§7.1). Kept and unit-tested
+   anyway, reasons above.
+4. **The neoforge cheat sheet does not name NeoForge events** (§6.2 allowed it
+   to). Reasons above.
+5. **`/vibe export` is unsupported on NeoForge**, as on Fabric — §6.3's v1
+   decision, unchanged.
+6. Two host fixes landed outside the NeoForge module (the async-task log and the
+   restore-on-boot log). The first is in `loader-common` and therefore affects
+   Fabric too; the Fabric gates were re-run green afterwards.
+
+### Residual human-QA items
+
+1. **A screen-by-screen visual check of the 17 dialogs on a NeoForge client** —
+   the same item Phase C left open for Paper and Phase D for Fabric, for the
+   same reason. The renderer is verified to construct and show (the client gate
+   watches a real `DialogScreen` appear) and the mapping is mechanical from the
+   same `Screen` data, but "does screen 12's source listing wrap correctly at
+   400px" needs eyes.
+2. **The `java.compiler` probe on a Mojang-launcher jlink runtime**, inherited
+   from Phase D.
+3. **Multiplayer NeoForge**: every gate here is a dedicated server driven over
+   RCON or a singleplayer client. A NeoForge client connected to a NeoForge
+   dedicated server exercises the same code paths the two gates cover
+   separately, but nothing has run both at once.
+
+### Notes for Phase F (CI)
+
+- **The matrix**, as tasks and scripts: `./gradlew build` (all modules,
+  self-tests, corpus) · `./gradlew selfTestEcj` · `scripts/smoke-paper.sh` ·
+  `scripts/smoke-fabric.sh` · `scripts/smoke-neoforge.sh`. Those five are fully
+  headless and are the CI gate.
+- **Needs a display**: `scripts/clientgate-neoforge.sh` and
+  `./gradlew :fabric:runClientGameTest`. On Linux runners both need `xvfb-run`
+  plus a software GL stack (Mesa `llvmpipe`); neither can run on a plain
+  container. Budget ~5 minutes each, and expect them to be the flakiest jobs in
+  the matrix — they are real game clients.
+- **Cannot run headless at all**: nothing, as far as this phase found — but the
+  two client gates have never been run under xvfb here, only on a real macOS
+  display. That is the one Phase F assumption still unverified.
+- **Caches worth keeping**: `~/.gradle`, `fabric/smoke-cache/` (the Fabric server
+  launcher + fabric-api) and `neoforge/smoke-cache/` (the NeoForge installer and
+  the ~200MB server tree it builds — the smoke script already treats it as a
+  template and copies rather than reinstalling).
+- **The client gates write verdict files**; the NeoForge one halts the JVM with
+  an exit code and also enforces a wall-clock deadline on its own daemon thread,
+  so a wedged client cannot hang a job.
+
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 
 Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;

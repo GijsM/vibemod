@@ -100,7 +100,19 @@ public final class LoaderTickScheduler implements TickScheduler {
 
     @Override
     public TaskHandle async(Runnable task) {
-        Future<?> future = async.submit(task);
+        // Wrapped, because ExecutorService#submit buries a thrown exception in a
+        // Future nobody looks at. The compile side of restore-on-boot and of
+        // every /vibe make runs through here, so an unlogged throw there means a
+        // mod that simply never appears and a log with nothing in it at all.
+        // The Phase E client gate met exactly that and spent a run finding it.
+        Future<?> future = async.submit(() -> {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                LOG.log(Level.SEVERE, "A VibeMod async task threw", t);
+                throw t;
+            }
+        });
         return new TaskHandle() {
             @Override
             public void close() {

@@ -696,6 +696,16 @@ public final class VibeModNeoForge {
                 CompileResult compiled = compiler.compile(sources);
                 scheduler.runOnMain(() -> {
                     if (!compiled.success()) {
+                        // Logged as well as sent. The sender is whoever asked —
+                        // and on restore-on-boot that is the console, whose
+                        // Adventure audience is not always a place a human is
+                        // looking. A mod that failed to compile at boot must
+                        // leave a trace in the log whatever the audience does
+                        // with it; the Phase E client gate spent two runs on a
+                        // compile failure that reported only to a channel
+                        // nothing was reading.
+                        LOG.warning(mod.name() + " v" + mod.currentVersion()
+                                + " failed to compile: " + firstLine(compiled.diagnostics()));
                         feedback.audience().sendMessage(Style.err("Stored version failed to compile: "
                                 + firstLine(compiled.diagnostics())));
                         return;
@@ -705,12 +715,14 @@ public final class VibeModNeoForge {
                                 mod.mainClass(), compiled.classes(),
                                 mod.config(), store.resolvedConfigValues(mod.name()), mod.debugEcho());
                         store.setEnabled(mod.name(), true);
+                        LOG.info(mod.name() + " v" + mod.currentVersion() + " is live");
                         feedback.audience().sendMessage(
                                 Style.ok(mod.name() + " v" + mod.currentVersion() + " is live"));
                         if (onLive != null) {
                             onLive.run();
                         }
                     } catch (ModLoadException e) {
+                        LOG.warning("Failed to start " + mod.name() + ": " + e.getMessage());
                         feedback.audience().sendMessage(
                                 Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
                     }

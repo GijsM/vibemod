@@ -80,8 +80,26 @@ tasks.named("compileJava") { dependsOn(copySharedSdkSources) }
 // NeoForge
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The client gate (ARCHITECTURE-V2 §9 Phase E, the CLIENT half)
+//
+// A second mod, in its own source set, loaded only by the `runClientGate` run.
+// It never ships: `jar` builds only `main`.
+//
+// It has to be a mod at all because NeoForge has no client test harness.
+// Fabric has fabric-client-gametest, which boots a client, builds a world and
+// runs assertions; NeoForge's GameTest framework runs on a DEDICATED SERVER
+// (`gameTestServer`) and never starts a client, and MDG's `unitTest` runs JUnit
+// against the game classpath with no window at all. Neither can answer §8.1's
+// question — "does a throwing HUD renderer crash the render loop" — so the gate
+// drives the client from inside it. See ClientGate's javadoc.
+// ---------------------------------------------------------------------------
+val clientgate: SourceSet by sourceSets.creating
+
 neoForge {
     version = property("neoforgeVersion") as String
+
+    addModdingDependenciesTo(clientgate)
 
     runs {
         register("client") {
@@ -92,13 +110,53 @@ neoForge {
             server()
             gameDirectory = layout.projectDirectory.dir("run/server").asFile
         }
+        register("clientGate") {
+            client()
+            sourceSet = clientgate
+            // A throwaway directory, wiped by the runner script, so the gate
+            // always starts from no world and no stored mods.
+            gameDirectory = layout.projectDirectory.dir("clientgate-run").asFile
+            ideName = "NeoForge Client Gate"
+        }
     }
 
     mods {
         register("vibemod") {
             sourceSet(sourceSets.main.get())
         }
+        register("vibemodgate") {
+            sourceSet(clientgate)
+        }
     }
+}
+
+dependencies {
+    // The gate asserts against the host's own live state, so it links the host —
+    // but COMPILE-ONLY, every one of them.
+    //
+    // `implementation` here breaks the run in a way that takes a while to see.
+    // FML registers `build/classes/java/main` as the `vibemod` mod file; putting
+    // the same directory on the gate's RUNTIME classpath registers its classes a
+    // second time, under a different loader. Everything still starts, and then
+    // every generated mod fails to load with
+    // "vibemod.hudcanary.HudCanary does not implement com.gijsm.vibemod.api.Mod"
+    // — because by then there are two `Mod` interfaces, and the one the
+    // hot-loaded class linked against is not the one the host's `instanceof`
+    // asks about. At runtime FML supplies all of this through the mod file, so
+    // compileOnly is not a workaround, it is the correct declaration.
+    "clientgateCompileOnly"(sourceSets.main.get().output)
+
+    // These four ARE needed at runtime and are not duplicated by doing so: they
+    // are single jars, so the gate run and the mod file reference the same file
+    // rather than two copies of the same classes.
+    "clientgateImplementation"(project(":core"))
+    "clientgateImplementation"(project(":platform-api"))
+    "clientgateImplementation"(project(":sdk-client"))
+    "clientgateImplementation"("net.kyori:adventure-api:${property("adventureVersion")}")
+    "clientgateRuntimeOnly"("net.kyori:adventure-key:${property("adventureVersion")}")
+    "clientgateRuntimeOnly"("net.kyori:adventure-text-serializer-gson:${property("adventureVersion")}")
+    "clientgateRuntimeOnly"("net.kyori:adventure-text-serializer-plain:${property("adventureVersion")}")
+    "clientgateRuntimeOnly"("org.eclipse.jdt:ecj:${property("ecjVersion")}")
 }
 
 // ---------------------------------------------------------------------------

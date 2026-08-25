@@ -219,7 +219,19 @@ public final class ModLifecycle implements ModFailure {
 
     /** Hand the bytes to the host, which instantiates and enables. Rolls back on any failure. */
     private void activate(LoadedMod lm) throws ModLoadException {
-        BytesClassLoader loader = new BytesClassLoader(ModLifecycle.class.getClassLoader(), lm.classes);
+        // The parent is the HOST's class loader, not this class's, and the
+        // difference is load-bearing.
+        //
+        // The host is the thing that does `instanceof Mod` on what comes back,
+        // so the `Mod` the generated class links against has to be the host's
+        // `Mod`. Parenting to `ModLifecycle.class.getClassLoader()` only happens
+        // to give the same answer when `core` and the sdk share a loader — which
+        // they do in every shipped jar, and do NOT in a loader's dev run, where
+        // `core` arrives as a plain classpath jar and the sdk arrives inside the
+        // mod file. There the two diverge, and a generated mod either fails to
+        // find `Mod` at all or finds a second copy and is rejected by an
+        // `instanceof` that looks like it should have passed.
+        BytesClassLoader loader = new BytesClassLoader(host.getClass().getClassLoader(), lm.classes);
         try {
             lm.activation = host.activate(lm.handle, loader, lm.mainClassFqcn);
         } catch (ModLoadException e) {
