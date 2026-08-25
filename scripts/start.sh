@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
+#
+# PAPER-ONLY DEV HELPER (see the header of scripts/setup.sh).
+#
 # Starts the local Paper dev server in the background and waits for it to
 # finish booting (log line + RCON port up) before returning.
+#
+# Usage: scripts/start.sh                        # newest paper-*.jar in server/
+#        PAPER_VERSION=1.20.6 scripts/start.sh   # pick a specific line
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/server"
-PAPER_JAR="paper-1.21.8-60.jar"
 PID_FILE="$SERVER_DIR/.pid"
 CONSOLE_LOG="$SERVER_DIR/console.log"
 LATEST_LOG="$SERVER_DIR/logs/latest.log"
 
-if [[ ! -f "$SERVER_DIR/$PAPER_JAR" ]]; then
-  echo "!! $SERVER_DIR/$PAPER_JAR not found. Run scripts/setup.sh first." >&2
+# Discovered, not hard-coded: setup.sh names the jar after whatever build Fill
+# reported as latest, so a pinned filename here goes stale the first time Paper
+# ships a build. With PAPER_VERSION set, only that line is considered.
+PATTERN="paper-${PAPER_VERSION:-}*.jar"
+PAPER_JAR="$(cd "$SERVER_DIR" 2>/dev/null && ls -t $PATTERN 2>/dev/null | head -1 || true)"
+
+if [[ -z "$PAPER_JAR" || ! -f "$SERVER_DIR/$PAPER_JAR" ]]; then
+  echo "!! No $PATTERN in $SERVER_DIR. Run scripts/setup.sh first" \
+       "(PAPER_VERSION=${PAPER_VERSION:-1.21.8} scripts/setup.sh)." >&2
   exit 1
 fi
+echo "==> Paper jar: $PAPER_JAR"
 
 if [[ -f "$PID_FILE" ]]; then
   EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"

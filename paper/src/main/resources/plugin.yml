@@ -1,5 +1,5 @@
 name: VibeMod
-version: 1.0.0
+version: 2.0.0
 main: com.gijsm.vibemod.VibeMod
 # The floor is Paper 1.20.6 (ARCHITECTURE-V2 §0#5, §6.3). Everything newer than
 # that which VibeMod touches is capability-gated at runtime, never assumed —

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#
+# PAPER-ONLY DEV HELPER (see the header of scripts/setup.sh).
+#
 # Build + hot-deploy VibeMod without a server restart (Bukkit reload).
 # Note: plugin reload is officially discouraged (leaks a classloader per
 # reload); fine for this dev server, do a real restart occasionally.

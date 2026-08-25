@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#
+# PAPER-ONLY DEV HELPER (see the header of scripts/setup.sh).
+#
 # Usage: rcon.sh "<command>"
 # Sends one command to the local dev server over RCON and prints the response
 # (with Minecraft color codes stripped).

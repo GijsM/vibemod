@@ -1,33 +1,56 @@
 #!/usr/bin/env bash
+#
+# PAPER-ONLY DEV HELPER. This script, start.sh, stop.sh, build.sh, deploy.sh,
+# rcon.sh and logtail.sh exist to run ONE local Paper server under server/ for
+# hand-testing. They are not the acceptance gates and they know nothing about
+# Fabric or NeoForge - for those, and for a real headless gate on any platform,
+# use scripts/smoke-{paper,fabric,neoforge}.sh (see README, "Development").
+#
 # One-time (idempotent) local dev setup for VibeMod:
-#   - downloads the pinned Paper 1.21.8 build 60 server jar (verified by sha256)
+#   - downloads the latest Paper $PAPER_VERSION server jar (verified by sha256)
 #   - accepts the Mojang EULA
 #   - generates/reuses an RCON password and writes server/server.properties
 #   - installs the rcon-client npm dependency used by scripts/rcon.sh
+#
+# Usage: scripts/setup.sh            # Paper 1.21.8, the dialog baseline
+#        PAPER_VERSION=1.20.6 scripts/setup.sh   # the supported floor
+#        PAPER_VERSION=26.2   scripts/setup.sh   # the newest line
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER_DIR="$ROOT/server"
 SCRIPTS_DIR="$ROOT/scripts"
 
-PAPER_VERSION="1.21.8"
-PAPER_BUILD="60"
-PAPER_JAR_NAME="paper-${PAPER_VERSION}-${PAPER_BUILD}.jar"
-PAPER_JAR_PATH="$SERVER_DIR/$PAPER_JAR_NAME"
+# 1.21.8 by default: it is the dialog baseline VibeMod was built on, and the
+# version gradle.properties calls paperRunVersionModern.
+PAPER_VERSION="${PAPER_VERSION:-1.21.8}"
 FILL_API_URL="https://fill.papermc.io/v3/projects/paper/versions/${PAPER_VERSION}/builds/latest"
 
 mkdir -p "$SERVER_DIR"
 
 echo "==> VibeMod dev environment setup"
-echo "    root: $ROOT"
+echo "    root:  $ROOT"
+echo "    paper: $PAPER_VERSION"
 
 # --- 1. Paper server jar ---------------------------------------------------
+# The build number is whatever Fill reports as latest, not a hand-maintained
+# pin: the old script named the file after a pinned build it never actually
+# asked for, so the name on disk and the bytes in it could disagree.
+echo "==> Fetching build metadata from Fill v3 API..."
+BUILD_JSON="$(curl -fsSL -H 'User-Agent: vibemod-setup/1.0 (local dev)' "$FILL_API_URL")"
+
+PAPER_BUILD="$(node -e '
+  const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  if (!data.id) { process.exit(1); }
+  process.stdout.write(String(data.id));
+' <<<"$BUILD_JSON")"
+
+PAPER_JAR_NAME="paper-${PAPER_VERSION}-${PAPER_BUILD}.jar"
+PAPER_JAR_PATH="$SERVER_DIR/$PAPER_JAR_NAME"
+
 if [[ -f "$PAPER_JAR_PATH" ]]; then
   echo "==> Paper jar already present: $PAPER_JAR_PATH (skipping download)"
 else
-  echo "==> Fetching build metadata from Fill v3 API..."
-  BUILD_JSON="$(curl -fsSL -H 'User-Agent: vibemod-setup/1.0 (local dev)' "$FILL_API_URL")"
-
   DOWNLOAD_URL="$(node -e '
     const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
     const dl = data.downloads && data.downloads["server:default"];
