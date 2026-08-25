@@ -5,6 +5,8 @@ import java.util.logging.Logger;
 import net.fabricmc.api.ClientModInitializer;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
+import com.gijsm.vibemod.fabric.shim.ClientShims;
+import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.loader.client.DeferredTickScheduler;
 import com.gijsm.vibemod.loader.client.LoaderClientContext;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -76,6 +78,16 @@ public final class VibeModFabricClient implements ClientModInitializer {
         FabricClientEventBridge created = new FabricClientEventBridge(sink, renderWatchdog);
         created.install();
         bridge = created;
+
+        // V3 Phase 1 (§B, §C, §D, §E). Both installs happen HERE, in the client
+        // entrypoint, for the same reason the bridge itself is built here: they
+        // are process-lived, they must exist before the first mod loads, and
+        // their absence on a dedicated server is how the server side knows there
+        // is no client. `Shims` holds the server-safe half (thread checks,
+        // watchdog, screen close) and `ClientShims` the half whose descriptors
+        // name client-only classes.
+        Shims.installClient(created);
+        ClientShims.install(created);
 
         VibeModFabric.setClientHooks(new VibeModFabric.ClientHooks(
                 created,

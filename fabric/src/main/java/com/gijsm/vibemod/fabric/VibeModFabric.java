@@ -193,8 +193,20 @@ public final class VibeModFabric implements ModInitializer {
         });
         Shims.install(eventFanout);
 
-        ServerLifecycleEvents.SERVER_STARTING.register(VibeModFabric::start);
-        ServerLifecycleEvents.SERVER_STOPPED.register(server -> stop());
+        // The note* calls are what make the fanout's immediate-replay honest
+        // (V3 Phase 1 §A): a mod hot-loaded after an event has fired needs it
+        // replayed, and a mod loaded BEFORE it fires must not get it twice. Only
+        // the host can tell the fanout which of those it is, because at the
+        // moment these fire nothing has subscribed through it yet.
+        ServerLifecycleEvents.SERVER_STARTING.register(server -> {
+            eventFanout.noteServerStarting();
+            start(server);
+        });
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> eventFanout.noteServerStarted());
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+            eventFanout.noteServerStopped();
+            stop();
+        });
 
         // ORDER MATTERS, and it is the one line in this file that is a decision
         // rather than a sequence. Both of these register an ALLOW_CHAT_MESSAGE
@@ -230,6 +242,11 @@ public final class VibeModFabric implements ModInitializer {
             if (live != null) {
                 live.reinstallInto(dispatcher);
             }
+            // V3 Phase 1 §A, and the ORDER is the policy: the host reinstalls
+            // /vibe and its own dynamic commands first, so a generated mod that
+            // names one of them loses the collision and is told so, rather than
+            // silently taking over the command that disables it.
+            eventFanout.commands().hostCallbackFired(dispatcher, registry, environment);
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> forget(handler.player.getUUID()));
@@ -396,8 +413,17 @@ public final class VibeModFabric implements ModInitializer {
         private final DebugEcho debugEcho;
 
         private ModLifecycle lifecycle;
-        private LoaderCommandBridge commandBridge;
-        private FabricChatBridge chatBridge;
+        // NO `commandBridge`/`chatBridge` fields here, and their absence is
+        // load-bearing rather than tidiness. Both used to be declared, which
+        // silently shadowed the statics of the same name above — so `wire()`
+        // assigned the SHADOWS, the process-lived subscriptions in
+        // onInitialize() kept reading a null static, and two things quietly did
+        // not work: `/vibe` and every generated command vanished on the first
+        // `/reload` (CommandRegistrationCallback found no bridge to reinstall
+        // into), and `ctx.onChat` never fired at all (the chat dispatcher's
+        // supplier answered null forever). NeoForge's identical Boot never
+        // declared them and never had the bug. Found by the V3 Phase 1 gate's
+        // new `/reload` assertion.
         private ChatRenderer chatRenderer;
         private UiRenderer ui;
         private ModGenerator generator;

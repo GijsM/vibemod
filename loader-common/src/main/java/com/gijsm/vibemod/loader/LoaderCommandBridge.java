@@ -220,7 +220,7 @@ public final class LoaderCommandBridge implements CommandBridge {
             }
             // The command is dead even if the node surgery below fails.
             live.handler = null;
-            removeNode(server.getCommands().getDispatcher(), key);
+            removeChild(server.getCommands().getDispatcher().getRoot(), key);
             resyncAll();
         } catch (Throwable t) {
             LOG.log(Level.WARNING, "Failed to unregister dynamic command /" + key, t);
@@ -228,21 +228,27 @@ public final class LoaderCommandBridge implements CommandBridge {
     }
 
     /**
-     * Best-effort removal of a root literal.
+     * Best-effort removal of one child of a Brigadier node.
      *
      * <p>Brigadier deliberately has no remove: its trees are built once at
      * startup. The three maps behind {@link CommandNode} ({@code children},
      * {@code literals}, {@code arguments}) are private with no mutator, so this
-     * is reflection — isolated here, and never load-bearing, because
-     * {@link #unregister} has already nulled the handler.
+     * is reflection — isolated here, and never load-bearing for {@code /vibe}'s
+     * own dynamic commands, because {@link #unregister} has already nulled the
+     * handler before it runs.
+     *
+     * <p>Public and static since V3 Phase 1: the native command seam
+     * ({@code CommandSeam}) removes root literals a generated Fabric mod added
+     * through {@code CommandRegistrationCallback} the same way, and a second
+     * copy of this reflection is exactly the kind of thing that rots when
+     * Brigadier renames a field.
      */
-    private static void removeNode(CommandDispatcher<CommandSourceStack> dispatcher, String key) {
-        CommandNode<CommandSourceStack> root = dispatcher.getRoot();
+    public static void removeChild(CommandNode<CommandSourceStack> parent, String key) {
         for (String fieldName : new String[] {"children", "literals", "arguments"}) {
             try {
                 Field field = CommandNode.class.getDeclaredField(fieldName);
                 field.setAccessible(true);
-                Object value = field.get(root);
+                Object value = field.get(parent);
                 if (value instanceof Map<?, ?> map) {
                     map.remove(key);
                 }
@@ -254,11 +260,40 @@ public final class LoaderCommandBridge implements CommandBridge {
     }
 
     /**
+     * Best-effort restore of a node's executor, for the one case Phase 1 has to
+     * undo rather than remove: a mod's {@code CommandRegistrationCallback} that
+     * merged onto an existing literal.
+     *
+     * <p>{@code CommandNode.addChild} <em>merges</em> when a child of that name
+     * already exists — it overwrites the existing node's {@code command} and
+     * adds the incoming node's children to it — so a mod re-registering
+     * {@code /vibe} would silently take it over with no new node to remove. The
+     * field is private with no setter, so putting the old executor back is
+     * reflection for the same reason removal is.
+     *
+     * @return whether the executor was actually restored
+     */
+    public static boolean restoreCommand(CommandNode<CommandSourceStack> node, Object previous) {
+        try {
+            Field field = CommandNode.class.getDeclaredField("command");
+            field.setAccessible(true);
+            field.set(node, previous);
+            return true;
+        } catch (Throwable t) {
+            LOG.fine("Could not restore Brigadier's 'command' on /" + node.getName() + " (" + t + ")");
+            return false;
+        }
+    }
+
+    /**
      * Pushes the command tree to every online player so a freshly registered
      * command tab-completes without a rejoin.
+     *
+     * <p>Static because the native command seam needs the identical resync and
+     * has no bridge instance: {@code Commands.sendCommands} is per-player and
+     * "best-effort, never throws" is the contract both callers depend on.
      */
-    @Override
-    public void resyncAll() {
+    public static void resync(MinecraftServer server) {
         try {
             Commands commands = server.getCommands();
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
@@ -271,6 +306,11 @@ public final class LoaderCommandBridge implements CommandBridge {
         } catch (Throwable ignored) {
             // best-effort
         }
+    }
+
+    @Override
+    public void resyncAll() {
+        resync(server);
     }
 
     /** A runtime-registered command whose handler can be swapped or neutered. */

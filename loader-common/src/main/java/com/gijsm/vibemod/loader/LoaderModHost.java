@@ -102,7 +102,7 @@ public final class LoaderModHost implements ModHost {
         try {
             Class<?> mainClass = loader.loadClass(mainClassFqcn);
             obj = mainClass.getDeclaredConstructor().newInstance();
-            nativeInit = entrypoints.adapt(obj);
+            nativeInit = entrypoints.adapt(handle, loader, obj);
             if (nativeInit == null && !(obj instanceof Mod)) {
                 throw new ModLoadException(mainClassFqcn + " implements neither "
                         + Mod.class.getName() + " nor " + entrypoints.describe(), null);

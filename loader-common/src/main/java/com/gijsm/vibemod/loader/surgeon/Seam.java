@@ -42,6 +42,28 @@ public record Seam(String owner, String name, String descriptor,
         return new Seam(owner, name, descriptor, shimOwner, shimName, shimDescriptor);
     }
 
+    /**
+     * The other shape: an {@code invokestatic} that already has no receiver, so
+     * the shim's descriptor is the original one unchanged and only the owner
+     * moves (V3 Phase 1 §C/§D).
+     *
+     * <p>{@code KeyBindingHelper.registerKeyMapping(mapping)} and
+     * {@code HudElementRegistry.addLast(id, element)} are both static factory
+     * calls: nothing is pushed as a receiver, so prepending one would leave the
+     * verifier looking for an argument that is not on the stack. Keeping the two
+     * constructions apart — rather than making {@link #prependingReceiver} guess
+     * from the descriptor — means the caller states which kind of call site it
+     * is intercepting, and a mistake is a link error at the shim rather than a
+     * silent stack mismatch.
+     */
+    public static Seam staticCall(String owner, String name, String descriptor,
+                                  String shimOwner, String shimName) {
+        if (descriptor.indexOf('(') != 0) {
+            throw new IllegalArgumentException("not a method descriptor: " + descriptor);
+        }
+        return new Seam(owner, name, descriptor, shimOwner, shimName, descriptor);
+    }
+
     /** Whether this seam covers a call to {@code owner}.{@code name}{@code descriptor}. */
     boolean matches(String callOwner, String callName, String callDescriptor) {
         return owner.equals(callOwner) && name.equals(callName) && descriptor.equals(callDescriptor);

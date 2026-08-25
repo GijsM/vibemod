@@ -1,6 +1,7 @@
 package com.gijsm.vibemod.fabric.client;
 
 import java.util.Locale;
+import java.util.logging.Logger;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
@@ -10,27 +11,115 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
+import com.gijsm.vibemod.fabric.shim.ClientRegistrations;
+import com.gijsm.vibemod.fabric.shim.ClientSeam;
 import com.gijsm.vibemod.loader.client.LoaderClientEventBridge;
 import com.gijsm.vibemod.platform.ModFailure;
+import com.gijsm.vibemod.platform.Registration;
+import com.gijsm.vibemod.runtime.ModLifecycle;
 import com.gijsm.vibemod.runtime.Watchdog;
 
 /**
  * The Fabric half of {@link LoaderClientEventBridge} (§8): the four permanent
  * hooks, and the {@code /vibec} tree that has to be written against Fabric's own
  * client-command source.
+ *
+ * <p>V3 Phase 1 makes it the render thread's representative as well. It
+ * implements {@link ClientSeam} — which the dedicated-server half of the host
+ * holds as an interface, so it can ask about the render thread without naming a
+ * client class — and {@link ClientRegistrations}, which is where a native mod's
+ * rewritten {@code KeyMappingHelper}/{@code HudElementRegistry} calls land. Both
+ * are answered by the pool and the HUD pipeline that were already here: a native
+ * keybind is one of the same eight slots, and a native {@code HudElement} is an
+ * entry behind the same single permanent element.
  */
-public final class FabricClientEventBridge extends LoaderClientEventBridge {
+public final class FabricClientEventBridge extends LoaderClientEventBridge
+        implements ClientSeam, ClientRegistrations {
+
+    private static final Logger LOG = Logger.getLogger("VibeMod");
 
     private static final Identifier HUD_ELEMENT_ID = Identifier.fromNamespaceAndPath("vibemod", "mods");
 
     public FabricClientEventBridge(ModFailure failure, Watchdog watchdog) {
         super(failure, watchdog);
+    }
+
+    // ----------------------------------------------------------- ClientSeam
+
+    @Override
+    public boolean onRenderThread() {
+        Minecraft client = Minecraft.getInstance();
+        return client != null && client.isSameThread();
+    }
+
+    @Override
+    public void runOnRenderThread(Runnable body) {
+        Minecraft client = Minecraft.getInstance();
+        if (client == null) {
+            return;
+        }
+        // execute() runs inline when already on the render thread and queues
+        // otherwise, which is exactly the contract; the host never blocks the
+        // server thread waiting for a frame.
+        client.execute(body);
+    }
+
+    /**
+     * Closes the open screen when the mod that defined it is going away
+     * (§E).
+     *
+     * <p>Identity on the class loader, not a name check: two versions of the
+     * same mod have identically-named classes and only one of them is being
+     * unloaded. {@code setScreenAndShow(null)} is legal and does the right thing
+     * — {@code Gui.setScreen} explicitly handles null by returning to the
+     * in-game GUI, or to the title screen when there is no level — and the one
+     * case it refuses (a null during client-level teardown, which throws
+     * {@code IllegalStateException}) is exactly the case where the screen is
+     * being replaced anyway.
+     */
+    @Override
+    public void closeScreensFrom(ClassLoader modLoader) {
+        runOnRenderThread(() -> {
+            Minecraft client = Minecraft.getInstance();
+            Screen open = client == null ? null : client.gui.screen();
+            if (open == null) {
+                return;
+            }
+            ClassLoader owner = open.getClass().getClassLoader();
+            if (!(owner instanceof ModLifecycle.BytesClassLoader) || owner != modLoader) {
+                return;
+            }
+            LOG.info("Closing " + open.getClass().getName() + ": the mod that defined it was unloaded");
+            try {
+                client.setScreenAndShow(null);
+            } catch (Throwable t) {
+                // Mid-disconnect the game refuses a null screen because it is
+                // already putting one up. Nothing to do, and nothing broken.
+                LOG.fine("Could not close a departing mod's screen: " + t);
+            }
+        });
+    }
+
+    // -------------------------------------------------- ClientRegistrations
+
+    @Override
+    public Leased leaseKeyMapping(String modName, KeyMapping requested) {
+        NativeKeyLease lease = leaseSlotFor(modName, requested);
+        return new Leased(lease.mapping(), Registration.of(lease.release()));
+    }
+
+    @Override
+    public Registration addHud(String modName, HudElement element) {
+        return rawHud(modName, element::extractRenderState);
     }
 
     @Override
@@ -40,9 +129,11 @@ public final class FabricClientEventBridge extends LoaderClientEventBridge {
         initSlots(KeyMappingHelper::registerKeyMapping, category);
 
         // 26.x: a HudElement extracts render state rather than drawing, so the
-        // callback's first argument is a GuiGraphicsExtractor.
-        HudElementRegistry.addLast(HUD_ELEMENT_ID, (graphics, delta) ->
-                renderHuds(graphics, delta.getGameTimeDeltaPartialTick(false)));
+        // callback's first argument is a GuiGraphicsExtractor. The delta tracker
+        // is passed through rather than reduced to a partial tick, because a
+        // native mod's own HudElement is entitled to the object the game hands
+        // out (V3 Phase 1 §D).
+        HudElementRegistry.addLast(HUD_ELEMENT_ID, this::renderHuds);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> clientTick());
 

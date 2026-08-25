@@ -490,9 +490,9 @@ public class LlmSelfTest {
         check("the fabric-legacy prompt counts its own few-shots (three)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC_LEGACY)
                         .contains("The following three examples show"));
-        check("the native fabric prompt counts its own few-shots (one)",
+        check("the native fabric prompt counts its own few-shots (two)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC)
-                        .contains("The following one example shows"));
+                        .contains("The following two examples show"));
 
         if (failures == 0) {
             System.out.println("PASS: Bukkit vocabulary is confined to the Paper profiles, and every "
@@ -533,9 +533,31 @@ public class LlmSelfTest {
                         && prompt.contains("java.net.*"));
         check("the native prompt bans Event.addPhaseOrdering",
                 prompt.contains("Event.addPhaseOrdering"));
-        check("the native prompt defers commands, keybinds, HUD and registries",
-                prompt.contains("CommandRegistrationCallback") && prompt.contains("KeyBindingHelper")
-                        && prompt.contains("HudElementRegistry") && prompt.contains("Registry.register"));
+        // V3 Phase 1 §F: commands, keybinds, HUD and screens are OPEN now, and
+        // the prompt has to say so rather than keep banning them. Registries and
+        // resources are still the ones that are not there.
+        check("the native prompt teaches hot commands",
+                prompt.contains("CommandRegistrationCallback") && prompt.contains("COMMANDS are hot"));
+        check("the native prompt teaches the keybind pool and its honest caveat",
+                prompt.contains("KeyMappingHelper.registerKeyMapping")
+                        && prompt.contains("returns a DIFFERENT")
+                        && prompt.contains("may not be the one you asked"));
+        check("the native prompt teaches the HUD element",
+                prompt.contains("HudElementRegistry.addLast"));
+        check("the native prompt allows Screen subclassing",
+                prompt.contains("net.minecraft.client.gui.screens.Screen"));
+        check("the native prompt teaches the client entrypoint",
+                prompt.contains("net.fabricmc.api.ClientModInitializer")
+                        && prompt.contains("onInitializeClient()"));
+        check("the native prompt carries the render-thread contract",
+                prompt.contains("RENDER THREAD"));
+        check("the native prompt restates the singleplayer shared-JVM race",
+                prompt.contains("share one JVM") && prompt.contains("NEVER read or")
+                        && prompt.contains("write server state from client code"));
+        check("the native prompt still refuses registries and resources",
+                prompt.contains("STILL NOT AVAILABLE") && prompt.contains("Registry.register"));
+        check("the native prompt no longer names the era's non-existent KeyBindingHelper",
+                !prompt.contains("KeyBindingHelper"));
         check("the native prompt carries the Yarn -> Mojang rename table",
                 prompt.contains("`World` is `Level`") && prompt.contains("`PlayerEntity` is `Player`")
                         && prompt.contains("`Text` is `Component`"));
@@ -554,15 +576,23 @@ public class LlmSelfTest {
         check("the native prompt has no Bukkit vocabulary at all",
                 !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
 
-        // The one few-shot IS a plain Fabric mod.
+        // The few-shots ARE plain Fabric mods.
         check("the native few-shot is a plain Fabric mod",
                 prompt.contains("implements ModInitializer")
                         && prompt.contains("AttackBlockCallback.EVENT.register")
                         && prompt.contains("ServerTickEvents.END_SERVER_TICK.register"));
-        check("the native few-shot imports no VibeMod api",
+        check("the native few-shots import no VibeMod api",
                 !prompt.contains("import com.gijsm.vibemod.api"));
-        check("the native few-shot ships no config knobs",
+        check("the native few-shots ship no config knobs",
                 !prompt.contains("\"config\":[{\"key\""));
+        check("the Phase 1 few-shot implements BOTH entrypoints",
+                prompt.contains("implements ModInitializer, ClientModInitializer"));
+        check("the Phase 1 few-shot registers a command, a keybind and a HUD in one mod",
+                prompt.contains("CommandRegistrationCallback.EVENT.register")
+                        && prompt.contains("KeyMappingHelper.registerKeyMapping")
+                        && prompt.contains("HudElementRegistry.addLast"));
+        check("the Phase 1 few-shot keeps the mapping it was handed back",
+                prompt.contains("toggle.consumeClick()"));
 
         if (failures == 0) {
             System.out.println("PASS: the native fabric profile teaches an ordinary Fabric mod, "

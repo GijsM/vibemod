@@ -39,6 +39,17 @@ public final class Shims {
      */
     private static volatile EventSeam seam;
 
+    /**
+     * The render thread, or null on a dedicated server (V3 Phase 1 §B).
+     *
+     * <p>Lives here rather than in {@code ClientShims} because the SERVER side
+     * needs to ask: the fanout decides whether a client callback may be
+     * registered, and the entrypoint adapter decides whether a mod has a client
+     * half to run. {@link ClientSeam} names no client type, precisely so this
+     * field can exist in a class the dedicated server loads.
+     */
+    private static volatile ClientSeam client;
+
     private Shims() {
     }
 
@@ -50,6 +61,16 @@ public final class Shims {
     /** The installed seam, or null before mod init. */
     public static EventSeam seam() {
         return seam;
+    }
+
+    /** Installs the render-thread seam. Called from {@code onInitializeClient()}; never on a server. */
+    public static void installClient(ClientSeam client) {
+        Shims.client = client;
+    }
+
+    /** The render-thread seam, or null when there is no physical client. */
+    public static ClientSeam clientSeam() {
+        return client;
     }
 
     /**

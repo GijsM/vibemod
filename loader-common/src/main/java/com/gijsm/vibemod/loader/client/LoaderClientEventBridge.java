@@ -14,6 +14,7 @@ import java.util.logging.Logger;
 
 import com.mojang.blaze3d.platform.InputConstants;
 
+import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -84,6 +85,14 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
     private final Watchdog watchdog;
 
     private final List<Bound<HudRenderer>> huds = new CopyOnWriteArrayList<>();
+    /**
+     * The V3 native HUD list (Phase 1 §D): entries that draw with the game's own
+     * arguments rather than through {@link com.gijsm.vibemod.api.client.HudCanvas}.
+     * A separate list rather than an adapter into {@link #huds} because the two
+     * take different arguments and because the gate wants to see them counted
+     * apart.
+     */
+    private final List<Bound<RawHudRenderer>> rawHuds = new CopyOnWriteArrayList<>();
     private final List<Bound<ClientTickHandler>> tickers = new CopyOnWriteArrayList<>();
     private final Map<String, Bound<ClientCommandHandler>> clientCommands = new ConcurrentHashMap<>();
     private final Slot[] slots = new Slot[KEY_SLOTS];
@@ -104,6 +113,20 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
      * and key mappings can only be registered then.
      */
     public abstract void install();
+
+    /**
+     * The render-thread watchdog, for host code that dispatches into mod code on
+     * the render thread from outside this class (V3 Phase 1 §B: the event
+     * fanout's client half).
+     */
+    public final Watchdog renderWatchdog() {
+        return watchdog;
+    }
+
+    /** Where a render-thread failure is journalled. Same sink, same storm counter. */
+    public final ModFailure failures() {
+        return failure;
+    }
 
     // -------------------------------------------------------- the key pool
 
@@ -143,13 +166,68 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
                 + "disable a mod that uses a keybind first");
     }
 
+    /**
+     * Leases a slot for a mod that built its <em>own</em> {@code KeyMapping}
+     * (V3 Phase 1 §C) and hands back the pool's mapping.
+     *
+     * <p>Returning the slot's real {@code KeyMapping} rather than the mod's own
+     * is the entire trick. A {@code KeyMapping} only reads as pressed if the
+     * game knows about it, and the game's registry is closed long before a
+     * generated mod exists — so the mod's own instance would poll {@code false}
+     * forever. Handing back a pre-registered slot means the mod's ordinary
+     * {@code consumeClick()}/{@code isDown()} polling simply works, at the price
+     * the prompt states plainly: the physical key may not be the one it asked
+     * for.
+     *
+     * <p>The requested mapping's default key is honoured on exactly the same
+     * terms as {@link #leaseKey}'s {@code defaultKey}: only when the slot is
+     * still unbound or was last bound by us, never over a binding the player
+     * chose.
+     *
+     * @param modName    who to journal against and to release with
+     * @param requested  the mapping the mod constructed — read for its
+     *                   translation key, category and default binding, never
+     *                   registered
+     * @return the pooled mapping the mod should poll, and the lease that frees it
+     */
+    public final synchronized NativeKeyLease leaseSlotFor(String modName, KeyMapping requested) {
+        for (Slot slot : slots) {
+            if (slot != null && slot.lease == null) {
+                Slot.Lease lease = slot.leaseNative(modName, requested);
+                return new NativeKeyLease(slot.mapping, lease::release);
+            }
+        }
+        throw new IllegalStateException("All " + KEY_SLOTS + " VibeMod key slots are in use; "
+                + "disable a mod that uses a keybind first");
+    }
+
+    /**
+     * What a native keybind registration gets back: the pooled mapping to poll,
+     * and the revocation the mod's handle tracks.
+     */
+    public record NativeKeyLease(KeyMapping mapping, Runnable release) {
+    }
+
     // ------------------------------------------------------ the dispatchers
 
-    /** One frame of the host's single HUD element/layer. Render thread only. */
-    public final void renderHuds(GuiGraphicsExtractor graphics, float partialTick) {
+    /**
+     * One frame of the host's single HUD element/layer. Render thread only.
+     *
+     * <p>Takes the {@link DeltaTracker} rather than a pre-computed partial tick
+     * since V3 Phase 1: a native {@code HudElement} is handed the tracker itself
+     * by the loader, and reducing it to a float here would mean the host could
+     * not pass on what the game gave it.
+     */
+    public final void renderHuds(GuiGraphicsExtractor graphics, DeltaTracker delta) {
+        // The native entries first: they are ordinary Fabric HUD elements and
+        // expect to draw underneath anything the curated canvas layers on top.
+        for (Bound<RawHudRenderer> bound : rawHuds) {
+            guard(bound, rawHuds, "client:hud", () -> bound.handler.render(graphics, delta));
+        }
         if (huds.isEmpty()) {
             return;
         }
+        float partialTick = delta.getGameTimeDeltaPartialTick(false);
         canvas.bind(graphics);
         try {
             for (Bound<HudRenderer> bound : huds) {
@@ -175,7 +253,10 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
                 continue;
             }
             Slot.Lease lease = slot.lease;
-            if (lease == null) {
+            // A native lease has no onPress: the mod polls consumeClick() itself,
+            // and draining the queue here would eat every press before it got
+            // there.
+            if (lease == null || lease.onPress == null) {
                 continue;
             }
             // consumeClick() drains the queued presses: a key tapped three times
@@ -192,6 +273,20 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
     @Override
     public final Registration hud(String modName, String elementId, HudRenderer renderer) {
         return attach(huds, modName, renderer);
+    }
+
+    /**
+     * Attaches a native HUD element to the same permanent pipeline (V3 Phase 1
+     * §D).
+     *
+     * <p>Same tracking, same watchdog, same instant-detach-on-throw as every
+     * other client dispatch: the whole point of routing a real
+     * {@code HudElementRegistry.addLast} through here is that a HUD element a
+     * mod wrote itself must be as revocable and as harmless as one it asked the
+     * host for.
+     */
+    public final Registration rawHud(String modName, RawHudRenderer renderer) {
+        return attach(rawHuds, modName, renderer);
     }
 
     @Override
@@ -296,7 +391,8 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
                 leased++;
             }
         }
-        return "huds=" + huds.size() + " tickers=" + tickers.size()
+        return "huds=" + huds.size() + " nativeHuds=" + rawHuds.size()
+                + " tickers=" + tickers.size()
                 + " clientCommands=" + clientCommands.size()
                 + " keysLeased=" + leased + "/" + KEY_SLOTS;
     }
@@ -392,6 +488,29 @@ public abstract class LoaderClientEventBridge implements ClientEventBridge {
                 KeyMapping.resetMapping();
             }
             Lease created = new Lease(modName, label, onPress);
+            this.lease = created;
+            return created;
+        }
+
+        /**
+         * The V3 variant: bind from the mapping the mod built, and take no
+         * {@code onPress} — the mod polls the returned mapping itself.
+         *
+         * <p>{@code getDefaultKey()} rather than a parsed string, because a
+         * native mod expresses its wish in the ordinary Fabric way (the key it
+         * passed to {@code new KeyMapping(...)}), and re-spelling that as text
+         * for the host to re-parse would only add a place to be wrong.
+         */
+        Lease leaseNative(String modName, KeyMapping requested) {
+            InputConstants.Key wanted = requested == null ? null : requested.getDefaultKey();
+            if (wanted != null && !InputConstants.UNKNOWN.equals(wanted)
+                    && (mapping.isUnbound() || autoBound)) {
+                mapping.setKey(wanted);
+                autoBound = true;
+                KeyMapping.resetMapping();
+            }
+            String label = requested == null ? "keybind" : requested.getName();
+            Lease created = new Lease(modName, label, null);
             this.lease = created;
             return created;
         }

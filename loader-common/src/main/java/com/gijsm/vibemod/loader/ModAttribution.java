@@ -56,4 +56,32 @@ public final class ModAttribution {
             }
         }
     }
+
+    /**
+     * {@link #runAs} for a call that returns a value and may throw.
+     *
+     * <p>Needed by the client half of the event fanout (V3 Phase 1 §B), where
+     * the merge policy wants the listener's return value and the guard wants the
+     * exception — so neither {@link Runnable} nor a captured array is honest
+     * about what is happening.
+     */
+    public static <T> T call(ModHandle handle, Body<T> body) throws Exception {
+        ModHandle previous = CURRENT.get();
+        CURRENT.set(handle);
+        try {
+            return body.run();
+        } finally {
+            if (previous == null) {
+                CURRENT.remove();
+            } else {
+                CURRENT.set(previous);
+            }
+        }
+    }
+
+    /** A call into mod code that returns a value and may throw a checked exception. */
+    @FunctionalInterface
+    public interface Body<T> {
+        T run() throws Exception;
+    }
 }

@@ -69,11 +69,15 @@ public final class EventFanout implements EventSeam {
      * Callbacks that describe a <em>registration pass</em> rather than a game
      * event: the loader fires them once, at a moment of its choosing, and
      * whatever you register during them lives outside VibeMod's teardown model.
-     * Hot-loading into one is Phase 1's problem, and until then registering one
-     * is an error rather than a subscription that silently never fires.
+     *
+     * <p>{@code CommandRegistrationCallback} left this set in Phase 1 and has
+     * dedicated handling in {@link CommandSeam} — immediate invocation, a
+     * before/after diff of the dispatcher, reflective removal on disable and
+     * replay on datapack reload. The two that remain still have no answer:
+     * client commands would need the same treatment against a per-connection
+     * dispatcher, and resources arrive with Phase 3.
      */
     private static final Set<String> REGISTRATION_STYLE = Set.of(
-            "net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback",
             "net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback",
             "net.fabricmc.fabric.api.resource.v1.ResourceLoader");
 
@@ -85,12 +89,22 @@ public final class EventFanout implements EventSeam {
      * long after the server started, so the event they are waiting for has
      * already fired and will not fire again until the next world.
      */
-    private static final Set<String> REPLAY_WHEN_LATE = Set.of(
-            "net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents$ServerStarting",
-            "net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents$ServerStarted");
+    private static final String SERVER_STARTING =
+            "net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents$ServerStarting";
+    private static final String SERVER_STARTED =
+            "net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents$ServerStarted";
+
+    private static final Set<String> REPLAY_WHEN_LATE = Set.of(SERVER_STARTING, SERVER_STARTED);
+
+    /** The prefix every client-side Fabric API callback shares. */
+    private static final String CLIENT_API = "net.fabricmc.fabric.api.client.";
 
     private final Supplier<ModDispatch> dispatch;
     private final Supplier<MinecraftServer> server;
+    /** {@code CommandRegistrationCallback}'s dedicated handling (V3 Phase 1 §A). */
+    private final CommandSeam commands;
+    private volatile boolean serverStarting;
+    private volatile boolean serverStarted;
 
     /**
      * Keyed by {@code Event} identity — {@code Event} does not override
@@ -103,6 +117,49 @@ public final class EventFanout implements EventSeam {
     public EventFanout(Supplier<ModDispatch> dispatch, Supplier<MinecraftServer> server) {
         this.dispatch = dispatch;
         this.server = server;
+        this.commands = new CommandSeam(server, dispatch);
+    }
+
+    /**
+     * Which server lifecycle events have fired for the currently running server.
+     *
+     * <p>The host tells the fanout rather than the fanout guessing, because
+     * these are exactly the events the fanout cannot observe: nothing has
+     * subscribed to them through it yet at the moment they fire.
+     */
+    public void noteServerStarting() {
+        serverStarting = true;
+        serverStarted = false;
+    }
+
+    /** {@link #noteServerStarting}'s sibling. */
+    public void noteServerStarted() {
+        serverStarted = true;
+    }
+
+    /** Between worlds nothing has fired yet, and a client can load a second world. */
+    public void noteServerStopped() {
+        serverStarting = false;
+        serverStarted = false;
+    }
+
+    private boolean alreadyFired(String callbackName) {
+        if (SERVER_STARTING.equals(callbackName)) {
+            return serverStarting;
+        }
+        if (SERVER_STARTED.equals(callbackName)) {
+            return serverStarted;
+        }
+        return false;
+    }
+
+    /**
+     * The command seam, for the host's own {@code CommandRegistrationCallback}
+     * (which must hand it every firing so mods can be replayed into a fresh
+     * dispatcher) and for the gates.
+     */
+    public CommandSeam commands() {
+        return commands;
     }
 
     // ------------------------------------------------------------------ register
@@ -124,9 +181,16 @@ public final class EventFanout implements EventSeam {
         }
 
         Class<?> callback = callbackTypeOf(listener);
-        refuseIfUnsupported(callback);
+        if (CommandSeam.CALLBACK.equals(callback.getName())) {
+            // Not a game event at all: a registration pass, with its own
+            // immediate-invoke / diff / replay machinery (§A). It never gets a
+            // Fan, because there is nothing to dispatch to later.
+            commands.register(listener);
+            return;
+        }
+        boolean client = refuseIfUnsupported(callback);
 
-        Fan fan = fans.computeIfAbsent(event, e -> new Fan(e, callback));
+        Fan fan = fans.computeIfAbsent(event, e -> new Fan(e, callback, client));
         if (!fan.callbackType.equals(callback)) {
             throw new IllegalArgumentException("Event " + fan.label + " was first registered with a "
                     + fan.callbackType.getName() + " listener; this one is a " + callback.getName());
@@ -151,6 +215,8 @@ public final class EventFanout implements EventSeam {
         }
         parts.sort(String::compareTo);
         parts.add("total=" + total);
+        // The command seam is not a Fan (§A), so it reports itself.
+        parts.add(commands.describeState());
         return String.join(" ", parts);
     }
 
@@ -225,18 +291,42 @@ public final class EventFanout implements EventSeam {
         }
     }
 
-    /** The three things Phase 0 will not pretend to support. */
-    private static void refuseIfUnsupported(Class<?> callback) {
+    /**
+     * What VibeMod will not pretend to support, and where a client event is
+     * allowed.
+     *
+     * @return whether this is a client-side callback, which changes the thread
+     *         the fan expects and the watchdog it is measured by
+     */
+    private static boolean refuseIfUnsupported(Class<?> callback) {
         String name = callback.getName();
-        if (name.startsWith("net.fabricmc.fabric.api.client.")) {
-            throw new UnsupportedOperationException("Client-side events (" + name
-                    + ") are not available to generated mods yet — they arrive with the client "
-                    + "entrypoint in Phase 1. Use a server event for now.");
+        boolean client = name.startsWith(CLIENT_API);
+        if (client) {
+            // "From the client entrypoint on a physical client" is a statement
+            // about the thread: onInitializeClient runs on the render thread and
+            // onInitialize runs on the server thread, so asking which thread this
+            // is answers the question exactly — and keeps answering it correctly
+            // for a mod that registers a second client callback from inside the
+            // first one, which is legitimate and which a one-shot "are we in
+            // client init" flag would refuse.
+            ClientSeam seam = Shims.clientSeam();
+            if (seam == null) {
+                throw new UnsupportedOperationException("Client-side events (" + name
+                        + ") need a physical client, and this is a dedicated server. Put client "
+                        + "code in a ClientModInitializer: the host simply does not run it here.");
+            }
+            if (!seam.onRenderThread()) {
+                throw new UnsupportedOperationException("Client-side events (" + name
+                        + ") must be registered from onInitializeClient (or from inside another "
+                        + "client callback), which runs on the render thread. Registering one from "
+                        + "onInitialize would attach a client listener to server-thread code.");
+            }
         }
         if (REGISTRATION_STYLE.contains(name)) {
             throw new UnsupportedOperationException(name
                     + " is a registration pass, not a game event: whatever you register inside it "
-                    + "would outlive your mod. Commands and registries arrive in Phase 1.");
+                    + "would outlive your mod. Server commands are supported "
+                    + "(CommandRegistrationCallback); client commands and resources are not yet.");
         }
         Method sam = samOf(callback);
         if (sam != null && !Merge.supports(sam.getReturnType())) {
@@ -244,11 +334,23 @@ public final class EventFanout implements EventSeam {
                     + " (" + name + ") are not supported yet: VibeMod has no honest way to merge "
                     + "several mods' answers into one. Use a void or boolean event.");
         }
+        return client;
     }
 
-    /** Fires a lifecycle callback the mod missed because it was hot-loaded after the fact. */
+    /**
+     * Fires a lifecycle callback the mod missed because it was hot-loaded after
+     * the fact.
+     *
+     * <p>Gated on what has <em>actually</em> fired rather than on "a server
+     * exists", which is the difference between a replay and a double-fire. A
+     * mod that loads during boot restore has missed {@code SERVER_STARTING} but
+     * may still be ahead of {@code SERVER_STARTED}; replaying the latter would
+     * call it once here and again when Fabric gets to it, and a mod that does
+     * its setup twice is a bug the mod cannot defend against.
+     */
     private void replayIfLate(Fan fan, Bound bound) {
-        if (!REPLAY_WHEN_LATE.contains(fan.callbackType.getName())) {
+        String callbackName = fan.callbackType.getName();
+        if (!REPLAY_WHEN_LATE.contains(callbackName) || !alreadyFired(callbackName)) {
             return;
         }
         MinecraftServer live = server.get();
@@ -273,12 +375,15 @@ public final class EventFanout implements EventSeam {
 
         private final Class<?> callbackType;
         private final String label;
+        /** True for a {@code net.fabricmc.fabric.api.client.*} callback (V3 Phase 1 §B). */
+        private final boolean client;
         private final List<Bound> listeners = new CopyOnWriteArrayList<>();
         /** One log line per event, not one per tick, when a callback arrives off-thread. */
         private final AtomicBoolean warnedOffThread = new AtomicBoolean();
 
-        Fan(Event<?> event, Class<?> callbackType) {
+        Fan(Event<?> event, Class<?> callbackType, boolean client) {
             this.callbackType = callbackType;
+            this.client = client;
             this.label = labelOf(callbackType);
             Object proxy = Proxy.newProxyInstance(callbackType.getClassLoader(),
                     new Class<?>[] {callbackType}, new Handler(this));
@@ -293,6 +398,9 @@ public final class EventFanout implements EventSeam {
             Class<?> returnType = method.getReturnType();
             if (listeners.isEmpty()) {
                 return Merge.defaultFor(returnType);
+            }
+            if (client) {
+                return dispatchOnRenderThread(method, args, returnType);
             }
             MinecraftServer live = server.get();
             if (live != null && !live.isSameThread()) {
@@ -316,6 +424,76 @@ public final class EventFanout implements EventSeam {
                         () -> merge.accept(invoke(method, bound.listener, args))));
             }
             return merge.result();
+        }
+
+        /**
+         * The client half (§B): the render thread's own guard, not
+         * {@link ModDispatch}.
+         *
+         * <p>Three differences from the server path, and each is the render
+         * thread's doing. The thread check asks the client, not the server —
+         * a client callback that arrived on the wrong thread is as wrong as a
+         * server one, but "the wrong thread" is a different thread. The
+         * measurement is the render watchdog, so a slow client listener is
+         * disabled on the same budgets §8.4 gives HUD renderers. And a listener
+         * that throws is detached <em>on the spot</em> rather than after the
+         * error-storm threshold: these events run at sixty frames a second, so
+         * waiting for ten failures means ten stack traces built on the thread
+         * that draws.
+         *
+         * <p>That last rule is applied to every client callback rather than only
+         * to the per-frame ones. It is the policy
+         * {@code LoaderClientEventBridge} has always used for everything it
+         * dispatches on the render thread, and one rule the whole surface obeys
+         * beats a list of event names that has to be maintained.
+         */
+        private Object dispatchOnRenderThread(Method method, Object[] args, Class<?> returnType) {
+            ClientSeam seam = Shims.clientSeam();
+            if (seam == null) {
+                return Merge.defaultFor(returnType);
+            }
+            if (!seam.onRenderThread()) {
+                if (warnedOffThread.compareAndSet(false, true)) {
+                    LOG.warning(label + " fired off the render thread; VibeMod is skipping mod "
+                            + "dispatch for it. This is logged once per event.");
+                }
+                return Merge.defaultFor(returnType);
+            }
+            Merge merge = new Merge(returnType);
+            String where = "client:" + label;
+            for (Bound bound : listeners) {
+                try {
+                    seam.renderWatchdog().time(bound.modName, () -> {
+                        try {
+                            merge.accept(ModAttribution.call(bound.handle,
+                                    () -> invoke(method, bound.listener, args)));
+                        } catch (Throwable t) {
+                            throw new RenderFailure(t);
+                        }
+                    });
+                } catch (RenderFailure f) {
+                    detach(seam, bound, where, f.getCause());
+                } catch (Throwable t) {
+                    detach(seam, bound, where, t);
+                }
+            }
+            return merge.result();
+        }
+
+        private void detach(ClientSeam seam, Bound bound, String where, Throwable cause) {
+            listeners.remove(bound);
+            LOG.log(java.util.logging.Level.WARNING, "Mod " + bound.modName + " threw in " + where
+                    + "; its client listener was detached", cause);
+            seam.failures().markFailure(bound.modName, cause, "client");
+        }
+    }
+
+    /** Unchecked carrier so a checked mod exception can cross the watchdog's Runnable boundary. */
+    private static final class RenderFailure extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        RenderFailure(Throwable cause) {
+            super(cause);
         }
     }
 

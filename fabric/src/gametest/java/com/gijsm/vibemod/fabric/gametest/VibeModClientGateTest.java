@@ -102,6 +102,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             testKeySlotIsReusableAfterReload(context, bridge);
             testDialogOpensForARealPlayer(context);
             testRenderWatchdogTrips(context, bridge);
+            testNativeClientCanary(context, bridge);
         } finally {
             report();
         }
@@ -412,6 +413,144 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
                 context.computeOnClient(client -> client.player != null));
     }
 
+    // ------------------------------------------------------------- V3 Phase 1
+
+    /**
+     * The Phase 1 thesis, in one mod: everything §A–§E promised, on a real
+     * client, in a mod with no VibeMod import in it (§G).
+     *
+     * <p>It is seeded and enabled <b>mid-session</b>, which is not a convenience
+     * — it is the load case Phase 0 could implement but not gate. The world has
+     * been running for thousands of ticks by now, so {@code SERVER_STARTING} has
+     * long since fired and {@code CommandRegistrationCallback} fired before this
+     * mod's bytes existed. Both have to be handed over after the fact or the mod
+     * is dead on arrival, and both are asserted here by a marker file the mod
+     * itself writes.
+     *
+     * <p>Then, in order: the client entrypoint ran on the render thread; the
+     * keybind lease came out of the same eight-slot pool the v2 surface uses;
+     * the HUD element draws frames; a client event dispatches through the
+     * fanout; the mod's Brigadier command runs; the mod's own {@code Screen}
+     * opens. And then the mod is disabled and every one of those goes away —
+     * including the screen, which is the only one of them the player would
+     * otherwise be left staring at.
+     */
+    private void testNativeClientCanary(ClientGameTestContext context, FabricClientEventBridge bridge) {
+        Path dir = Path.of("vibemod", "nativeclient");
+        for (String marker : new String[] {"server-starting", "client-init", "command-ran",
+                "key-pressed", "hud-frames"}) {
+            deleteMarker(dir.resolve(marker));
+        }
+
+        seedOne("NativeClientCanary", NATIVE_CLIENT_SOURCE, NATIVE_CLIENT_META);
+        VibeModFabric.services().scheduler().runOnMain(() -> VibeModFabric.services().router()
+                .run(consoleSender(), new String[] {"enable", "NativeClientCanary"}));
+        awaitLoaded(context, "NativeClientCanary");
+        context.waitTicks(40);
+
+        EventFanout fanout = VibeModFabric.eventFanout();
+
+        // §A's Phase-0 leftover, finally gated: a mod loaded mid-session gets
+        // SERVER_STARTING replayed, because it genuinely missed it.
+        check("SERVER_STARTING was replayed for a mod enabled mid-session",
+                awaitMarker(context, dir.resolve("server-starting"), true));
+        // §B: the second entrypoint, run on the render thread after the load.
+        check("the mod's ClientModInitializer half ran",
+                awaitMarker(context, dir.resolve("client-init"), true));
+
+        String state = bridge.describeState();
+        check("its HudElement landed in the host's HUD pipeline (" + state + ")",
+                state.contains("nativeHuds=1"));
+        check("its keybind leased a second slot from the same pool (" + state + ")",
+                state.contains("keysLeased=2/" + FabricClientEventBridge.KEY_SLOTS));
+
+        String fan = fanout.describeState();
+        check("its client tick event went through the fanout (" + fan + ")",
+                fan.contains("ClientTickEvents.EndTick=1"));
+        check("its command is tracked by name (" + fan + ")", fan.contains("/nativecmd"));
+
+        // §D: registered is not drawn. The marker is written from inside the
+        // element, so it only exists if the host really called it.
+        check("the mod's HUD element is being drawn every frame",
+                awaitMarker(context, dir.resolve("hud-frames"), true));
+
+        // §C: the pooled mapping the shim handed back really polls.
+        context.getInput().pressKey(InputConstants.getKey("key.keyboard.h"));
+        check("pressing the leased key reached the mod's own KeyMapping",
+                awaitMarker(context, dir.resolve("key-pressed"), true));
+
+        // §A: a Brigadier command the mod built itself, in the live dispatcher.
+        context.runOnClient(client -> client.player.connection.sendCommand("nativecmd"));
+        check("the mod's own Brigadier command ran",
+                awaitMarker(context, dir.resolve("command-ran"), true));
+        // §E: and it opened a Screen the mod defined.
+        check("the command opened the mod's own Screen",
+                awaitScreen(context, "NativeClientCanary$CanaryScreen", true));
+
+        // ---- and now take it all away ----
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().disable("NativeClientCanary"));
+        context.waitTicks(20);
+
+        check("disabling closed the screen the mod had defined",
+                awaitScreen(context, "NativeClientCanary$CanaryScreen", false));
+
+        String drained = bridge.describeState();
+        check("disabling detached its HudElement (" + drained + ")", drained.contains("nativeHuds=0"));
+        check("disabling returned its key slot to the pool (" + drained + ")",
+                drained.contains("keysLeased=1/" + FabricClientEventBridge.KEY_SLOTS));
+        String drainedFan = fanout.describeState();
+        check("disabling drained its client tick subscription (" + drainedFan + ")",
+                drainedFan.contains("ClientTickEvents.EndTick=0"));
+        check("disabling forgot its command (" + drainedFan + ")", !drainedFan.contains("/nativecmd"));
+
+        // Absence, not staleness: delete both markers and give the mod every
+        // chance to write them again.
+        deleteMarker(dir.resolve("hud-frames"));
+        deleteMarker(dir.resolve("command-ran"));
+        context.runOnClient(client -> client.player.connection.sendCommand("nativecmd"));
+        context.waitTicks(60);
+        check("a disabled mod's HUD element really stops drawing",
+                !Files.isRegularFile(dir.resolve("hud-frames")));
+        check("a disabled mod's command is really gone from the dispatcher",
+                !Files.isRegularFile(dir.resolve("command-ran")));
+
+        // ---- and give it back ----
+        VibeModFabric.services().scheduler().runOnMain(() -> {
+            try {
+                VibeModFabric.services().lifecycle().enable("NativeClientCanary");
+            } catch (Exception e) {
+                check("re-enabling the native client mod did not throw: " + e, false);
+            }
+        });
+        context.waitTicks(40);
+        context.runOnClient(client -> client.player.connection.sendCommand("nativecmd"));
+        check("re-enabling put the command back",
+                awaitMarker(context, dir.resolve("command-ran"), true));
+        check("re-enabling re-attached the HUD element",
+                awaitMarker(context, dir.resolve("hud-frames"), true));
+        String back = bridge.describeState();
+        check("re-enabling re-leased a key slot (" + back + ")",
+                back.contains("keysLeased=2/" + FabricClientEventBridge.KEY_SLOTS));
+
+        // Leave nothing on screen for whatever runs next.
+        context.setScreen(() -> null);
+        context.waitTicks(5);
+    }
+
+    /** Waits for the open screen's class name to (not) contain {@code needle}. */
+    private static boolean awaitScreen(ClientGameTestContext context, String needle, boolean present) {
+        for (int i = 0; i < 120; i++) {
+            String open = context.computeOnClient(client ->
+                    client.gui.screen() == null ? "" : client.gui.screen().getClass().getName());
+            if (open.contains(needle) == present) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
     /** A console-shaped {@link com.gijsm.vibemod.platform.Sender} for driving the router. */
     private static com.gijsm.vibemod.platform.Sender consoleSender() {
         return com.gijsm.vibemod.loader.LoaderSender.of(
@@ -629,6 +768,111 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             }
             """;
 
+    /**
+     * The V3 Phase 1 canary: one ordinary Fabric mod using every surface Phase 1
+     * opened, and still importing nothing from VibeMod.
+     *
+     * <p>Deliberately the same mod as the native profile's {@code CoordToggle}
+     * few-shot, with marker files added — so what the prompt teaches a model to
+     * write is literally what this gate compiles, loads and runs.
+     *
+     * <p>The one thing here a real mod would do differently is hopping to the
+     * render thread from the command to open the screen. On a dedicated server
+     * that would be a networking job; in singleplayer the two sides share a JVM
+     * and {@code Minecraft#execute} is the correct hop, which is exactly what
+     * makes it the right shape for a gate that runs in singleplayer.
+     */
+    private static final String NATIVE_CLIENT_SOURCE = """
+            package vibemod.nativeclientcanary;
+
+            import java.nio.file.Files;
+            import java.nio.file.Path;
+
+            import com.mojang.blaze3d.platform.InputConstants;
+
+            import net.fabricmc.api.ClientModInitializer;
+            import net.fabricmc.api.ModInitializer;
+            import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+            import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+            import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+            import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+            import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+
+            import net.minecraft.client.KeyMapping;
+            import net.minecraft.client.Minecraft;
+            import net.minecraft.client.gui.screens.Screen;
+            import net.minecraft.commands.Commands;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.Identifier;
+
+            public final class NativeClientCanary implements ModInitializer, ClientModInitializer {
+
+                private static final Path DIR = Path.of("vibemod", "nativeclient");
+
+                private KeyMapping toggle;
+                private int frames;
+
+                @Override
+                public void onInitialize() {
+                    // This mod is enabled long after the world started, so the
+                    // host has to replay this for it.
+                    ServerLifecycleEvents.SERVER_STARTING.register(server -> mark("server-starting"));
+                    CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
+                            dispatcher.register(Commands.literal("nativecmd").executes(ctx -> {
+                                ctx.getSource().sendSystemMessage(Component.literal("native-cmd-ok"));
+                                mark("command-ran");
+                                Minecraft client = Minecraft.getInstance();
+                                client.execute(() -> client.setScreenAndShow(new CanaryScreen()));
+                                return 1;
+                            })));
+                }
+
+                @Override
+                public void onInitializeClient() {
+                    mark("client-init");
+                    toggle = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+                            "key.nativeclientcanary.toggle", InputConstants.Type.KEYSYM,
+                            InputConstants.KEY_H, KeyMapping.Category.MISC));
+                    ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                        while (toggle.consumeClick()) {
+                            mark("key-pressed");
+                        }
+                    });
+                    HudElementRegistry.addLast(
+                            Identifier.fromNamespaceAndPath("nativeclientcanary", "readout"),
+                            (graphics, delta) -> {
+                                if (++frames % 20 == 0) {
+                                    mark("hud-frames");
+                                }
+                                graphics.text(Minecraft.getInstance().font,
+                                        "native " + frames, 4, 24, 0xFF55FF55);
+                            });
+                }
+
+                private static void mark(String name) {
+                    try {
+                        Files.createDirectories(DIR);
+                        Files.writeString(DIR.resolve(name), "yes");
+                    } catch (Exception ignored) {
+                        // the markers are for the gate, not for the mod
+                    }
+                }
+
+                /** A Screen the mod defined itself: the host closes it when the mod goes. */
+                public static final class CanaryScreen extends Screen {
+
+                    CanaryScreen() {
+                        super(Component.literal("Native Canary"));
+                    }
+
+                    @Override
+                    public boolean isPauseScreen() {
+                        return false;
+                    }
+                }
+            }
+            """;
+
     private static String meta(String name, String description) {
         return """
                 {
@@ -661,4 +905,6 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             meta("SlowHud", "A HUD renderer that overruns the render-thread budget.");
     private static final String NATIVE_CANARY_META =
             meta("NativeCanary", "A plain Fabric ModInitializer, hot-loaded through the bytecode seam.");
+    private static final String NATIVE_CLIENT_META = meta("NativeClientCanary",
+            "A plain Fabric mod using both entrypoints: command, keybind, HUD and its own screen.");
 }

@@ -228,14 +228,25 @@ package vibemod.nativecanary;
 
 import java.util.logging.Logger;
 
+import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 
+import net.minecraft.commands.Commands;
+import net.minecraft.network.chat.Component;
 import net.minecraft.world.InteractionResult;
 
-/** An ordinary Fabric mod. No VibeMod import appears anywhere in this file. */
-public final class NativeCanary implements ModInitializer {
+/**
+ * An ordinary Fabric mod. No VibeMod import appears anywhere in this file.
+ *
+ * <p>It implements BOTH entrypoints on purpose (V3 Phase 1 §B). This is a
+ * dedicated server, so the client half must be skipped without a crash and
+ * without running — which is the same bargain ctx.client(...) already makes,
+ * and which the gate asserts in both directions.
+ */
+public final class NativeCanary implements ModInitializer, ClientModInitializer {
 
     private static final Logger LOG = Logger.getLogger("VibeMod.NativeCanary");
 
@@ -253,6 +264,23 @@ public final class NativeCanary implements ModInitializer {
             LOG.info("native-attack");
             return InteractionResult.PASS;
         });
+        // V3 Phase 1 A: a real Brigadier tree, registered through the loader's
+        // own callback. Live immediately, gone on /vibe disable.
+        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
+                dispatcher.register(Commands.literal("nativecmd").executes(ctx -> {
+                    // sendSystemMessage rather than sendSuccess: this reply has to
+                    // come back over RCON, and that is the call the rest of this
+                    // gate already proves reaches an RCON console.
+                    ctx.getSource().sendSystemMessage(
+                            Component.literal("native-cmd-ok " + ticks));
+                    return 1;
+                })));
+    }
+
+    @Override
+    public void onInitializeClient() {
+        // Must NEVER appear in a dedicated server's log.
+        LOG.info("native-client-init");
     }
 }
 NATIVE
@@ -381,6 +409,15 @@ assert "nothing it registered was refused" not_in_file "$LOG" 'UnsupportedOperat
 assert "the mod source really has no VibeMod import" \
   not_in_file "$RUN/vibemod/mods/NativeCanary/v1/NativeCanary.java" 'com.gijsm.vibemod'
 
+# V3 Phase 1 B: the client half of a two-entrypoint mod, on a machine with no
+# client. The mod must still load, the client entrypoint must not run, and the
+# host must SAY it skipped it rather than leaving the operator to guess.
+note "asserting on the client entrypoint's inertness (V3 Phase 1 B)"
+assert "a ClientModInitializer half was skipped on a dedicated server" \
+  in_file "$LOG" 'has a ClientModInitializer half; skipping it on a dedicated server'
+assert "and it really did not run" not_in_file "$LOG" 'native-client-init'
+assert "the mod loaded anyway" in_file "$LOG" 'NativeCanary onInitialize'
+
 note "driving over RCON"
 RCON="$RUN/rcon.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
@@ -435,6 +472,16 @@ assert "onDisable ran on disable" in_file "$LOG" 'SmokeCanary disabled after'
 # seam were a no-op it would keep growing forever. Measured over wall time
 # rather than asserted on a reply, because the reply proves a command ran and
 # this proves the subscription is gone.
+# V3 Phase 1 A: the command the mod registered through CommandRegistrationCallback
+# has to be in the LIVE dispatcher already — the callback fired long before this
+# mod existed, so if the seam did not invoke it immediately there would be
+# nothing to run until a /reload.
+note "asserting on the native mod's own Brigadier command (V3 Phase 1 A)"
+CRCON="$RUN/cmd-rcon.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "nativecmd" | tee "$CRCON"
+assert "a command registered via CommandRegistrationCallback runs immediately" \
+  in_file "$CRCON" 'native-cmd-ok'
+
 note "round-tripping the native canary through disable/enable"
 NRCON="$RUN/native-rcon.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe disable NativeCanary" \
@@ -457,6 +504,50 @@ assert "the entrypoint ran a second time" \
   test "$(grep -c 'NativeCanary onInitialize' "$LOG")" -ge 2
 assert "no registration was silently refused across the round trip" \
   not_in_file "$LOG" 'UnsupportedOperationException'
+
+# The other half of A, and the one that cannot be faked: Brigadier has no
+# remove, so "the command is gone" is only true if the reflective node surgery
+# ran. Checked as ABSENCE of the reply after the disable, and presence again
+# after the enable — the same shape as the tick counter above.
+note "asserting the mod's command went with it"
+DRCON="$RUN/cmd-disabled.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe disable NativeCanary" "nativecmd" \
+  | tee "$DRCON"
+assert "disabling the mod removed the command it registered" \
+  not_in_file "$DRCON" 'native-cmd-ok'
+assert "and the server says the command is unknown" \
+  in_file "$DRCON" 'Unknown or incomplete command'
+
+ERCON="$RUN/cmd-enabled.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe enable NativeCanary" \
+  | tee "$ERCON"
+# The enable recompiles asynchronously; the command is only back once the mod is.
+for i in $(seq 1 30); do
+  "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "nativecmd" >> "$ERCON" 2>&1 || true
+  grep -q 'native-cmd-ok' "$ERCON" && break
+  sleep 1
+done
+assert "re-enabling put the command back in the live dispatcher" \
+  in_file "$ERCON" 'native-cmd-ok'
+assert "no command name collision was reported" not_in_file "$LOG" 'is already registered'
+
+# The third leg of A. A datapack /reload throws the whole Brigadier tree away
+# and builds a new one, firing CommandRegistrationCallback again — for the mods
+# that were on disk when the game started, which a hot-loaded one never is. So
+# the host has to replay every live mod's callback into the fresh dispatcher, or
+# every generated command silently disappears the first time an operator types
+# /reload.
+note "asserting the mod's command survives a datapack reload (V3 Phase 1 A)"
+RRCON="$RUN/cmd-reload.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "reload" | tee "$RRCON"
+sleep 5
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "nativecmd" "smokeping" "vibe list" \
+  | tee -a "$RRCON"
+assert "the host replayed the mod's command registration into the new dispatcher" \
+  in_file "$LOG" 'Replaying 1 mod command registration'
+assert "the mod's own command still runs after /reload" in_file "$RRCON" 'native-cmd-ok'
+assert "and the v2 command bridge survived the same reload" in_file "$RRCON" 'smoke-pong howdy'
+assert "and /vibe itself survived the same reload" in_file "$RRCON" 'SmokeCanary'
 
 cleanup
 trap - EXIT

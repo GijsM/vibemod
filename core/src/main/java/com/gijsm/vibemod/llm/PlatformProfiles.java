@@ -487,7 +487,12 @@ public final class PlatformProfiles {
             memory and loads it into the running game. And the host can UNLOAD you at any
             moment - so everything you register through the Fabric API is tracked for you
             and revoked when you are disabled. You do not write teardown code and you must
-            not try to; just register normally and it is handled.""";
+            not try to; just register normally and it is handled.
+
+            If your mod has a client half - a keybind, a HUD, a screen, anything that draws
+            or reads input - put it in `onInitializeClient()` by ALSO implementing
+            `net.fabricmc.api.ClientModInitializer` on the same class. On a dedicated server
+            that half is simply never run, and the rest of your mod still works.""";
 
     private static final String NATIVE_FABRIC_IMPORT_RULES = """
             - Imports are limited to `java.*`, `net.minecraft.*`, `net.fabricmc.api.*`,
@@ -509,8 +514,15 @@ public final class PlatformProfiles {
               loads.""";
 
     private static final String NATIVE_FABRIC_THREADING = """
-            - `onInitialize()` and every callback you register run on the MAIN SERVER
+            - `onInitialize()` and every SERVER callback you register run on the MAIN SERVER
               THREAD. Do not spawn threads and do not hop threads yourself.
+            - `onInitializeClient()` and every client callback (keybind polling, HUD
+              drawing, `ClientTickEvents`) run on the RENDER THREAD instead. NEVER read or
+              write server state from client code: in singleplayer the server and the client
+              share one JVM, so `server.getPlayerList()` from a HUD renderer is a real data
+              race that will corrupt the world rather than a theoretical one. Keep the two
+              halves' state in separate fields and let the client half read only
+              `Minecraft.getInstance()`.
             - Keep per-mod state in fields on your own classes. A `ConcurrentHashMap` keyed
               by `player.getUUID()` is the normal way to hold per-player state.""";
 
@@ -521,10 +533,30 @@ public final class PlatformProfiles {
               `PlayerBlockBreakEvents.BEFORE.register(...)`,
               `ServerPlayConnectionEvents.JOIN.register(...)`,
               `ServerLivingEntityEvents.AFTER_DEATH.register(...)`.
-            - SERVER EVENTS ONLY in this version. Do not use `CommandRegistrationCallback`,
-              `KeyBindingHelper`, `HudElementRegistry`, any `net.fabricmc.fabric.api.client.*`
-              event, or `Registry.register` - commands, keybinds, HUD and registries arrive in
-              a later version and the host refuses them today.
+            - COMMANDS are hot. Register `CommandRegistrationCallback.EVENT` from
+              `onInitialize()` and build an ordinary Brigadier tree
+              (`dispatcher.register(Commands.literal("name").executes(ctx -> ...))`). Your
+              command works the instant the mod loads - you do NOT need a `/reload` - and it
+              is removed again when the mod is disabled. Pick a name nothing else uses: the
+              first registration of a name wins and yours would be rejected.
+            - KEYBINDS come from a shared pool of eight slots.
+              `KeyMappingHelper.registerKeyMapping(new KeyMapping(...))` returns a DIFFERENT
+              `KeyMapping` than you passed in - keep the returned one and poll it with
+              `consumeClick()`/`isDown()`. The physical key may not be the one you asked
+              for, so say so in the manual and never tell the player a specific key without
+              adding that they can rebind it in Options -> Controls.
+            - HUD: `HudElementRegistry.addLast(Identifier.fromNamespaceAndPath("yourmod",
+              "thing"), (graphics, delta) -> ...)` from `onInitializeClient()`. Draw with
+              `graphics.fill(x1, y1, x2, y2, argb)` and
+              `graphics.text(client.font, "text", x, y, argb)`; sizes come from
+              `graphics.guiWidth()`/`guiHeight()`. Keep it cheap: it runs every frame and a
+              renderer that overruns its time budget gets your mod disabled.
+            - SCREENS: you may subclass `net.minecraft.client.gui.screens.Screen` and open it
+              from client code. The host closes it for you if your mod is disabled while it
+              is open.
+            - STILL NOT AVAILABLE: `Registry.register` of any kind (items, blocks, entity
+              types, recipes), resource packs, and `ClientCommandRegistrationCallback`. The
+              host refuses these today.
             - If your mod does its setup when the server starts, register
               `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
               replays it for you if the server is already running when you are loaded.

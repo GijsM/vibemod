@@ -53,6 +53,9 @@ public final class SurgeonSelfTest {
         testLegacyVibeContextModPassesUntouched(compiler);
         testNeoForgePolicyRefusesFabric(compiler);
         testPhaseOrderingRejected(compiler);
+        testCommandCallbackIsSeamed(compiler);
+        testKeybindSeamIsRewritten(compiler);
+        testHudSeamIsRewritten(compiler);
 
         if (failures == 0) {
             System.out.println("ALL CHECKS PASSED");
@@ -382,6 +385,154 @@ public final class SurgeonSelfTest {
         check("the phase-ordering diagnostic explains why ("
                         + firstLine(result.diagnostics()) + ")",
                 result.diagnostics().contains("addPhaseOrdering"));
+    }
+
+    // ------------------------------------------------------------- V3 Phase 1
+
+    /**
+     * §A: {@code CommandRegistrationCallback} is a seamed registration now, not
+     * a refusal.
+     *
+     * <p>The rewrite is the ordinary {@code Event.register} one — the difference
+     * Phase 1 makes is at the other end, inside the fanout — so what this proves
+     * is that a command mod passes the policy and that its registration really
+     * does go through the host rather than into a Brigadier tree nothing can
+     * prune.
+     */
+    private static void testCommandCallbackIsSeamed(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.cmd.Cmd", """
+                package vibemod.cmd;
+
+                import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+
+                import net.fabricmc.api.ModInitializer;
+                import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+
+                import net.minecraft.commands.CommandSourceStack;
+                import net.minecraft.commands.Commands;
+                import net.minecraft.network.chat.Component;
+
+                public final class Cmd implements ModInitializer {
+
+                    @Override
+                    public void onInitialize() {
+                        CommandRegistrationCallback.EVENT.register((dispatcher, registry, env) -> {
+                            LiteralArgumentBuilder<CommandSourceStack> node = Commands.literal("cmd")
+                                    .executes(ctx -> {
+                                        ctx.getSource().sendSystemMessage(Component.literal("hi"));
+                                        return 1;
+                                    });
+                            dispatcher.register(node);
+                        });
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod registering CommandRegistrationCallback passes the policy: "
+                + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.cmd.Cmd"));
+        check("its CommandRegistrationCallback registration goes through the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.eventRegister"));
+        check("and no raw Event.register survived (" + calls + ")",
+                !calls.contains("net/fabricmc/fabric/api/event/Event.register"));
+    }
+
+    /**
+     * §C: {@code KeyMappingHelper.registerKeyMapping} lands on
+     * {@code ClientShims}.
+     *
+     * <p>This is the seam whose shape differs from every Phase 0 entry: it is an
+     * {@code invokestatic} with no receiver AND it returns a value the mod goes
+     * on to use. A {@code prependingReceiver} entry here would produce bytecode
+     * that fails verification, and the descriptor is the thing to get exactly
+     * right — {@code (Lnet/minecraft/client/KeyMapping;)Lnet/minecraft/client/KeyMapping;},
+     * read off fabric-key-mapping-api-v1 with {@code javap -s}. The class is
+     * {@code KeyMappingHelper} and not {@code KeyBindingHelper}: the latter does
+     * not exist in this era at all.
+     */
+    private static void testKeybindSeamIsRewritten(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.keys.Keys", """
+                package vibemod.keys;
+
+                import com.mojang.blaze3d.platform.InputConstants;
+
+                import net.fabricmc.api.ClientModInitializer;
+                import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
+
+                import net.minecraft.client.KeyMapping;
+
+                public final class Keys implements ClientModInitializer {
+
+                    private KeyMapping key;
+
+                    @Override
+                    public void onInitializeClient() {
+                        key = KeyMappingHelper.registerKeyMapping(new KeyMapping(
+                                "key.keys.toggle", InputConstants.Type.KEYSYM,
+                                InputConstants.KEY_G, KeyMapping.Category.MISC));
+                    }
+
+                    public boolean pressed() {
+                        return key.consumeClick();
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod leasing a keybind passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.keys.Keys"));
+        check("KeyMappingHelper.registerKeyMapping was redirected to the client shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/ClientShims.registerKeyMapping"));
+        check("no call to the real KeyMappingHelper survived (" + calls + ")",
+                calls.stream().noneMatch(c -> c.startsWith(
+                        "net/fabricmc/fabric/api/client/keymapping/v1/KeyMappingHelper.")));
+        check("the mod still polls the mapping it was handed back (" + calls + ")",
+                calls.contains("net/minecraft/client/KeyMapping.consumeClick"));
+    }
+
+    /** §D: every {@code HudElementRegistry} add/attach overload lands on the client shim. */
+    private static void testHudSeamIsRewritten(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.hud.Hud", """
+                package vibemod.hud;
+
+                import net.fabricmc.api.ClientModInitializer;
+                import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+                import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+
+                import net.minecraft.resources.Identifier;
+
+                public final class Hud implements ClientModInitializer {
+
+                    @Override
+                    public void onInitializeClient() {
+                        Identifier id = Identifier.fromNamespaceAndPath("hud", "one");
+                        HudElementRegistry.addLast(id, (graphics, delta) -> { });
+                        HudElementRegistry.addFirst(Identifier.fromNamespaceAndPath("hud", "two"),
+                                (graphics, delta) -> { });
+                        HudElementRegistry.attachElementAfter(VanillaHudElements.CHAT,
+                                Identifier.fromNamespaceAndPath("hud", "three"),
+                                (graphics, delta) -> { });
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod drawing a HUD passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.hud.Hud"));
+        long shimCalls = calls.stream()
+                .filter(c -> c.startsWith("com/gijsm/vibemod/fabric/shim/ClientShims.hud")).count();
+        check("all three HudElementRegistry overloads were redirected (" + calls + ")",
+                shimCalls == 3);
+        check("no call to the real HudElementRegistry survived (" + calls + ")",
+                calls.stream().noneMatch(c -> c.startsWith(
+                        "net/fabricmc/fabric/api/client/rendering/v1/hud/HudElementRegistry.")));
     }
 
     // ------------------------------------------------------------------ plumbing
