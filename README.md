@@ -62,13 +62,15 @@ Just want the plugin on your own Paper 1.21.8 server?
 
 ## Quick start (from source)
 
-Requirements: a full **JDK 21+** (the server needs `javac`; tested on Temurin 25), Maven, Node.js
-(for the RCON dev scripts), and an [OpenRouter](https://openrouter.ai) API key.
+Requirements: a full **JDK 21+** (the server needs `javac`; tested on Temurin 25), Node.js
+(for the RCON dev scripts), and an [OpenRouter](https://openrouter.ai) API key. The build uses
+the committed Gradle wrapper — no Gradle install needed, and it fetches a Java 21 toolchain
+itself if the machine has none.
 
 ```bash
 ./scripts/setup.sh     # downloads Paper 1.21.8 (sha256-verified), writes eula.txt and
                        # server/server.properties, generates scripts/.rcon-password, installs rcon-client
-./scripts/build.sh     # mvn package → server/plugins/VibeMod.jar
+./scripts/build.sh     # ./gradlew :paper:jar → server/plugins/VibeMod.jar
 ./scripts/start.sh     # boots the server on 127.0.0.1:25565
 ./scripts/rcon.sh 'vibe make zombies explode into fireworks'   # console driving
 ./scripts/stop.sh
@@ -154,26 +156,38 @@ with VibeMod absent. A few things necessarily differ from running under VibeMod:
 
 ## Architecture
 
+A Gradle multi-module build. `sdk`/`sdk-client`/`platform-api`/`core` are platform-free (or
+Bukkit-typed only where generated code needs it); `paper` holds everything else and produces
+the single shipped `VibeMod.jar`, which bundles the four library modules.
+
 ```
-plugin/src/main/java/com/gijsm/vibemod/
-├── api/        Mod + VibeContext — the tiny contract generated code writes against
-│               (deprecated VibeMod bridge kept so older generated sources keep compiling)
-├── llm/        OpenRouterClient (JDK HttpClient, SSE streaming) + PromptLibrary
-│               (system prompt, lenient JSON parse) + live model catalog & cost tracking
-├── gen/        ModGenerator — generate → compile → on error feed javac output back → retry
-├── compile/    InMemoryCompiler — javax.tools, bytecode captured in memory,
-│               classpath = running Paper jar + bundler libraries/ + VibeMod itself
-├── runtime/    ModRegistry (child classloader per mod, exact per-instance teardown),
-│               DynamicCommands (runtime /commands with neuterable handlers — Paper has no
-│               CommandMap#unregister), Watchdog (auto-disables slow mods),
-│               ModErrors (deduped error log, degraded state, storm auto-disable)
-├── store/      ModStore (mods/<Name>/meta.json + v1..vN source history) + JarExporter
-├── ui/         native Paper dialogs (mod browser, config, settings, viewers),
-│               boss-bar progress, install cards, chat mode
-└── command/    /vibe dispatcher
+sdk/            api/ — Mod + VibeContext, the tiny contract generated code writes against
+                (deprecated VibeMod bridge kept so older generated sources keep compiling)
+sdk-client/     api/client/ — HUD/keybind/tick contract for loader hosts. Pure JDK
+platform-api/   platform/ — the host SPI (scheduler, events, commands, messaging, compiler,
+                classpath) + the platform-neutral screen model
+core/           llm/       OpenRouterClient (JDK HttpClient, SSE streaming) + PromptLibrary
+                           (system prompt, lenient JSON parse) + model catalog & cost tracking
+                compile/   InMemoryCompiler — javax.tools, bytecode captured in memory,
+                           classpath = running Paper jar + bundler libraries/ + VibeMod itself
+                store/     ModStore (mods/<Name>/meta.json + v1..vN history) + JarExporter
+                gen/       GeneratedProject
+                ui/        Style/Text/MarkdownMini — Adventure-only text building
+paper/          runtime/   ModRegistry (child classloader per mod, exact per-instance teardown),
+                           DynamicCommands (runtime /commands with neuterable handlers — Paper
+                           has no CommandMap#unregister), Watchdog (auto-disables slow mods),
+                           ModErrors (deduped error log, degraded state, storm auto-disable)
+                gen/       ModGenerator — generate → compile → feed javac output back → retry
+                ui/        native Paper dialogs (mod browser, config, settings, viewers),
+                           boss-bar progress, install cards, chat mode
+                command/   /vibe dispatcher
 ```
 
-See `ARCHITECTURE.md` for the full contracts and `DEMO.md` for the verified test transcript.
+Useful tasks: `./gradlew build` (jar + all self-tests), `./gradlew selfTest`,
+`./gradlew :paper:jar`.
+
+See `ARCHITECTURE.md` for the full contracts, `docs/ARCHITECTURE-V2.md` for the multi-platform
+target this layout is migrating towards, and `DEMO.md` for the verified test transcript.
 
 ## License
 

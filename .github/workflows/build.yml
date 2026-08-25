@@ -16,14 +16,17 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: maven
 
-      - name: Build plugin
-        run: mvn -B package
-        working-directory: plugin
+      - uses: gradle/actions/setup-gradle@v4
+
+      # `build` also runs the five self-tests: they are plain main() classes
+      # wired as JavaExec tasks and hooked into `check`. StoreSelfTest's
+      # stored-corpus compile skips itself here (no server/ in a clean clone).
+      - name: Build and self-test
+        run: ./gradlew build --stacktrace
 
       - name: Upload jar
         uses: actions/upload-artifact@v4
         with:
           name: VibeMod
-          path: plugin/target/VibeMod.jar
+          path: paper/build/libs/VibeMod.jar

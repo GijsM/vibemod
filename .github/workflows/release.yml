@@ -18,14 +18,14 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: maven
 
-      - name: Build plugin
-        run: mvn -B package
-        working-directory: plugin
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and self-test
+        run: ./gradlew build --stacktrace
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: plugin/target/VibeMod.jar
+          files: paper/build/libs/VibeMod.jar
           generate_release_notes: true
