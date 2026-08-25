@@ -8,6 +8,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.mojang.blaze3d.platform.InputConstants;
+
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
@@ -91,6 +93,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             // this test asserted huds=2 and failed, because by the time it looked
             // the system had already done the right thing.)
             testThrowingHudAutoDisables(context, bridge);
+            testLeasedKeyFires(context);
             testVibecRoutes(context);
             testRegistrationAndTeardown(context, bridge);
             testKeySlotIsReusableAfterReload(context, bridge);
@@ -206,6 +209,33 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         // test context, not Minecraft: 26.x has no public Minecraft#setScreen.
         context.setScreen(() -> null);
         context.waitTicks(5);
+    }
+
+    /**
+     * Pressing the leased key really reaches the mod (§8.2).
+     *
+     * <p>Three things at once, and none of them provable from the pool's
+     * bookkeeping: that {@code "G"} was actually parsed and auto-bound to the
+     * slot, that the client-tick dispatcher's {@code consumeClick()} polling sees
+     * the press, and that it lands in the mod's own handler. Observed through a
+     * marker file for the same reason as {@code /vibec} — the visible effect is
+     * a character on the HUD.
+     */
+    private void testLeasedKeyFires(ClientGameTestContext context) {
+        Path marker = FabricLoader.getInstance().getGameDir()
+                .resolve("vibemod").resolve("moddata").resolve("HudCanary").resolve("key-pressed");
+        try {
+            Files.deleteIfExists(marker);
+        } catch (IOException ignored) {
+            // never written yet
+        }
+        context.getInput().pressKey(InputConstants.getKey("key.keyboard.g"));
+        boolean fired = false;
+        for (int i = 0; i < 40 && !fired; i++) {
+            context.waitTick();
+            fired = Files.isRegularFile(marker);
+        }
+        check("pressing the auto-bound key reached the mod's handler", fired);
     }
 
     // ---------------------------------------------------------------------- (6)
@@ -387,7 +417,15 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
                     Path marker = ctx.dataFolder().resolve("vibec-ran");
                     ctx.client(client -> {
                         client.tick(c -> ticks++);
-                        client.key("Toggle the canary", "G", () -> toggled = !toggled);
+                        client.key("Toggle the canary", "G", () -> {
+                            toggled = !toggled;
+                            try {
+                                Files.writeString(ctx.dataFolder().resolve("key-pressed"),
+                                        Boolean.toString(toggled));
+                            } catch (Exception ignored) {
+                                // the marker is for the gate, not for the mod
+                            }
+                        });
                         client.clientCommand("status", "Show the canary's state", (c, args) -> {
                             c.toast("HudCanary", "ticks=" + ticks);
                             // A marker the gate can see without looking at pixels.

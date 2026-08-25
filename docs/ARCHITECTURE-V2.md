@@ -1021,17 +1021,20 @@ replies now go through the `CommandSourceStack`.
 
 `fabric/src/gametest` — the client half, via **fabric-client-gametest**
 (`./gradlew :fabric:runClientGameTest`), driving a real client through a real
-singleplayer world with a real GL context. **28/28 green**, covering:
+singleplayer world with a real GL context. **29/29 green**, covering:
 
 - the host initialises inside the client's integrated server, with
   `hasClient()` true and `isDedicatedServer()` false (the two really are
   different questions);
 - a canned client-flavor mod's HUD, client tick, key lease and `/vibec` command
   all land in the live dispatchers and the key pool;
-- `/vibec <mod> <command>` actually routes into the mod's handler — observed
-  through a marker file the handler writes, because the alternative (a toast) is
-  a thing on a screen and asserting on pixels would be testing that Minecraft
-  draws toasts;
+- `/vibec <mod> <command>` actually routes into the mod's handler, and pressing
+  the leased key really reaches its `onPress` — both observed through marker
+  files the handlers write, because the alternatives (a toast, a character on
+  the HUD) are things on a screen, and asserting on pixels would be testing that
+  Minecraft draws. The key press proves three things the pool's own bookkeeping
+  cannot: that `"G"` was parsed and auto-bound, that the tick dispatcher's
+  `consumeClick()` polling sees the press, and that it lands in the mod;
 - disabling drains all four, and re-enabling re-leases a key slot and
   re-attaches the renderer (a pool that hands a slot back but never hands it out
   again would pass a teardown assertion and still exhaust itself after eight
