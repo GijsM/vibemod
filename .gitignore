@@ -22,3 +22,4 @@ scripts/.rcon-password
 # --- misc ---
 .DS_Store
 *.log
+fabric/smoke-cache/

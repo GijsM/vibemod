@@ -77,14 +77,27 @@ public final class FabricSender implements Sender {
      *
      * <p>For a player this is the {@link Messenger}'s audience, so a reply takes
      * the same path as everything else core sends them (and so boss bars work).
-     * For the console it is an audience that logs — {@code CommandSourceStack}
-     * would swallow it into command feedback, which RCON and the console reader
-     * do not both see.
+     *
+     * <p>For the console it writes back to the {@code CommandSourceStack} — and
+     * that detail is load-bearing. This first routed console replies to
+     * {@code messenger.console()}, which logs; the acceptance gate then found
+     * that every single RCON command answered "(no reply)", because RCON's reply
+     * IS the command's feedback and nothing else. Sending through the source
+     * gives the console operator a log line and the RCON caller a response, which
+     * is what both of them are asking for.
      */
     @Override
     public Audience audience() {
         ServerPlayer player = source.getPlayer();
-        return player == null ? messenger.console() : messenger.player(player.getUUID());
+        if (player != null) {
+            return messenger.player(player.getUUID());
+        }
+        return new Audience() {
+            @Override
+            public void sendMessage(net.kyori.adventure.text.Component message) {
+                source.sendSystemMessage(FabricText.toVanilla(message, source.getServer()));
+            }
+        };
     }
 
     @Override
