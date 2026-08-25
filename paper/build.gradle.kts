@@ -11,6 +11,15 @@ plugins {
     // 1.20.6 chat-renderer path and the 1.21.8 dialog path are both one command
     // away.
     id("xyz.jpenilla.run-paper") version "3.1.0"
+
+    // Shadow, for exactly one reason: bStats (ARCHITECTURE-V2 §9 Phase F) MUST
+    // be relocated. Paper's PluginClassLoader delegates class lookups across
+    // plugins, so an unrelocated `org.bstats` in two plugins is one shared class
+    // with two conflicting configurations — which is why bStats' own
+    // instructions make relocation a hard requirement rather than good manners.
+    // Relocation is bytecode rewriting and the hand-rolled zipTree merge that
+    // used to build this jar cannot do it.
+    id("com.gradleup.shadow") version "9.6.1"
 }
 
 dependencies {
@@ -19,21 +28,38 @@ dependencies {
     implementation(project(":sdk"))
     implementation(project(":sdk-client"))
 
+    // The only third-party code in the Paper jar. Bukkit-only by design: there
+    // is no bStats client for Fabric or NeoForge, so the two loader hosts ship
+    // no metrics at all (see ARCHITECTURE-V2 §10.5).
+    implementation("org.bstats:bstats-bukkit:3.2.1")
+
     compileOnly("io.papermc.paper:paper-api:${property("paperApiVersion")}")
 }
 
-// Everything on the runtime classpath is one of our own modules (Gson,
-// Adventure and paper-api are all `compileOnly` / server-provided), so a plain
-// merge of the runtime classpath reproduces the single-jar Maven layout.
-val bundledModules: Configuration = configurations.runtimeClasspath.get()
+// ---------------------------------------------------------------------------
+// The artifact
+//
+// `shadowJar` IS VibeMod.jar. It merges the runtime classpath — our four
+// modules plus bStats — exactly as the previous hand-rolled zipTree merge did
+// (Gson, Adventure and paper-api are all `compileOnly` / server-provided, so
+// nothing else comes along), and additionally rewrites `org.bstats` into our
+// own namespace.
+//
+// The plain `jar` keeps building, classified `thin`, because Gradle's Java
+// plugin wires half the world to it and turning it off is more disruptive than
+// letting it produce a small file nobody ships.
+// ---------------------------------------------------------------------------
 
 tasks.jar {
-    archiveFileName = "VibeMod.jar"
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from(bundledModules.elements.map { jars -> jars.map { zipTree(it) } }) {
-        exclude("META-INF/MANIFEST.MF", "META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
-    }
+    archiveClassifier = "thin"
 }
+
+tasks.shadowJar {
+    archiveFileName = "VibeMod.jar"
+    relocate("org.bstats", "com.gijsm.vibemod.bstats")
+}
+
+tasks.assemble { dependsOn(tasks.shadowJar) }
 
 // ---------------------------------------------------------------------------
 // run-paper targets (ARCHITECTURE-V2 §9 Phase C)
@@ -57,9 +83,14 @@ fun AbstractRun.useRunDirFor(version: String) {
 
 // `runServer` is the one run-paper creates for us; it points at the version the
 // plugin is compiled against.
+//
+// Every one of these installs `shadowJar`, not `jar`. Since the shadow plugin
+// arrived, `jar` is the thin, bStats-less, un-relocated artifact — running a dev
+// server off it would be testing something we do not ship.
 tasks.runServer {
     minecraftVersion(modernRunVersion)
     useRunDirFor(modernRunVersion)
+    pluginJars.setFrom(tasks.shadowJar.flatMap { it.archiveFile })
 }
 
 listOf(
@@ -71,6 +102,6 @@ listOf(
         description = "Runs a Paper $version server with VibeMod installed ($why)."
         minecraftVersion(version)
         useRunDirFor(version)
-        pluginJars.from(tasks.jar.flatMap { it.archiveFile })
+        pluginJars.from(tasks.shadowJar.flatMap { it.archiveFile })
     }
 }

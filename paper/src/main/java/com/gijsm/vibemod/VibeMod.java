@@ -36,6 +36,7 @@ import com.gijsm.vibemod.paper.PaperClasspathProvider;
 import com.gijsm.vibemod.paper.PaperCommandBridge;
 import com.gijsm.vibemod.paper.PaperEventBridge;
 import com.gijsm.vibemod.paper.PaperMessenger;
+import com.gijsm.vibemod.paper.PaperMetrics;
 import com.gijsm.vibemod.paper.PaperModHost;
 import com.gijsm.vibemod.paper.PaperPlatformInfo;
 import com.gijsm.vibemod.paper.PaperSender;
@@ -232,6 +233,14 @@ public final class VibeMod extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new QuitCleanup(), this);
 
         restoreModsFromDisk();
+
+        // Last, so the mod count it reports is the restored one and not zero.
+        // Currently a no-op with a log line: PaperMetrics.SERVICE_ID is still -1
+        // because nobody has registered VibeMod at bstats.org yet.
+        PaperMetrics.start(this, platform,
+                () -> chatRenderer != null ? "chat" : "dialogs",
+                () -> store.all().size());
+
         getLogger().info("VibeMod ready — /vibe make \"something wonderful\"");
     }
 
