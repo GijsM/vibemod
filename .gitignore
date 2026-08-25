@@ -8,6 +8,9 @@ server/
 build/
 */build/
 
+# --- run-paper / smoke-gate servers (downloaded jars, worlds, generated mods) ---
+paper/run/
+
 # --- Node tooling for scripts/ ---
 scripts/node_modules/
 scripts/.rcon-password

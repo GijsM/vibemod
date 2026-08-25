@@ -54,6 +54,23 @@ public interface PlatformInfo {
     }
 
     /**
+     * The highest {@code --release} generated code may target on this host.
+     *
+     * <p>Not the same question as "what can this JVM run". A server's bytecode
+     * tooling can be much older than the JVM it happens to be launched on:
+     * Paper 1.20.6 pipes every dynamically defined class through the ASM 9.7 in
+     * its plugin remapper, and ASM 9.7 throws
+     * {@code IllegalArgumentException: Unsupported class file major version 69}
+     * on anything compiled for Java 25. Targeting the JVM's own feature version
+     * therefore produces mods a 1.20.6 server cannot ingest, even though it
+     * could execute them — which is precisely the hazard the 1.20.6 floor drop
+     * introduced. Hosts answer with the release their own class files use.
+     */
+    default int maxTargetRelease() {
+        return Runtime.version().feature();
+    }
+
+    /**
      * The {@code PlatformProfile} id this host should generate code for —
      * {@code "paper-modern"}, {@code "paper-legacy"}, {@code "fabric"} or
      * {@code "neoforge"} (ARCHITECTURE-V2 §6.2). Kept here, next to

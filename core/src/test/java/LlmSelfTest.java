@@ -420,6 +420,9 @@ public class LlmSelfTest {
                 PlatformProfiles.paperProfileIdFor("1.21.11").equals(PlatformProfiles.PAPER_MODERN_ID));
         check("26.2 is modern",
                 PlatformProfiles.paperProfileIdFor("26.2").equals(PlatformProfiles.PAPER_MODERN_ID));
+        // What a real 26.x server reports through getBukkitVersion().
+        check("26.2.build.117 is modern (partially numeric version string)",
+                PlatformProfiles.paperProfileIdFor("26.2.build.117").equals(PlatformProfiles.PAPER_MODERN_ID));
         check("a -R0.1-SNAPSHOT suffix is tolerated",
                 PlatformProfiles.paperProfileIdFor("1.20.6-R0.1-SNAPSHOT")
                         .equals(PlatformProfiles.PAPER_LEGACY_ID));

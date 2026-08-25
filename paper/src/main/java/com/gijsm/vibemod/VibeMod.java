@@ -133,9 +133,11 @@ public final class VibeMod extends JavaPlugin {
                     + "(not a JRE) or VibeMod cannot compile mods.");
         } else {
             getLogger().info("Compiler backend: " + compilerProvider.get().name()
-                    + " (max --release " + compilerProvider.get().maxSupportedRelease() + ")");
+                    + " (backend max --release " + compilerProvider.get().maxSupportedRelease()
+                    + ", generated mods target java" + platform.maxTargetRelease() + ")");
         }
-        compiler = new InMemoryCompiler(compilerProvider.orElse(null), new PaperClasspathProvider());
+        compiler = new InMemoryCompiler(compilerProvider.orElse(null), new PaperClasspathProvider(),
+                platform.maxTargetRelease());
 
         String apiKey = resolveApiKey();
         if (apiKey == null) {

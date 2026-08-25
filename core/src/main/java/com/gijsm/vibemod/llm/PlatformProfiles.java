@@ -221,7 +221,16 @@ public final class PlatformProfiles {
         return PAPER_LEGACY_ID;
     }
 
-    /** {@code "1.21.8"} / {@code "26.2"} / {@code "1.20.6-R0.1-SNAPSHOT"} -> {major, minor, patch}. */
+    /**
+     * {@code "1.21.8"} / {@code "26.2"} / {@code "1.20.6-R0.1-SNAPSHOT"} /
+     * {@code "26.2.build.117"} -> {major, minor, patch}.
+     *
+     * <p>Parses the leading numeric components and stops at the first one that is
+     * not a number, rather than giving up on the whole string: Paper's 26.x line
+     * reports {@code getBukkitVersion()} as {@code "26.2.build.117-..."}, and a
+     * server whose version we half-understand is still a server whose major and
+     * minor we know. Returns null only when nothing numeric is there at all.
+     */
     private static int[] parseVersion(String mcVersion) {
         if (mcVersion == null || mcVersion.isBlank()) {
             return null;
@@ -233,13 +242,15 @@ public final class PlatformProfiles {
         }
         String[] bits = cleaned.split("\\.");
         int[] out = {0, 0, 0};
-        try {
-            for (int i = 0; i < 3 && i < bits.length; i++) {
+        int parsed = 0;
+        for (int i = 0; i < 3 && i < bits.length; i++) {
+            try {
                 out[i] = Integer.parseInt(bits[i]);
+            } catch (NumberFormatException stop) {
+                break;
             }
-        } catch (NumberFormatException e) {
-            return null;
+            parsed++;
         }
-        return out;
+        return parsed == 0 ? null : out;
     }
 }

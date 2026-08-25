@@ -40,6 +40,7 @@ public final class PaperPlatformInfo implements PlatformInfo {
     private final boolean hasNativeCommandMap;
     private final boolean hasItemGlintOverride;
     private final boolean hasCommandResync;
+    private final int maxTargetRelease;
 
     public PaperPlatformInfo() {
         this.mcVersion = detectMcVersion();
@@ -50,6 +51,7 @@ public final class PaperPlatformInfo implements PlatformInfo {
         this.hasNativeCommandMap = detectCommandMap();
         this.hasItemGlintOverride = methodPresent(ItemMeta.class, "setEnchantmentGlintOverride", Boolean.class);
         this.hasCommandResync = methodPresent(org.bukkit.entity.Player.class, "updateCommands");
+        this.maxTargetRelease = detectMaxTargetRelease();
     }
 
     /** One line for the boot log: everything a bug report needs to reproduce a UI difference. */
@@ -58,7 +60,8 @@ public final class PaperPlatformInfo implements PlatformInfo {
                 + " · dialogs=" + hasDialogs
                 + " · commandMap=" + hasNativeCommandMap
                 + " · glintOverride=" + hasItemGlintOverride
-                + " · commandResync=" + hasCommandResync;
+                + " · commandResync=" + hasCommandResync
+                + " · target=java" + maxTargetRelease;
     }
 
     @Override
@@ -107,6 +110,11 @@ public final class PaperPlatformInfo implements PlatformInfo {
     }
 
     @Override
+    public int maxTargetRelease() {
+        return maxTargetRelease;
+    }
+
+    @Override
     public String profileId() {
         return profileId;
     }
@@ -131,6 +139,44 @@ public final class PaperPlatformInfo implements PlatformInfo {
             LOG.warning("Could not read the server version (" + t + "); assuming a modern Paper");
         }
         return "";
+    }
+
+    /**
+     * The release generated mods may target, read from the class-file major
+     * version of {@code org.bukkit.Bukkit} — i.e. whatever this server itself was
+     * compiled for.
+     *
+     * <p>The server's bytecode tooling is built for the server's own class files,
+     * so that is exactly the ceiling a generated mod must respect. Paper 1.20.6
+     * proves it: it is happy to run on a JDK 25 but its plugin remapper's ASM
+     * 9.7 rejects every Java 25 class we hand to {@code defineClass}. Falls back
+     * to the runtime's feature version when the class file cannot be read, which
+     * is the old (and on modern servers correct) behaviour.
+     */
+    private static int detectMaxTargetRelease() {
+        int fallback = Runtime.version().feature();
+        try (java.io.InputStream in = Bukkit.class.getClassLoader()
+                .getResourceAsStream("org/bukkit/Bukkit.class")) {
+            if (in == null) {
+                return fallback;
+            }
+            byte[] header = in.readNBytes(8);
+            if (header.length < 8 || (header[0] & 0xFF) != 0xCA || (header[1] & 0xFF) != 0xFE) {
+                return fallback;
+            }
+            int major = ((header[6] & 0xFF) << 8) | (header[7] & 0xFF);
+            // Class file major 65 == Java 21; the offset has been 44 since Java 1.1.
+            int release = major - 44;
+            if (release < 17 || release > fallback) {
+                // Nonsense, or a server newer than the JVM running it: trust the JVM.
+                return fallback;
+            }
+            return release;
+        } catch (Throwable t) {
+            LOG.fine("Could not read the server's class-file version (" + t
+                    + "); targeting Java " + fallback);
+            return fallback;
+        }
     }
 
     private static boolean classPresent(String fqcn) {

@@ -44,14 +44,22 @@ public final class InMemoryCompiler {
 
     private final CompilerProvider provider;
     private final ClasspathProvider classpath;
+    private final int hostMaxRelease;
 
     /**
-     * Host constructor: the resolved backend plus the host's own classpath
-     * provider.
+     * Host constructor: the resolved backend, the host's classpath provider, and
+     * the highest {@code --release} the host can actually ingest
+     * ({@code PlatformInfo.maxTargetRelease()}).
      */
-    public InMemoryCompiler(CompilerProvider provider, ClasspathProvider classpath) {
+    public InMemoryCompiler(CompilerProvider provider, ClasspathProvider classpath, int hostMaxRelease) {
         this.provider = provider;
         this.classpath = classpath;
+        this.hostMaxRelease = hostMaxRelease;
+    }
+
+    /** {@link #InMemoryCompiler(CompilerProvider, ClasspathProvider, int)} with no host ceiling. */
+    public InMemoryCompiler(CompilerProvider provider, ClasspathProvider classpath) {
+        this(provider, classpath, Runtime.version().feature());
     }
 
     /**
@@ -188,13 +196,18 @@ public final class InMemoryCompiler {
     }
 
     /**
-     * {@code --release} is clamped to {@code min(runtime, backend ceiling)}
-     * (ARCHITECTURE-V2 §7.3): targeting a release the running JVM cannot load
-     * is pointless, and asking a backend for a release it never heard of is a
-     * hard failure rather than a diagnostic.
+     * {@code --release} is clamped to
+     * {@code min(runtime, backend ceiling, host ceiling)} (ARCHITECTURE-V2 §7.3,
+     * widened by the 1.20.6 floor drop): targeting a release the running JVM
+     * cannot load is pointless, asking a backend for a release it never heard of
+     * is a hard failure rather than a diagnostic, and targeting a release the
+     * *host* cannot ingest produces bytecode the server's own tooling rejects
+     * even though the JVM would run it (see
+     * {@code PlatformInfo.maxTargetRelease()}).
      */
     private List<String> buildOptions() {
-        int release = Math.min(Runtime.version().feature(), provider.maxSupportedRelease());
+        int release = Math.min(Math.min(Runtime.version().feature(), provider.maxSupportedRelease()),
+                hostMaxRelease);
         List<String> options = new ArrayList<>();
         options.add("--release");
         options.add(String.valueOf(release));
