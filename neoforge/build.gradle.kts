@@ -68,10 +68,16 @@ val copySharedSdkSources = tasks.register<Copy>("copySharedSdkSources") {
 // ---------------------------------------------------------------------------
 val loaderCommonSources = rootProject.layout.projectDirectory.dir("loader-common/src/main/java")
 
+// Shared with Fabric: the third-party notices both loader jars must ship. ECJ
+// is EPL-2.0 (§7.3) and a redistributed EPL binary has to travel with its
+// licence; the `credits` line in neoforge.mods.toml already promises this file.
+val loaderCommonResources = rootProject.layout.projectDirectory.dir("loader-common/src/main/resources")
+
 sourceSets.main {
     java.srcDir(sdkModSources)
     java.srcDir(sharedSdkSources)
     java.srcDir(loaderCommonSources)
+    resources.srcDir(loaderCommonResources)
 }
 
 tasks.named("compileJava") { dependsOn(copySharedSdkSources) }
