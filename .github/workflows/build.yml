@@ -12,8 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 21 is the toolchain every module but `fabric` uses; `fabric` needs 25
-      # (MC 26.x requires it) and the foojay resolver provisions that itself.
+      # 21 is the toolchain every module but the two loader hosts uses;
+      # `fabric` and `neoforge` need 25 (MC 26.x requires it) and the foojay
+      # resolver provisions that itself.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -34,3 +35,4 @@ jobs:
           path: |
             paper/build/libs/VibeMod.jar
             fabric/build/libs/vibemod-fabric-*.jar
+            neoforge/build/libs/vibemod-neoforge-*.jar

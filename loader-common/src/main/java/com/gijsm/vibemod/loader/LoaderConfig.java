@@ -16,7 +16,7 @@ import com.google.gson.JsonPrimitive;
 import com.google.gson.reflect.TypeToken;
 
 /**
- * VibeMod's settings on Fabric: {@code config/vibemod.json}.
+ * VibeMod's settings on the loaders: {@code config/vibemod.json}.
  *
  * <p>Deliberately the same key set as Paper's {@code config.yml}, spelled with
  * the same dotted names ({@code openrouter.model}, {@code watchdog.enabled}, …)

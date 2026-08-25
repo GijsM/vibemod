@@ -28,7 +28,7 @@ import com.gijsm.vibemod.runtime.ModLoadException;
 import com.gijsm.vibemod.store.ModConfigs;
 
 /**
- * The Fabric half of a mod's lifecycle (ARCHITECTURE-V2 §1.1): instantiate the
+ * A loader host's half of a mod's lifecycle (ARCHITECTURE-V2 §1.1): instantiate the
  * generated main class, hand it a Mojang-typed {@link VibeContext}, and route
  * every registration it makes through the SPI bridges so {@code ModLifecycle}
  * can revoke it later.

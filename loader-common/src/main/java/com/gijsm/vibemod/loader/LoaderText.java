@@ -18,7 +18,7 @@ import net.minecraft.server.MinecraftServer;
  * Adventure text into the game and back.
  *
  * <p>VibeMod's whole UI is built from Adventure {@code Component}s — the screen
- * model, the chat renderer, every message core sends. Fabric's game speaks
+ * model, the chat renderer, every message core sends. The game speaks
  * {@code net.minecraft.network.chat.Component}. Something has to translate, and
  * ARCHITECTURE-V2 §1 expected adventure-platform-mod to be that something.
  *

@@ -17,7 +17,7 @@ import com.gijsm.vibemod.platform.TickScheduler;
 /**
  * {@link TickScheduler} over the server tick.
  *
- * <p>Fabric has no scheduler, so this is one: a list of tasks drained on
+ * <p>Neither loader has a scheduler, so this is one: a list of tasks drained on
  * {@code ServerTickEvents.END_SERVER_TICK} (the host registers that once and
  * calls {@link #tick()}), plus a small pool for the off-thread work — LLM calls
  * and compilation — that {@code ModGenerator} runs.

@@ -35,8 +35,13 @@ platform-api    JDK + adventure-api + sdk-client   (SPI + screen models)
 core            JDK + Gson + adventure-api + platform-api   (engine)
 sdk             paper-api (provided) + sdk-client           (generated-code contract, Paper flavor)
 paper           core + platform-api + sdk + paper-api
-fabric          core + platform-api + sdk-mod flavor + sdk-client + fabric-loader/api (Loom)
-neoforge        core + platform-api + sdk-mod flavor + sdk-client + neoforge (ModDevGradle)
+fabric          core + platform-api + sdk-mod flavor + loader-common + sdk-client + fabric-loader/api (Loom)
+neoforge        core + platform-api + sdk-mod flavor + loader-common + sdk-client + neoforge (ModDevGradle)
+
+loader-common   NOT a module — a shared SOURCE directory (§10.4), compiled twice:
+                once by `fabric` against Loom's game jar, once by `neoforge`
+                against MDG's patched one. Holds the two-thirds of a loader host
+                that is Mojang-typed and names no loader type at all.
 ```
 
 Rules:
@@ -502,8 +507,8 @@ documented in the completion report.
 - [ ] Watchdog measures render-thread callbacks (trip test with a busy-loop HUD mod)
 
 ### Phase E — NeoForge
-- [ ] `neoforge/` on ModDevGradle; same checklist as D transposed (EVENT_BUS bridges, GUI layer, `RegisterClientCommandsEvent` re-registration, `sendCommands` resync, union: URL translation unit-tested)
-- [ ] Gate: same as D on NeoForge server + client
+- [x] `neoforge/` on ModDevGradle; same checklist as D transposed (EVENT_BUS bridges, GUI layer, `RegisterClientCommandsEvent` re-registration, `sendCommands` resync, union: URL translation unit-tested) — see §10.4
+- [x] Gate: same as D on NeoForge server + client (28/28 dedicated, 30/30 client)
 
 ### Phase F — CI, docs, release
 - [ ] CI: all module jars built; matrix run-task smokes (Paper 1.20.6/1.21.8/26.x, Fabric 26.x server, NeoForge 26.x server) headless with scripted RCON/console smoke; self-tests incl. ECJ-forced wired in
@@ -1381,8 +1386,21 @@ that a HUD renderer really renders.
 5. **`/vibe export` is unsupported on NeoForge**, as on Fabric — §6.3's v1
    decision, unchanged.
 6. Two host fixes landed outside the NeoForge module (the async-task log and the
-   restore-on-boot log). The first is in `loader-common` and therefore affects
-   Fabric too; the Fabric gates were re-run green afterwards.
+   restore-on-boot log), plus the `ModLifecycle` parent-loader fix in `core`,
+   which touches all three platforms. Paper 1.21.8 (dialog gate), Paper 1.20.6
+   (chat gate, 25/25) and Fabric (25/25) were all re-run green afterwards.
+7. **The chat capture runs BEFORE generated mods' `onChat` hooks on NeoForge and
+   AFTER them on Fabric**, and this is a genuine behavioural divergence rather
+   than an oversight. `NeoForgeChatBridge` registers at `EventPriority.HIGHEST`
+   and cancels a captured line, so a line typed into a chat-rendered form never
+   reaches a mod hook. On Fabric both are `ALLOW_CHAT_MESSAGE` registrations and
+   the first `false` wins, and the event bridge happens to be registered first,
+   so mods see the line and then the capture swallows it. NeoForge's order is
+   the better one — form input is not chat, and letting a generated mod observe
+   somebody filling in a text field is a privacy leak as much as a cosmetic bug
+   — so it was not "fixed" to match. Aligning Fabric to it is a small ordering
+   change in `VibeModFabric.onInitialize` and is left for whoever next touches
+   that file.
 
 ### Residual human-QA items
 
@@ -1398,6 +1416,14 @@ that a HUD renderer really renders.
    RCON or a singleplayer client. A NeoForge client connected to a NeoForge
    dedicated server exercises the same code paths the two gates cover
    separately, but nothing has run both at once.
+4. **The EPL-2.0 text is not shipped under `META-INF/licenses/`** as §7.3 asks,
+   on either loader. What IS shipped is Eclipse's own `about.html` — it is
+   inside the nested `ecj-3.42.0.jar`, so the notice travels with the library —
+   plus a `credits` line in `neoforge.mods.toml` naming ECJ, EPL-2.0 and
+   Adventure. Deferred rather than done because a license file has to be a
+   verbatim authoritative copy and this phase had no way to guarantee one;
+   it belongs on Phase F's release checklist alongside the same gap in
+   `fabric/`.
 
 ### Notes for Phase F (CI)
 
