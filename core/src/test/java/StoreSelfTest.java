@@ -45,6 +45,7 @@ public class StoreSelfTest {
         testPathTraversalRejected();
         testResourceFilesRoundTripAndNamespaceRewrite();
         testPixelGridEncoding();
+        testRegistryLedger();
         testNullFieldMetaJsonNormalized();
         testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
@@ -235,6 +236,78 @@ public class StoreSelfTest {
      * consumer that matters is a texture loader that will reject a malformed
      * one silently.
      */
+    /**
+     * The registry ledger (V3 Phase 3 §A): live entries are idempotent, an
+     * unload is a tombstone, and both survive a restart.
+     *
+     * <p>The restart is the point. The ledger's whole job is to be read by the
+     * NEXT boot of a world, so a version of it that only works in memory would
+     * pass every runtime assertion and re-register a deleted mod's ids anyway.
+     */
+    private static void testRegistryLedger() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "ledger")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        check("a fresh ledger knows nothing", ledger.modNames().isEmpty()
+                && ledger.describeState().contains("ledgerIds=0"));
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+        check("recording the same id twice records it once",
+                ledger.entriesOf("RubySword").size() == 1);
+        ledger.record("RubySword", 1, "minecraft:entity_type", "vibemod_rubysword:ruby_pig");
+        check("a second registry is a second entry (" + ledger.describeState() + ")",
+                ledger.describeState().contains("ledgerIds=2"));
+        check("a live mod is not tombstoned", !ledger.isTombstoned("RubySword"));
+
+        check("it wrote itself to disk", Files.isRegularFile(file));
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("and a fresh reader sees the same two ids",
+                reopened.entriesOf("RubySword").size() == 2);
+
+        reopened.tombstone("RubySword");
+        check("unloading tombstones every id the mod owned",
+                reopened.isTombstoned("RubySword")
+                        && reopened.describeState().contains("ledgerTombstones=1"));
+        check("the tombstone survives a restart, which is the only thing it is for",
+                new com.gijsm.vibemod.store.RegistryLedger(file).isTombstoned("RubySword"));
+        check("and the ids are still listed, so the UI can say what became of them",
+                new com.gijsm.vibemod.store.RegistryLedger(file)
+                        .entriesOf("RubySword").size() == 2);
+        check("a mod that never registered anything is not tombstoned",
+                !reopened.isTombstoned("SomeOtherMod"));
+
+        // The install card is where a player is told the id outlives the mod.
+        com.gijsm.vibemod.ui.InstallCard.setRegisteredContent(
+                name -> reopened.entriesOf(name).stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList());
+        try {
+            ModStore store = new ModStore(tempDir("registry-card"));
+            GeneratedProject project = new GeneratedProject("RubySword", "a sword", "craft it",
+                    "manual", null, "IRON_SWORD", "RubySword", List.of(
+                    new GeneratedProject.GeneratedFile("RubySword.java",
+                            "package vibemod.rubysword;\n\npublic class RubySword {}\n")),
+                    List.of(), null);
+            store.saveNewVersion("RubySword", "a sword", "RubySword", "tester",
+                    "make a sword", "model-x", null, null, 0.0, null, project);
+            java.util.List<String> lines = com.gijsm.vibemod.ui.InstallCard.verifiedFactLines(
+                    store.get("RubySword"), null, java.util.Map.of());
+            check("/vibe info reports the ids a mod registered",
+                    lines.stream().anyMatch(line -> line.startsWith("registered content: ")
+                            && line.contains("vibemod_rubysword:ruby_sword")));
+            check("and says out loud that they outlive the mod",
+                    lines.stream().anyMatch(line ->
+                            line.contains("stays registered until the world is restarted")));
+        } finally {
+            com.gijsm.vibemod.ui.InstallCard.setRegisteredContent(null);
+        }
+
+        System.out.println("PASS: the registry ledger records ids, tombstones an unloaded mod, "
+                + "and survives a restart");
+    }
+
     private static void testPixelGridEncoding() {
         com.gijsm.vibemod.store.PixelGrid grid = com.gijsm.vibemod.store.PixelGrid.parse(
                 "{\"palette\":{\".\":\"transparent\",\"r\":\"#ff0000\",\"g\":\"#00ff0080\"},"

@@ -47,6 +47,51 @@ public final class FabricSeams {
     private static final String HUD_ELEMENT =
             "Lnet/fabricmc/fabric/api/client/rendering/v1/hud/HudElement;";
 
+    // ---- V3 Phase 3: registries, items, entity types ----
+
+    /** {@code net.minecraft.core.Registry}, whose five statics are the whole content surface. */
+    private static final String REGISTRY = "net/minecraft/core/Registry";
+    private static final String L_REGISTRY = "Lnet/minecraft/core/Registry;";
+    private static final String RESOURCE_KEY = "Lnet/minecraft/resources/ResourceKey;";
+    private static final String OBJECT = "Ljava/lang/Object;";
+    private static final String STRING = "Ljava/lang/String;";
+    private static final String HOLDER_REF = "Lnet/minecraft/core/Holder$Reference;";
+
+    private static final String ITEM_PROPERTIES = "net/minecraft/world/item/Item$Properties";
+    private static final String L_ITEM_PROPERTIES = "Lnet/minecraft/world/item/Item$Properties;";
+
+    private static final String ENTITY_TYPE_BUILDER = "net/minecraft/world/entity/EntityType$Builder";
+    private static final String L_ENTITY_TYPE = "Lnet/minecraft/world/entity/EntityType;";
+
+    private static final String ATTRIBUTE_REGISTRY =
+            "net/fabricmc/fabric/api/object/builder/v1/entity/FabricDefaultAttributeRegistry";
+    private static final String L_ATTRIBUTE_SUPPLIER =
+            "Lnet/minecraft/world/entity/ai/attributes/AttributeSupplier;";
+    private static final String L_ATTRIBUTE_BUILDER =
+            "Lnet/minecraft/world/entity/ai/attributes/AttributeSupplier$Builder;";
+
+    private static final String RENDERER_REGISTRY =
+            "net/fabricmc/fabric/api/client/rendering/v1/EntityRendererRegistry";
+    /**
+     * Vanilla's own {@code EntityRenderers.register}, which is
+     * {@code private static} in the jar and made public for every mod by
+     * fabric-transitive-access-wideners-v1:
+     *
+     * <pre>
+     * transitive-accessible method net/minecraft/client/renderer/entity/EntityRenderers
+     *     register (Lnet/minecraft/world/entity/EntityType;Lnet/minecraft/client/renderer/entity/EntityRendererProvider;)V
+     * </pre>
+     *
+     * <p>That widener is why {@code EntityRendererRegistry} carries
+     * {@code @Deprecated} in fabric-rendering-v1 25.3.2 — the fabric wrapper has
+     * been superseded by the vanilla method. Both are seamed: the deprecated one
+     * because a model trained on older tutorials will write it, the vanilla one
+     * because it is what current code writes.
+     */
+    private static final String VANILLA_RENDERERS = "net/minecraft/client/renderer/entity/EntityRenderers";
+    private static final String L_RENDERER_PROVIDER =
+            "Lnet/minecraft/client/renderer/entity/EntityRendererProvider;";
+
     private FabricSeams() {
     }
 
@@ -103,7 +148,58 @@ public final class FabricSeams {
                         CLIENT_SHIMS, "hudAttach"),
                 Seam.staticCall(HUD_REGISTRY, "attachElementAfter",
                         "(" + IDENTIFIER + IDENTIFIER + HUD_ELEMENT + ")V",
-                        CLIENT_SHIMS, "hudAttach"));
+                        CLIENT_SHIMS, "hudAttach"),
+
+                // ---- V3 Phase 3 §A: all five Registry statics, javap'd:
+                //   register(Registry<? super T>, String, T)          -> Object
+                //   register(Registry<V>, Identifier, T)              -> Object
+                //   register(Registry<V>, ResourceKey<V>, T)          -> Object
+                //   registerForHolder(Registry<R>, ResourceKey<R>, T) -> Holder$Reference
+                //   registerForHolder(Registry<R>, Identifier, T)     -> Holder$Reference
+                // The two ResourceKey overloads share a parameter list and are
+                // told apart by their RETURN type, which is why the seam matches
+                // on the whole descriptor rather than on name and arity.
+                Seam.staticCall(REGISTRY, "register",
+                        "(" + L_REGISTRY + STRING + OBJECT + ")" + OBJECT,
+                        SHIMS, "registryRegister"),
+                Seam.staticCall(REGISTRY, "register",
+                        "(" + L_REGISTRY + IDENTIFIER + OBJECT + ")" + OBJECT,
+                        SHIMS, "registryRegister"),
+                Seam.staticCall(REGISTRY, "register",
+                        "(" + L_REGISTRY + RESOURCE_KEY + OBJECT + ")" + OBJECT,
+                        SHIMS, "registryRegister"),
+                Seam.staticCall(REGISTRY, "registerForHolder",
+                        "(" + L_REGISTRY + RESOURCE_KEY + OBJECT + ")" + HOLDER_REF,
+                        SHIMS, "registryRegisterForHolder"),
+                Seam.staticCall(REGISTRY, "registerForHolder",
+                        "(" + L_REGISTRY + IDENTIFIER + OBJECT + ")" + HOLDER_REF,
+                        SHIMS, "registryRegisterForHolder"),
+
+                // The id has to be on the Properties BEFORE the Item exists —
+                // Item.<init> calls Properties.itemIdOrThrow() for both the
+                // description id and the model id — so the namespace rewrite
+                // cannot wait for Registry.register.
+                Seam.prependingReceiver(ITEM_PROPERTIES, "setId",
+                        "(" + RESOURCE_KEY + ")" + L_ITEM_PROPERTIES,
+                        SHIMS, "itemId"),
+                Seam.prependingReceiver(ENTITY_TYPE_BUILDER, "build",
+                        "(" + RESOURCE_KEY + ")" + L_ENTITY_TYPE,
+                        SHIMS, "entityTypeBuild"),
+
+                // §B. Not because it would fail otherwise — it is a plain map
+                // put — but because nothing else could take it away again.
+                Seam.staticCall(ATTRIBUTE_REGISTRY, "register",
+                        "(" + L_ENTITY_TYPE + L_ATTRIBUTE_BUILDER + ")V",
+                        SHIMS, "defaultAttributes"),
+                Seam.staticCall(ATTRIBUTE_REGISTRY, "register",
+                        "(" + L_ENTITY_TYPE + L_ATTRIBUTE_SUPPLIER + ")V",
+                        SHIMS, "defaultAttributes"),
+                Seam.staticCall(RENDERER_REGISTRY, "register",
+                        "(" + L_ENTITY_TYPE + L_RENDERER_PROVIDER + ")V",
+                        CLIENT_SHIMS, "entityRenderer"),
+                Seam.staticCall(VANILLA_RENDERERS, "register",
+                        "(" + L_ENTITY_TYPE + L_RENDERER_PROVIDER + ")V",
+                        CLIENT_SHIMS, "entityRenderer"));
     }
 
     /** The surgeon this host installs on its {@code InMemoryCompiler}. */

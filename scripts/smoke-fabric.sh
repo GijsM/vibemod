@@ -433,6 +433,62 @@ open(sys.argv[1], "w").write(json.dumps({
 }, indent=2))
 META4
 
+# ------------------------------------------------------------------ V3 Phase 3
+#
+# RegistryCanary: a plain Fabric mod that registers a REAL item, exactly the way
+# the RubySword few-shot teaches. On a dedicated server that is refused, and the
+# refusal is the whole assertion: registration would technically succeed here
+# (no vanilla client is attached at the moment a mod loads) and would then break
+# the first client that joined, so the policy is deterministic rather than
+# opportunistic.
+mkdir -p "$RUN/vibemod/mods/RegistryCanary/v1"
+cat > "$RUN/vibemod/mods/RegistryCanary/v1/RegistryCanary.java" <<'REG'
+package vibemod.registrycanary;
+
+import net.fabricmc.api.ModInitializer;
+
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ToolMaterial;
+
+/** No VibeMod import: an ordinary Fabric mod that registers an ordinary item. */
+public final class RegistryCanary implements ModInitializer {
+
+    public static final Identifier ID =
+            Identifier.fromNamespaceAndPath("vibemod_registrycanary", "ruby_sword");
+
+    public static Item rubySword;
+
+    @Override
+    public void onInitialize() {
+        ResourceKey<Item> key = ResourceKey.create(Registries.ITEM, ID);
+        rubySword = Registry.register(BuiltInRegistries.ITEM, ID, new Item(
+                new Item.Properties().sword(ToolMaterial.IRON, 4.0F, -2.4F).setId(key)));
+        System.out.println("registry-canary-registered");
+    }
+}
+REG
+
+python3 - "$RUN/vibemod/mods/RegistryCanary/meta.json" <<'META5'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
+    "name": "RegistryCanary",
+    "description": "A plain Fabric mod that registers a real item; refused on a dedicated server.",
+    "usage": "", "manual": "", "icon": "IRON_SWORD",
+    "mainClass": "vibemod.registrycanary.RegistryCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V3 registry canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First registry canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META5
+
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
 cat > "$RUN/vibemod/mods/WrongPlatform/v1/WrongPlatform.java" <<'WRONG'
@@ -509,6 +565,11 @@ for i in $(seq 1 180); do
 done
 for i in $(seq 1 180); do
   grep -q 'ResourceCanary v1 is live' "$LOG" 2>/dev/null && { note "resource canary live after ${i}s"; break; }
+  sleep 1
+done
+for i in $(seq 1 180); do
+  grep -q 'Refusing registry content from RegistryCanary' "$LOG" 2>/dev/null \
+    && { note "registry canary refused after ${i}s"; break; }
   sleep 1
 done
 # V3 Phase 2 §C: the datapack is materialized during the load, but the reload
@@ -800,6 +861,51 @@ done
 assert "re-enabling put the datapack directory back" test -d "$PACK_DIR"
 assert "re-enabling put the recipe back in the live manager" in_file "$BRCON" 'recipe=true'
 assert "nothing in the resource channel threw" not_in_file "$LOG" 'Could not write the datapack'
+
+# ------------------------------------------------------------------ V3 Phase 3 §D
+#
+# The dedicated-server registry policy. Every assertion here is about a REFUSAL,
+# because that is the whole feature on this host: the mod is an ordinary Fabric
+# mod registering an ordinary item, and it must fail to load, loudly, with a
+# message an operator can act on — not register successfully and break the first
+# client that joins.
+note "asserting the registry seam refuses a dedicated server (V3 Phase 3 §A/§D)"
+assert "the registry seam refused a dedicated server" \
+  in_file "$LOG" 'Refusing registry content from RegistryCanary'
+assert "and the refusal states the deterministic policy verbatim" \
+  in_file "$LOG" 'registry content is singleplayer/LAN-host only in v1; applies after restart on dedicated'
+assert "the refusal failed the mod's LOAD rather than being swallowed" \
+  in_file "$LOG" 'Failed to start RegistryCanary: onInitialize failed for mod RegistryCanary'
+assert "the mod's onInitialize never got past the refusal" \
+  not_in_file "$LOG" 'registry-canary-registered'
+assert "the refusal did not stop the other mods loading" in_file "$LOG" 'NativeCanary v1 is live'
+assert "and did not stop the resource channel either" in_file "$LOG" 'ResourceCanary v1 is live'
+assert "the item id really is absent from the running game" \
+  not_in_file "$LOG" 'registered item vibemod_registrycanary'
+assert "nothing was tombstoned or written to a ledger on a host that registers nothing" \
+  test ! -e "$RUN/vibemod/registry-ledger.json"
+# The bug this gate found: Item.<init> appends to DATA_COMPONENT_INITIALIZERS
+# before the registration is refused, and nothing removes it — so every LATER
+# datapack reload died with "Missing element ResourceKey[minecraft:item / …]".
+assert "the refused item's half-built state was rolled back" \
+  in_file "$LOG" 'Rolled back 1 data-component initializer'
+assert "so no later datapack reload was poisoned by it" \
+  not_in_file "$LOG" 'Missing element ResourceKey[minecraft:item'
+assert "and the orphaned item object was discarded, loudly" \
+  in_file "$LOG" 'constructed-but-unregistered minecraft:item object(s)'
+
+RRCON="$RUN/registry.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "vibe errors RegistryCanary" "vibe info RegistryCanary" | tee "$RRCON"
+assert "the refusal is journalled where /vibe errors can show it" \
+  in_file "$RRCON" 'singleplayer/LAN-host only'
+assert "and it is journalled as an onInitialize failure, not a crash" \
+  in_file "$RRCON" 'onInitialize'
+# /vibe list reads the STORE, so a mod that failed to load is still listed as
+# enabled — that is pre-existing and correct (it will be retried next boot).
+# What must be true is that nothing is LIVE, which the install card says.
+assert "and the refused mod is not live" \
+  in_file "$RRCON" 'not currently loaded'
 
 cleanup
 trap - EXIT

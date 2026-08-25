@@ -28,7 +28,9 @@ import com.gijsm.vibemod.command.VibeRouter;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.compile.SymbolOracle;
+import com.gijsm.vibemod.fabric.shim.CreativeTabs;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
+import com.gijsm.vibemod.fabric.shim.RegistrySeam;
 import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.gen.ModGenerator;
 import com.gijsm.vibemod.llm.ModelCatalog;
@@ -63,6 +65,7 @@ import com.gijsm.vibemod.runtime.Watchdog;
 import com.gijsm.vibemod.store.JarExporter;
 import com.gijsm.vibemod.store.ModConfigs;
 import com.gijsm.vibemod.store.ModStore;
+import com.gijsm.vibemod.store.RegistryLedger;
 import com.gijsm.vibemod.ui.InstallCard;
 import com.gijsm.vibemod.ui.Progress;
 import com.gijsm.vibemod.ui.Style;
@@ -121,6 +124,15 @@ public final class VibeModFabric implements ModInitializer {
     private static volatile ModDispatch modDispatch;
     /** The process-lived event fanout (V3 Phase 0 §B); built once, in {@link #onInitialize()}. */
     private static volatile EventFanout eventFanout;
+    /**
+     * The process-lived registry seam (V3 Phase 3 §A); built once, in
+     * {@link #onInitialize()}.
+     *
+     * <p>Process-lived for the same reason the fanout is, plus one of its own:
+     * it holds the creative-tab listener, which is an {@code Event.register}
+     * that cannot be undone.
+     */
+    private static volatile RegistrySeam registrySeam;
 
     /**
      * What the client entrypoint contributes: the bridge, its watchdog wiring,
@@ -167,6 +179,14 @@ public final class VibeModFabric implements ModInitializer {
         return eventFanout;
     }
 
+    /**
+     * The process-lived registry seam (V3 Phase 3 §A), for the acceptance gates
+     * and for {@code /vibe info}'s "registered content" line.
+     */
+    public static RegistrySeam registrySeam() {
+        return registrySeam;
+    }
+
     /** Called by the client entrypoint at its own init, before any server starts. */
     public static void setClientHooks(ClientHooks hooks) {
         clientHooks = hooks;
@@ -200,6 +220,19 @@ public final class VibeModFabric implements ModInitializer {
             return live == null ? null : live.server();
         });
         Shims.install(eventFanout);
+
+        // V3 Phase 3 §A, in this method for the same reason and one more: the
+        // creative-tab listener below is an Event.register that cannot be
+        // undone, so it must be made exactly once per process.
+        registrySeam = new RegistrySeam(() -> {
+            Services live = services;
+            return live == null ? null : live.server();
+        }, () -> {
+            Services live = services;
+            return live == null ? null : live.reloads();
+        });
+        Shims.installRegistries(registrySeam);
+        CreativeTabs.install(registrySeam);
 
         // The note* calls are what make the fanout's immediate-replay honest
         // (V3 Phase 1 §A): a mod hot-loaded after an event has fired needs it
@@ -493,6 +526,19 @@ public final class VibeModFabric implements ModInitializer {
                     configs, dispatch, scheduler, hooks == null ? null : hooks.contexts(),
                     new FabricEntrypointAdapter());
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
+
+            // V3 Phase 3 §A. The ledger is per installation, not per mod
+            // version, so it lives next to the store rather than inside it —
+            // rolling a mod back to v1 must not roll back the fact that an id
+            // exists. Deleting a mod tombstones its ids; disabling one does not.
+            if (registrySeam != null) {
+                RegistryLedger ledger = new RegistryLedger(
+                        dataFolder.resolve(RegistryLedger.FILE_NAME));
+                registrySeam.setLedger(ledger);
+                lifecycle.onUnload(registrySeam::tombstone);
+                InstallCard.setRegisteredContent(name -> ledger.entriesOf(name).stream()
+                        .map(RegistryLedger.Entry::id).toList());
+            }
 
             // V3 Phase 2 §B/§C. Both halves are loader-neutral: the datapack
             // channel is pure vanilla API (vanilla's own folder RepositorySource

@@ -608,8 +608,32 @@ public class LlmSelfTest {
         check("the native prompt restates the singleplayer shared-JVM race",
                 prompt.contains("share one JVM") && prompt.contains("NEVER read or")
                         && prompt.contains("write server state from client code"));
-        check("the native prompt still refuses registries",
-                prompt.contains("STILL NOT AVAILABLE") && prompt.contains("Registry.register"));
+        check("the native prompt still names what is NOT available",
+                prompt.contains("STILL NOT AVAILABLE")
+                        && prompt.contains("ClientCommandRegistrationCallback"));
+
+        // ---- V3 Phase 3 §C: registries, for items and entity types only ----
+        check("the native prompt lifts the registry ban for items and entity types",
+                prompt.contains("REGISTERING REAL CONTENT")
+                        && prompt.contains("Registry.register(BuiltInRegistries.ITEM")
+                        && !prompt.contains("NEVER register content in JAVA"));
+        check("the native prompt teaches 26.x's setId-before-construction rule",
+                prompt.contains("needs `setId(...)` BEFORE the item is constructed"));
+        check("the native prompt says there is no SwordItem any more",
+                prompt.contains("no `SwordItem` class any more")
+                        && prompt.contains(".sword(ToolMaterial.IRON, 4.0F, -2.4F)"));
+        check("the native prompt allows subclassing Item for behaviour",
+                prompt.contains("Subclass `Item` for behaviour"));
+        check("the native prompt states the singleplayer/LAN-host limit and the refusal",
+                prompt.contains("SINGLEPLAYER AND LAN-HOST ONLY")
+                        && prompt.contains("the host REFUSES the"));
+        check("the native prompt refuses blocks by name, with the reason",
+                prompt.contains("not blocks (their state ids are baked into every loaded"));
+        check("the native prompt teaches entity types and their default attributes",
+                prompt.contains("EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)")
+                        && prompt.contains("FabricDefaultAttributeRegistry.register"));
+        check("the native prompt says registered items land in a creative tab",
+                prompt.contains("creative INGREDIENTS tab"));
 
         // ---- V3 Phase 2 §E: resources ----
         check("the native prompt lifts the resource ban and teaches the two roots",
@@ -638,27 +662,36 @@ public class LlmSelfTest {
                         && !PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
                                 .contains("RESOURCE FILE"));
 
-        // The Phase 2 few-shot, and specifically the JSON shapes that were read
+        // The resource few-shot, and specifically the JSON shapes that were read
         // off the 26.2 jar rather than recalled — the two-file item model layout
-        // is the one a model trained on 1.20 gets wrong.
-        check("the Phase 2 few-shot ships a recipe, an advancement, a model and a grid texture",
-                prompt.contains("data/vibemod_rubycharm/recipe/ruby.json")
-                        && prompt.contains("data/vibemod_rubycharm/advancement/ruby.json")
-                        && prompt.contains("assets/vibemod_rubycharm/models/item/ruby.json")
-                        && prompt.contains("assets/vibemod_rubycharm/textures/item/ruby.png.grid"));
-        check("the Phase 2 few-shot uses the 26.x two-file item model layout",
-                prompt.contains("assets/vibemod_rubycharm/items/ruby.json")
-                        && prompt.contains("minecraft:item/generated"));
-        check("the Phase 2 few-shot's recipe is the 26.2 shape (verified against vanilla data)",
-                prompt.contains("minecraft:crafting_shaped")
-                        && prompt.contains("minecraft:custom_name")
-                        && prompt.contains("minecraft:item_model"));
-        check("the Phase 2 few-shot's advancement uses the real recipe_crafted trigger field",
+        // is the one a model trained on 1.20 gets wrong. RubySword carries every
+        // shape RubyCharm used to (V3 Phase 3 §C), plus the registration.
+        check("the resource few-shot ships a recipe, an advancement, a model and a grid texture",
+                prompt.contains("data/vibemod_rubysword/recipe/ruby_sword.json")
+                        && prompt.contains("data/vibemod_rubysword/advancement/ruby_sword.json")
+                        && prompt.contains("assets/vibemod_rubysword/models/item/ruby_sword.json")
+                        && prompt.contains(
+                                "assets/vibemod_rubysword/textures/item/ruby_sword.png.grid"));
+        check("the resource few-shot uses the 26.x two-file item model layout",
+                prompt.contains("assets/vibemod_rubysword/items/ruby_sword.json")
+                        && prompt.contains("minecraft:item/handheld"));
+        check("the few-shot's recipe is the 26.2 shape (verified against vanilla data)",
+                prompt.contains("minecraft:crafting_shaped"));
+        check("the components-on-a-vanilla-item answer survives in the cheat sheet",
+                prompt.contains("minecraft:custom_name") && prompt.contains("minecraft:item_model")
+                        && prompt.contains("minecraft:enchantment_glint_override"));
+        check("the few-shot's advancement uses the real recipe_crafted trigger field",
                 prompt.contains("minecraft:recipe_crafted") && prompt.contains("recipe_id"));
-        check("the Phase 2 few-shot's namespace is the canonical one",
-                prompt.contains("vibemod_rubycharm") && !prompt.contains("\"rubycharm:"));
-        check("the native prompt fits its budget (" + prompt.length() + " <= 26000 chars)",
-                prompt.length() <= 26000);
+        check("the few-shot's namespace is the canonical one",
+                prompt.contains("vibemod_rubysword") && !prompt.contains("\"rubysword:"));
+        check("the few-shot's lang key matches the id the item registry derives",
+                prompt.contains("item.vibemod_rubysword.ruby_sword"));
+        check("the few-shot registers its item the way a normal Fabric mod does",
+                prompt.contains("Registry.register(BuiltInRegistries.ITEM, ID")
+                        && prompt.contains("extends Item")
+                        && prompt.contains("InteractionResult use(Level level"));
+        check("the native prompt fits its budget (" + prompt.length() + " <= 30000 chars)",
+                prompt.length() <= 30000);
         check("the native prompt no longer names the era's non-existent KeyBindingHelper",
                 !prompt.contains("KeyBindingHelper"));
         check("the native prompt carries the Yarn -> Mojang rename table",

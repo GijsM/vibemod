@@ -4,7 +4,14 @@ import java.util.logging.Logger;
 
 import net.fabricmc.fabric.api.event.Event;
 
+import net.minecraft.core.Holder;
+import net.minecraft.core.Registry;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+import net.minecraft.world.item.Item;
 
 /**
  * The static methods a generated mod's rewritten bytecode actually calls
@@ -50,7 +57,25 @@ public final class Shims {
      */
     private static volatile ClientSeam client;
 
+    /**
+     * The registry seam (V3 Phase 3 §A), process-lived for the same reason the
+     * event fanout is: it owns the unfreeze/refreeze window around every mod's
+     * {@code onInitialize()}, and a client that loads a second world must find
+     * the same one.
+     */
+    private static volatile RegistryTarget registries;
+
     private Shims() {
+    }
+
+    /** Installs the process-lived registry seam. Called from {@code onInitialize()}. */
+    public static void installRegistries(RegistryTarget seam) {
+        Shims.registries = seam;
+    }
+
+    /** The registry seam, or null before mod init. */
+    public static RegistryTarget registries() {
+        return registries;
     }
 
     /** Installs the process-lived seam. Called from {@code VibeModFabric.onInitialize()}. */
@@ -96,11 +121,85 @@ public final class Shims {
         require().register(event, listener);
     }
 
+    // ------------------------------------------------------------------ V3 Phase 3
+
+    /**
+     * {@code Registry.register(Registry<? super T>, String, T)} — vanilla's own
+     * {@code "name"} overload, which means {@code minecraft:name} to vanilla and
+     * {@code vibemod_<mod>:name} here.
+     */
+    public static Object registryRegister(Registry<?> registry, String id, Object value) {
+        return requireRegistries().register(registry, id, value);
+    }
+
+    /** {@code Registry.register(Registry<V>, Identifier, T)} — the idiomatic mod overload. */
+    public static Object registryRegister(Registry<?> registry, Identifier id, Object value) {
+        return requireRegistries().register(registry, id, value);
+    }
+
+    /** {@code Registry.register(Registry<V>, ResourceKey<V>, T)}. */
+    public static Object registryRegister(Registry<?> registry, ResourceKey<?> id, Object value) {
+        return requireRegistries().register(registry, id, value);
+    }
+
+    /** {@code Registry.registerForHolder(Registry<R>, ResourceKey<R>, T)}. */
+    public static Holder.Reference<?> registryRegisterForHolder(Registry<?> registry,
+                                                                ResourceKey<?> id, Object value) {
+        return requireRegistries().registerForHolder(registry, id, value);
+    }
+
+    /** {@code Registry.registerForHolder(Registry<R>, Identifier, T)}. */
+    public static Holder.Reference<?> registryRegisterForHolder(Registry<?> registry,
+                                                                Identifier id, Object value) {
+        return requireRegistries().registerForHolder(registry, id, value);
+    }
+
+    /**
+     * {@code Item.Properties.setId(ResourceKey<Item>)}.
+     *
+     * <p>Seamed because 26.2 requires the id <em>before</em> the item exists:
+     * {@code Item.<init>} reads {@code Properties.itemIdOrThrow()} twice, for
+     * the description id and the model id. Rewriting the namespace at
+     * {@code Registry.register} time would be too late — the item would already
+     * be pointing at an {@code assets/} path in a namespace nothing writes to.
+     */
+    public static Item.Properties itemId(Item.Properties properties, ResourceKey<Item> key) {
+        return requireRegistries().itemId(properties, key);
+    }
+
+    /** {@code EntityType.Builder.build(ResourceKey<EntityType<?>>)}, namespaced. */
+    @SuppressWarnings("unchecked")
+    public static EntityType<?> entityTypeBuild(EntityType.Builder<?> builder, ResourceKey<?> key) {
+        return requireRegistries().entityTypeBuild(builder, (ResourceKey<EntityType<?>>) key);
+    }
+
+    /** {@code FabricDefaultAttributeRegistry.register(EntityType, AttributeSupplier.Builder)}. */
+    @SuppressWarnings("unchecked")
+    public static void defaultAttributes(EntityType<?> type, AttributeSupplier.Builder builder) {
+        requireRegistries().defaultAttributes((EntityType<? extends LivingEntity>) type, builder);
+    }
+
+    /** {@code FabricDefaultAttributeRegistry.register(EntityType, AttributeSupplier)}. */
+    @SuppressWarnings("unchecked")
+    public static void defaultAttributes(EntityType<?> type, AttributeSupplier supplier) {
+        requireRegistries().defaultAttributes((EntityType<? extends LivingEntity>) type, supplier);
+    }
+
     private static EventSeam require() {
         EventSeam live = seam;
         if (live == null) {
             throw new IllegalStateException(
                     "VibeMod's event seam is not installed — a rewritten mod class was loaded "
+                            + "before the host initialised");
+        }
+        return live;
+    }
+
+    private static RegistryTarget requireRegistries() {
+        RegistryTarget live = registries;
+        if (live == null) {
+            throw new IllegalStateException(
+                    "VibeMod's registry seam is not installed — a rewritten mod class was loaded "
                             + "before the host initialised");
         }
         return live;

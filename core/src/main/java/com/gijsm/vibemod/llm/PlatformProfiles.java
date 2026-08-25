@@ -542,10 +542,10 @@ public final class PlatformProfiles {
               `net.fabricmc.fabric.mixin.*`).
             - NEVER call `Event.addPhaseOrdering(...)`. Phase order is global and permanent,
               so it cannot be undone when your mod is disabled.
-            - NEVER register content in JAVA: no items, no blocks, no entity types, no
-              `Registry.register` of any kind. Registries are frozen long before your mod
-              loads. (Recipes, advancements, models, textures and lang are RESOURCE FILES
-              instead - see RESOURCE FILES below.)""";
+            - You MAY register real items and entity types with `Registry.register` from
+              `onInitialize()` - see REGISTERING REAL CONTENT below for the rules. BLOCKS and
+              every other registry are still refused, and so is registering from anywhere but
+              `onInitialize()`.""";
 
     private static final String NATIVE_FABRIC_THREADING = """
             - `onInitialize()` and every SERVER callback you register run on the MAIN SERVER
@@ -610,11 +610,40 @@ public final class PlatformProfiles {
                 ".": "transparent"}, "rows": ["..aa..", ".abba."]}. Square, at most 64x64
                 (16x16 is the vanilla item size), every row as long as the row count, every
                 character in the palette. The host encodes the PNG.
-            - A "CUSTOM ITEM" WITHOUT A REGISTRY: put components on a vanilla item in a recipe
-              result - `minecraft:custom_name`, `minecraft:lore`, `minecraft:item_model`,
-              `minecraft:enchantment_glint_override`. Craftable, with your own name and icon.
-            - STILL NOT AVAILABLE: `Registry.register` of any kind (items, blocks, entity
-              types) and `ClientCommandRegistrationCallback`. The host refuses these today.
+            - A "CUSTOM ITEM" WITHOUT A REGISTRY: put components on a vanilla item in the
+              recipe result. It works on a dedicated server, where a registered item does
+              not, so prefer it when a renamed vanilla item is genuinely enough:
+              `"result":{"id":"minecraft:amethyst_shard","components":{"minecraft:custom_name":
+              {"text":"Ruby Charm","color":"red","italic":false},"minecraft:lore":[{"text":"Warm
+              to the touch.","color":"gray","italic":false}],"minecraft:item_model":
+              "<ns>:ruby","minecraft:enchantment_glint_override":true}}`
+            - REGISTERING REAL CONTENT: items and entity types only, from `onInitialize()`
+              and nowhere else. The RubySword example below is the whole shape - copy it.
+              * ITEMS: `Registry.register(BuiltInRegistries.ITEM, id, new MyItem(new
+                Item.Properties()...setId(ResourceKey.create(Registries.ITEM, id))))`. 26.x
+                needs `setId(...)` BEFORE the item is constructed or the constructor throws,
+                and there is no `SwordItem` class any more - `Item.Properties` carries
+                `.sword(ToolMaterial.IRON, 4.0F, -2.4F)`, `.pickaxe(...)`, `.axe(...)`.
+                Subclass `Item` for behaviour (`use`, `useOn`, `hurtEnemy`) and end the class
+                name in `Item`. Ids are rewritten to your `vibemod_<name>` namespace, so use
+                that namespace in the Java too and your recipe, model and id all agree.
+              * AN ITEM IS NOTHING WITHOUT ITS FILES: the two-file model, a `.png.grid`
+                texture, `"item.<ns>.<name>"` in the lang file (that key comes from the id -
+                it must match), and a recipe so a player can get one. Registered items are in
+                the creative INGREDIENTS tab and in creative search automatically.
+              * ENTITY TYPES: `EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)
+                .build(ResourceKey.create(Registries.ENTITY_TYPE, id))`, registered the same
+                way, plus `FabricDefaultAttributeRegistry.register(TYPE, Mob.createAttributes())`
+                for anything living. Subclass a vanilla mob so a renderer already exists, and
+                spawn it yourself: `TYPE.create(level, EntitySpawnReason.COMMAND)` +
+                `level.addFreshEntity(...)`. No spawn eggs, no natural spawning.
+              * SINGLEPLAYER AND LAN-HOST ONLY. On a DEDICATED server the host REFUSES the
+                registration and the mod fails to load, because a client joining later would
+                not know the id - use the components-on-a-vanilla-item trick above there.
+              * NO OTHER REGISTRY: not blocks (their state ids are baked into every loaded
+                chunk when the world opens), not block entities, enchantments, biomes,
+                particles or sounds. Use `data/**` for anything datapack-shaped.
+            - STILL NOT AVAILABLE: `ClientCommandRegistrationCallback`.
             - If your mod does its setup when the server starts, register
               `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
               replays it for you if the server is already running when you are loaded.
@@ -635,7 +664,9 @@ public final class PlatformProfiles {
                 (`false` cancels).
               * The player list is `server.getPlayerList().getPlayers()`.
             - Use `net.minecraft.*` types as the game hands them to you: inspect them and act
-              on them, do not extend or replace them.""";
+              on them. The ONLY ones you may extend are the ones you own an instance of -
+              your own `Item` subclass, your own `Screen`, your own mob class. Never replace
+              or wrap a vanilla singleton.""";
 
     /**
      * There is no {@code ctx} in a native mod, so there is nowhere to read a

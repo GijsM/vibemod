@@ -16,13 +16,18 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.fabricmc.loader.api.FabricLoader;
 
 import net.minecraft.client.gui.screens.dialog.DialogScreen;
+import net.minecraft.client.renderer.entity.PigRenderer;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.item.ItemStack;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.fabric.client.FabricClientEventBridge;
 import com.gijsm.vibemod.fabric.client.FabricClientPacks;
 import com.gijsm.vibemod.fabric.client.VibeModFabricClient;
+import com.gijsm.vibemod.fabric.shim.CreativeTabs;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
+import com.gijsm.vibemod.fabric.shim.RegistrySeam;
 import com.gijsm.vibemod.runtime.ModHandle;
 
 /**
@@ -106,6 +111,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             testRenderWatchdogTrips(context, bridge);
             testNativeClientCanary(context, bridge);
             testResourceCanary(context);
+            testRegistryCanary(context);
         } finally {
             report();
         }
@@ -735,6 +741,362 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
                 VibeModFabric.services().messenger());
     }
 
+    // ------------------------------------------------------------------ V3 Phase 3
+
+    /**
+     * A real item and a real entity type, registered at runtime by a plain
+     * Fabric mod, in a real client (V3 Phase 3 §A/§B/§D).
+     *
+     * <p>This is the phase's thesis test and every assertion in it is about the
+     * running game rather than about VibeMod's bookkeeping: the id is in
+     * {@code BuiltInRegistries}, the components are bound (so a stack can
+     * exist at all), the model and texture resolve through the game's own
+     * resource manager, the game's own recipe lookup finds the mod's recipe for
+     * a real 3x3 grid and assembles the registered item out of it, a real
+     * right-click reaches the {@code use} override the mod wrote, the item is in
+     * a creative tab, and the runtime-registered entity type spawns and has a
+     * renderer.
+     *
+     * <p>Then it is disabled, and the honest half: the recipe goes, the creative
+     * tab entry goes, the command goes — and the ITEM STAYS, because
+     * {@code MappedRegistry} has no remove and pretending otherwise would
+     * corrupt the save. The ledger is what says so out loud.
+     */
+    private void testRegistryCanary(ClientGameTestContext context) {
+        String ns = "vibemod_registryclientcanary";
+        Path dir = Path.of("vibemod", "registrycanary");
+        for (String marker : new String[] {
+                "use-fired", "use-fired-client", "command-ran", "renderer-registered"}) {
+            deleteMarker(dir.resolve(marker));
+        }
+
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        check("the registry seam was installed at mod init", seam != null);
+        if (seam == null) {
+            return;
+        }
+        check("and it starts holding nothing (" + seam.describeState() + ")",
+                seam.describeState().contains("registryItems=0"));
+
+        int reloadsBefore = clientReloads();
+        seedWithResources("RegistryClientCanary", REGISTRY_CANARY_SOURCE, REGISTRY_CANARY_META,
+                java.util.Map.of(
+                        "data/" + ns + "/recipe/ruby_sword.json",
+                        REGISTRY_CANARY_RECIPE.replace("NS", ns),
+                        "assets/" + ns + "/lang/en_us.json",
+                        "{\"item." + ns + ".ruby_sword\": \"Ruby Sword\"}\n",
+                        "assets/" + ns + "/items/ruby_sword.json",
+                        "{\"model\":{\"type\":\"minecraft:model\",\"model\":\""
+                                + ns + ":item/ruby_sword\"}}\n",
+                        "assets/" + ns + "/models/item/ruby_sword.json",
+                        "{\"parent\":\"minecraft:item/handheld\",\"textures\":{\"layer0\":\""
+                                + ns + ":item/ruby_sword\"}}\n",
+                        "assets/" + ns + "/textures/item/ruby_sword.png.grid", REGISTRY_CANARY_GRID));
+
+        VibeModFabric.services().scheduler().runOnMain(() -> VibeModFabric.services().router()
+                .run(consoleSender(), new String[] {"enable", "RegistryClientCanary"}));
+        awaitLoaded(context, "RegistryClientCanary");
+
+        Identifier itemId = Identifier.fromNamespaceAndPath(ns, "ruby_sword");
+        Identifier entityId = Identifier.fromNamespaceAndPath(ns, "ruby_pig");
+
+        // ---- the registry itself ----
+        check("the item is in the game's own item registry",
+                BuiltInRegistries.ITEM.containsKey(itemId));
+        check("and the registry hands back the MOD's own subclass, not a vanilla stand-in",
+                BuiltInRegistries.ITEM.getValue(itemId).getClass().getName()
+                        .startsWith("vibemod.registryclientcanary."));
+        check("the entity type is in the game's own entity registry",
+                BuiltInRegistries.ENTITY_TYPE.containsKey(entityId));
+        check("its default attributes were registered",
+                net.minecraft.world.entity.ai.attributes.DefaultAttributes
+                        .hasSupplier(BuiltInRegistries.ENTITY_TYPE.getValue(entityId)));
+
+        // Components are the thing a registration alone does NOT give you: the
+        // initializer Item.<init> appended is bound by the window's repair pass
+        // (and again by the next datapack reload). Without it, making a stack
+        // throws "Components not bound yet" and nothing else below is reachable.
+        check("its data components were bound, so an ItemStack of it can exist",
+                context.computeOnClient(client -> {
+                    try {
+                        ItemStack stack = new ItemStack(BuiltInRegistries.ITEM.getValue(itemId));
+                        return !stack.isEmpty() && stack.getMaxStackSize() > 0;
+                    } catch (Throwable t) {
+                        return false;
+                    }
+                }));
+
+        String state = seam.describeState();
+        check("the seam counts what it registered (" + state + ")",
+                state.contains("registryItems=1") && state.contains("registryEntityTypes=1")
+                        && state.contains("registryAttributes=1"));
+        check("and the ledger recorded both ids (" + state + ")",
+                state.contains("ledgerIds=2") && state.contains("ledgerTombstones=0"));
+
+        // ---- the creative menu ----
+        check("the item is in the creative INGREDIENTS tab",
+                awaitTrue(context, () -> tabContains(itemId)));
+
+        // ---- the resources that make it look like anything ----
+        check("a NEW client resource reload completed for this mod",
+                awaitTrue(context, () -> clientReloads() > reloadsBefore));
+        Identifier modelDefinition = Identifier.fromNamespaceAndPath(ns, "items/ruby_sword.json");
+        Identifier texture = Identifier.fromNamespaceAndPath(ns, "textures/item/ruby_sword.png");
+        check("its item-model DEFINITION resolves (26.x's assets/<ns>/items/<id>.json)",
+                awaitClient(context, client -> client.getResourceManager()
+                        .getResource(modelDefinition).isPresent(), true));
+        check("and its texture is a real PNG the client can find",
+                context.computeOnClient(client -> client.getResourceManager()
+                        .getResource(texture).isPresent()));
+        check("its name translates from the lang key the item id derives",
+                "Ruby Sword".equals(context.computeOnClient(client ->
+                        net.minecraft.client.resources.language.I18n.get("item." + ns + ".ruby_sword"))));
+
+        // ---- the recipe, through the game's own lookup ----
+        check("the game's own recipe lookup finds the mod's recipe and assembles the "
+                        + "runtime-registered item out of it",
+                awaitTrue(context, () -> craftsToRegisteredItem(itemId)));
+
+        // ---- a real right-click on a real stack ----
+        //
+        // The reload the registration asked for puts a LoadingOverlay up, and
+        // while one is showing the client neither applies inventory updates nor
+        // routes mouse buttons to keybinds (MouseHandler.onButton's game-input
+        // branch is guarded on `gui.overlay() == null`). The first version of
+        // this test clicked straight through that and read
+        // `hand=0 minecraft:air useDown=false` for its trouble.
+        check("the client is quiet enough to receive a click before the interaction test",
+                awaitQuietClient(context));
+        context.runOnClient(client -> client.player.connection.sendCommand("regcanary"));
+        check("the mod's command ran and put the item in the player's hand",
+                awaitMarker(context, dir.resolve("command-ran"), true));
+        check("and the CLIENT sees the runtime-registered item in that hand",
+                awaitClient(context, client -> client.player != null
+                        && itemId.equals(BuiltInRegistries.ITEM
+                                .getKey(client.player.getMainHandItem().getItem())), true));
+        // Look at the sky: with a block under the crosshair the use key becomes
+        // Item.useOn, and it is Item.use that this mod overrides.
+        // MouseHandler.onButton routes a click to the open Screen when there is
+        // one and to the game only when there is not, so an earlier test's
+        // leftover screen would swallow this silently.
+        context.setScreen(() -> null);
+        context.getInput().lookAt(0.0F, -90.0F);
+        context.waitTicks(5);
+        // The right mouse button itself, not the keybind that happens to be
+        // bound to it: holdKey(keyUse) resolves the mapping's bound key, and one
+        // more layer of indirection is one more thing that can be the reason a
+        // click did not land.
+        context.getInput().holdMouseFor(1, 10);
+        check("a real right-click reached the item subclass's own use() override",
+                awaitMarker(context, dir.resolve("use-fired"), true));
+
+        // ---- the entity ----
+        check("the mod's client half registered a renderer for its entity type",
+                awaitMarker(context, dir.resolve("renderer-registered"), true));
+        check("the runtime-registered entity type spawned into the world",
+                awaitTrue(context, () -> liveCanaryEntity(entityId) != null));
+        check("and the client has a REAL renderer for it after the resource reload "
+                        + "(late EntityRendererRegistry.register works)",
+                awaitClient(context, client -> {
+                    net.minecraft.world.entity.Entity entity = clientCanaryEntity(client, ns);
+                    return entity != null && PigRenderer.class.isInstance(
+                            client.getEntityRenderDispatcher().getRenderer(entity));
+                }, true));
+
+        // ---- and now take it away ----
+        deleteMarker(dir.resolve("use-fired"));
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().disable("RegistryClientCanary"));
+        context.waitTicks(20);
+
+        check("disabling took the item out of the creative tab",
+                awaitTrue(context, () -> !tabContains(itemId)));
+        check("disabling removed the recipe with the rest of the datapack",
+                awaitServerRecipe(context, ns + ":ruby_sword", false));
+        check("disabling removed the mod's command",
+                VibeModFabric.services().server().getCommands().getDispatcher()
+                        .getRoot().getChild("regcanary") == null);
+        check("the seam holds nothing for it any more (" + seam.describeState() + ")",
+                seam.describeState().contains("registryItems=0")
+                        && seam.describeState().contains("registryAttributes=0"));
+
+        // The honest half. There is no MappedRegistry.remove, so the id stays —
+        // and the ledger is where that is written down rather than hidden.
+        check("the item is STILL in the registry, because a registry has no remove",
+                BuiltInRegistries.ITEM.containsKey(itemId));
+        check("and the ledger still lists it as this mod's, live",
+                seam.ledger() != null && seam.ledger().entriesOf("RegistryClientCanary").size() == 2
+                        && !seam.ledger().isTombstoned("RegistryClientCanary"));
+        check("a disabled mod's item does not crash the client that is holding one",
+                context.computeOnClient(client -> {
+                    try {
+                        return !new ItemStack(BuiltInRegistries.ITEM.getValue(itemId)).isEmpty();
+                    } catch (Throwable t) {
+                        return false;
+                    }
+                }));
+
+        // And the limitation, pinned rather than glossed. §D hoped a disabled
+        // mod's item would stop responding; it does not, and it cannot: the game
+        // calls Item.use on the object in the registry directly, with no host
+        // frame in between to drain. What IS gone is every way to GET one (the
+        // recipe, the creative tab) and everything the item's code reaches
+        // through the host (its command, its events). Asserted positively so
+        // that if this ever changes, the gate says so instead of going quiet.
+        check("the client is quiet again after the teardown's reloads",
+                awaitQuietClient(context));
+        check("the player is still holding the disabled mod's item",
+                awaitClient(context, client -> client.player != null
+                        && itemId.equals(BuiltInRegistries.ITEM
+                                .getKey(client.player.getMainHandItem().getItem())), true));
+        deleteMarker(dir.resolve("use-fired-client"));
+        context.setScreen(() -> null);
+        context.getInput().lookAt(0.0F, -90.0F);
+        context.waitTicks(5);
+        context.getInput().holdMouseFor(1, 10);
+        check("a disabled mod's item subclass STILL runs its own use() — there is no seam "
+                        + "between the game and an object it already holds",
+                awaitMarker(context, dir.resolve("use-fired"), true));
+
+        // ---- unload: the tombstone ----
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().unload("RegistryClientCanary"));
+        context.waitTicks(20);
+        check("unloading tombstoned the mod's ids",
+                seam.ledger() != null && seam.ledger().isTombstoned("RegistryClientCanary"));
+        check("and the tombstone is on disk, so the next boot will not re-register them",
+                ledgerFileSays("tombstone"));
+        check("the ledger counts it (" + seam.describeState() + ")",
+                seam.describeState().contains("ledgerTombstones=1"));
+    }
+
+    /**
+     * Waits until a mouse click would actually reach the game.
+     *
+     * <p>Two reloads land around a registry change (the resource pack's, and the
+     * one the seam asks for), each of which puts a {@code LoadingOverlay} up —
+     * and {@code MouseHandler.onButton} routes to keybinds only when
+     * {@code gui.overlay() == null}, so a click during one is silently dropped.
+     * Waiting for "no overlay right now" is not enough either: the debounce can
+     * start a second reload a tick later. So this waits for the coordinator to
+     * be idle AND the overlay to be gone for a whole second together.
+     */
+    private static boolean awaitQuietClient(ClientGameTestContext context) {
+        int quiet = 0;
+        for (int i = 0; i < 900; i++) {
+            boolean idle = VibeModFabric.services().reloads().describeState().contains("clientDirty=false")
+                    && context.computeOnClient(client -> client.gui.overlay() == null);
+            quiet = idle ? quiet + 1 : 0;
+            if (quiet >= 20) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
+    /**
+     * The coordinator's client reload counter.
+     *
+     * <p>Read as a NUMBER rather than as "not zero", because by this point in
+     * the gate two reloads have already happened for an earlier canary — and a
+     * {@code !contains("clientReloads=0")} wait would return on the first poll,
+     * before {@code LanguageManager} had re-read anything. Phase 2 wrote that
+     * trap down; this is the shape that avoids it.
+     */
+    private static int clientReloads() {
+        String state = VibeModFabric.services().reloads().describeState();
+        int at = state.indexOf("clientReloads=");
+        if (at < 0) {
+            return -1;
+        }
+        int end = state.indexOf(' ', at);
+        return Integer.parseInt(state.substring(at + "clientReloads=".length(),
+                end < 0 ? state.length() : end));
+    }
+
+    /** Whether the creative ingredients tab currently offers {@code itemId}. */
+    private static boolean tabContains(Identifier itemId) {
+        net.minecraft.world.item.CreativeModeTab tab =
+                BuiltInRegistries.CREATIVE_MODE_TAB.getValue(CreativeTabs.TAB.identifier());
+        if (tab == null) {
+            return false;
+        }
+        for (ItemStack stack : tab.getDisplayItems()) {
+            if (BuiltInRegistries.ITEM.getKey(stack.getItem()).equals(itemId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Asks the integrated server's own {@code RecipeManager} to resolve a real
+     * 3x3 crafting grid, and checks that what comes out is the registered item.
+     *
+     * <p>Stronger than "the recipe id is in the manager": the recipe can only
+     * parse at all if the item id existed when the datapack was read, and
+     * {@code assemble} can only produce the item if the result id resolved to
+     * the object this mod registered.
+     */
+    private static boolean craftsToRegisteredItem(Identifier itemId) {
+        try {
+            net.minecraft.server.MinecraftServer server = VibeModFabric.services().server();
+            net.minecraft.server.level.ServerLevel level = server.overworld();
+            ItemStack shard = new ItemStack(net.minecraft.world.item.Items.AMETHYST_SHARD);
+            ItemStack redstone = new ItemStack(net.minecraft.world.item.Items.REDSTONE);
+            ItemStack stick = new ItemStack(net.minecraft.world.item.Items.STICK);
+            ItemStack empty = ItemStack.EMPTY;
+            net.minecraft.world.item.crafting.CraftingInput input =
+                    net.minecraft.world.item.crafting.CraftingInput.of(3, 3, List.of(
+                            empty, shard, empty,
+                            shard, redstone, shard,
+                            empty, stick, empty));
+            return server.getRecipeManager()
+                    .getRecipeFor(net.minecraft.world.item.crafting.RecipeType.CRAFTING, input, level)
+                    .map(holder -> holder.value().assemble(input))
+                    .map(result -> BuiltInRegistries.ITEM.getKey(result.getItem()).equals(itemId))
+                    .orElse(false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** The spawned canary entity on the SERVER side, or null. */
+    private static net.minecraft.world.entity.Entity liveCanaryEntity(Identifier entityId) {
+        for (net.minecraft.world.entity.Entity entity
+                : VibeModFabric.services().server().overworld().getAllEntities()) {
+            if (BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).equals(entityId)) {
+                return entity;
+            }
+        }
+        return null;
+    }
+
+    /** The same entity as the CLIENT sees it, which is the one that has to be drawn. */
+    private static net.minecraft.world.entity.Entity clientCanaryEntity(
+            net.minecraft.client.Minecraft client, String ns) {
+        if (client.level == null) {
+            return null;
+        }
+        for (net.minecraft.world.entity.Entity entity : client.level.entitiesForRendering()) {
+            if (entity.getClass().getName().startsWith("vibemod.registryclientcanary.")) {
+                return entity;
+            }
+        }
+        return null;
+    }
+
+    private static boolean ledgerFileSays(String needle) {
+        try {
+            Path file = FabricLoader.getInstance().getGameDir().resolve("vibemod")
+                    .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+            return Files.isRegularFile(file) && Files.readString(file).contains(needle);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     // ------------------------------------------------------------------ seeding
 
     /**
@@ -1153,5 +1515,214 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             {"palette": {".": "transparent", "d": "#5a1010", "r": "#b31c1c"},
              "rows": ["..dddd..", ".drrrrd.", "drrrrrrd", "drrrrrrd",
                       "drrrrrrd", "drrrrrrd", ".drrrrd.", "..dddd.."]}
+            """;
+
+    /**
+     * The V3 Phase 3 canary (§D): a plain Fabric mod, no VibeMod import
+     * anywhere, that registers a real item with its own {@code use} override and
+     * a real entity type with default attributes and a vanilla renderer.
+     *
+     * <p>Compiled against the real Loom classpath with {@code javac} before
+     * being embedded, exactly like the prompt's own few-shots.
+     */
+    private static final String REGISTRY_CANARY_SOURCE = """
+            package vibemod.registryclientcanary;
+
+            import java.nio.file.Files;
+            import java.nio.file.Path;
+
+            import net.fabricmc.api.ClientModInitializer;
+            import net.fabricmc.api.ModInitializer;
+            import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
+            import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+            import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
+
+            import net.minecraft.client.renderer.entity.PigRenderer;
+            import net.minecraft.commands.Commands;
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.network.chat.Component;
+            import net.minecraft.resources.Identifier;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.server.level.ServerLevel;
+            import net.minecraft.server.level.ServerPlayer;
+            import net.minecraft.world.InteractionHand;
+            import net.minecraft.world.InteractionResult;
+            import net.minecraft.world.entity.EntitySpawnReason;
+            import net.minecraft.world.entity.EntityType;
+            import net.minecraft.world.entity.MobCategory;
+            import net.minecraft.world.entity.animal.pig.Pig;
+            import net.minecraft.world.entity.player.Player;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.item.ItemStack;
+            import net.minecraft.world.item.ToolMaterial;
+            import net.minecraft.world.level.Level;
+
+            /**
+             * A plain Fabric mod with no VibeMod import that registers a REAL item and a
+             * REAL entity type, and gives the gate a command to drive them with.
+             */
+            public final class RegistryClientCanary implements ModInitializer, ClientModInitializer {
+
+                private static final String NS = "vibemod_registryclientcanary";
+                private static final Path DIR = Path.of("vibemod", "registrycanary");
+
+                public static final Identifier ITEM_ID = Identifier.fromNamespaceAndPath(NS, "ruby_sword");
+                public static final Identifier ENTITY_ID = Identifier.fromNamespaceAndPath(NS, "ruby_pig");
+
+                public static Item rubySword;
+                public static EntityType<RubyPig> rubyPig;
+
+                @Override
+                public void onInitialize() {
+                    rubySword = Registry.register(BuiltInRegistries.ITEM, ITEM_ID, new RubySwordItem(
+                            new Item.Properties().sword(ToolMaterial.IRON, 4.0F, -2.4F)
+                                    .setId(ResourceKey.create(Registries.ITEM, ITEM_ID))));
+
+                    rubyPig = EntityType.Builder.of(RubyPig::new, MobCategory.CREATURE)
+                            .build(ResourceKey.create(Registries.ENTITY_TYPE, ENTITY_ID));
+                    Registry.register(BuiltInRegistries.ENTITY_TYPE, ENTITY_ID, rubyPig);
+                    FabricDefaultAttributeRegistry.register(rubyPig, Pig.createAttributes());
+
+                    CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
+                            dispatcher.register(Commands.literal("regcanary").executes(ctx -> {
+                                ServerLevel level = ctx.getSource().getLevel();
+                                ServerPlayer player = ctx.getSource().getPlayer();
+                                if (player != null) {
+                                    player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(rubySword));
+                                }
+                                boolean spawned = false;
+                                RubyPig pig = rubyPig.create(level, EntitySpawnReason.COMMAND);
+                                if (pig != null && player != null) {
+                                    pig.setPos(player.getX() + 2.0, player.getY(), player.getZ());
+                                    spawned = level.addFreshEntity(pig);
+                                }
+                                ctx.getSource().sendSystemMessage(
+                                        Component.literal("registry-canary spawned=" + spawned));
+                                mark("command-ran");
+                                return 1;
+                            })));
+                }
+
+                @Override
+                public void onInitializeClient() {
+                    EntityRendererRegistry.register(rubyPig, PigRenderer::new);
+                    mark("renderer-registered");
+                }
+
+                static void mark(String name) {
+                    try {
+                        Files.createDirectories(DIR);
+                        Files.writeString(DIR.resolve(name), "ok");
+                    } catch (Exception ignored) {
+                        // a marker that cannot be written is a failed assertion, not a crash
+                    }
+                }
+
+                /** The item subclass: its own {@code use} override, which the gate fires with a real click. */
+                public static final class RubySwordItem extends Item {
+
+                    public RubySwordItem(Properties properties) {
+                        super(properties);
+                    }
+
+                    @Override
+                    public InteractionResult use(Level level, Player player, InteractionHand hand) {
+                        mark(level.isClientSide() ? "use-fired-client" : "use-fired");
+                        return InteractionResult.SUCCESS;
+                    }
+                }
+
+                /** A vanilla mob subclass, so a vanilla renderer already knows how to draw it. */
+                public static final class RubyPig extends Pig {
+
+                    public RubyPig(EntityType<? extends RubyPig> type, Level level) {
+                        super(type, level);
+                    }
+                }
+            }
+            """;
+
+    private static final String REGISTRY_CANARY_META = """
+            {
+              "schema": 3,
+              "platform": "fabric",
+              "mcVersion": "26.2",
+              "side": "client",
+              "name": "RegistryClientCanary",
+              "description": "A plain Fabric mod that registers a real item and a real entity type.",
+              "usage": "",
+              "manual": "",
+              "icon": "IRON_SWORD",
+              "mainClass": "vibemod.registryclientcanary.RegistryClientCanary",
+              "currentVersion": 1,
+              "enabled": false,
+              "creator": "gate",
+              "versions": [
+                {
+                  "version": 1,
+                  "prompt": "the V3 registry canary",
+                  "model": "none",
+                  "createdAt": 0,
+                  "changelog": "First registry canary.",
+                  "kind": "create",
+                  "costUsd": 0.0,
+                  "requester": "gate"
+                }
+              ],
+              "config": [],
+              "configValues": {}
+            }
+            """;
+
+    /** The result names the MOD's own item, so the recipe only parses if the id exists. */
+    private static final String REGISTRY_CANARY_RECIPE = """
+            {
+              "type": "minecraft:crafting_shaped",
+              "key": {
+                "#": "minecraft:redstone",
+                "X": "minecraft:amethyst_shard",
+                "S": "minecraft:stick"
+              },
+              "pattern": [
+                " X ",
+                "X#X",
+                " S "
+              ],
+              "result": {
+                "id": "NS:ruby_sword"
+              }
+            }
+            """;
+
+    private static final String REGISTRY_CANARY_GRID = """
+            {
+              "palette": {
+                ".": "transparent",
+                "d": "#5a1010",
+                "r": "#b31c1c",
+                "l": "#ff6b6b",
+                "h": "#8b5a2b"
+              },
+              "rows": [
+                "..............l.",
+                ".............lr.",
+                "............lrr.",
+                "...........lrrd.",
+                "..........lrrd..",
+                ".........lrrd...",
+                "........lrrd....",
+                "...h...lrrd.....",
+                "..hhh.lrrd......",
+                "...h.lrrd.......",
+                "..hh.lrd........",
+                ".hh..ldd........",
+                "hh...d..........",
+                "h...............",
+                "................",
+                "................"
+              ]
+            }
             """;
 }

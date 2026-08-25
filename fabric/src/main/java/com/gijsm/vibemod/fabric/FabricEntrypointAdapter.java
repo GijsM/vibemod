@@ -7,6 +7,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.api.ModInitializer;
 
 import com.gijsm.vibemod.fabric.shim.ClientSeam;
+import com.gijsm.vibemod.fabric.shim.RegistryTarget;
 import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.loader.EntrypointAdapter;
 import com.gijsm.vibemod.loader.ModAttribution;
@@ -66,7 +67,18 @@ public final class FabricEntrypointAdapter implements EntrypointAdapter {
         }
         return () -> {
             if (common) {
-                ((ModInitializer) instance).onInitialize();
+                // V3 Phase 3 §A: the registration window. It is around the WHOLE
+                // entrypoint rather than around Registry.register, and it has to
+                // be — Item.<init> writes to BuiltInRegistries.ITEM itself
+                // (createIntrusiveHolder), so the constructor of the argument
+                // runs, and throws, before the register call it is an argument
+                // to is even entered. See RegistrySeam for the disassembly.
+                RegistryTarget registries = Shims.registries();
+                if (registries == null) {
+                    ((ModInitializer) instance).onInitialize();
+                } else {
+                    registries.withWindow(((ModInitializer) instance)::onInitialize);
+                }
             }
             if (seam == null) {
                 if (client) {

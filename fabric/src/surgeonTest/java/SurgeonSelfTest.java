@@ -56,6 +56,10 @@ public final class SurgeonSelfTest {
         testCommandCallbackIsSeamed(compiler);
         testKeybindSeamIsRewritten(compiler);
         testHudSeamIsRewritten(compiler);
+        testRegistryRegisterIsRewrittenAndRuns(compiler);
+        testRubySwordShapeIsFullySeamed(compiler);
+        testEntityTypeSeamsAreRewritten(compiler);
+        testEntityRendererSeamIsRewritten(compiler);
 
         if (failures == 0) {
             System.out.println("ALL CHECKS PASSED");
@@ -535,7 +539,257 @@ public final class SurgeonSelfTest {
                         "net/fabricmc/fabric/api/client/rendering/v1/hud/HudElementRegistry.")));
     }
 
+    // ------------------------------------------------------------------ V3 Phase 3
+
+    /**
+     * §A: {@code Registry.register} reaches the shim, with the mod's own
+     * arguments, and the real static is never called.
+     *
+     * <p>The registry arrives as a <em>parameter</em> rather than as
+     * {@code BuiltInRegistries.ITEM}, on purpose: touching that field would
+     * initialise every built-in registry and run vanilla's whole bootstrap
+     * inside a self-test that is meant to prove a property of bytes. The
+     * descriptor at the call site is identical either way — that is exactly what
+     * the seam matches on — and the running-game proof is the client gate's
+     * registry canary.
+     */
+    private static void testRegistryRegisterIsRewrittenAndRuns(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.regcall.RegCall", """
+                package vibemod.regcall;
+
+                import net.minecraft.core.Registry;
+                import net.minecraft.resources.Identifier;
+
+                public final class RegCall {
+                    public Object put(Registry<Object> registry, Identifier id, Object value) {
+                        return Registry.register(registry, id, value);
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod calling Registry.register passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.regcall.RegCall"));
+        check("Registry.register was redirected to the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.registryRegister"));
+        check("no call to the real Registry.register survived (" + calls + ")",
+                !calls.contains("net/minecraft/core/Registry.register"));
+
+        RegistryRecorder recorder = new RegistryRecorder();
+        Shims.installRegistries(recorder);
+        try {
+            ClassLoader loader = new ModLifecycle.BytesClassLoader(
+                    SurgeonSelfTest.class.getClassLoader(), result.classes());
+            Class<?> regCall = loader.loadClass("vibemod.regcall.RegCall");
+            Object instance = regCall.getDeclaredConstructor().newInstance();
+            net.minecraft.resources.Identifier id =
+                    net.minecraft.resources.Identifier.fromNamespaceAndPath("regcall", "thing");
+            Object value = new Object();
+            Object returned = regCall.getMethod("put", net.minecraft.core.Registry.class,
+                            net.minecraft.resources.Identifier.class, Object.class)
+                    .invoke(instance, null, id, value);
+
+            check("the rewritten registry call reached the host shim", recorder.ids.size() == 1);
+            check("the shim received the mod's own id",
+                    recorder.ids.size() == 1 && recorder.ids.get(0) == id);
+            check("the shim received the mod's own value",
+                    recorder.values.size() == 1 && recorder.values.get(0) == value);
+            check("and the mod got its object back (static final ITEM = register(...) still works)",
+                    returned == value);
+        } catch (Throwable t) {
+            check("defining and running the rewritten registry class threw: " + t, false);
+        } finally {
+            Shims.installRegistries(null);
+        }
+    }
+
+    /**
+     * §C's few-shot, seam by seam: the exact shape {@code RubySword} teaches,
+     * with a real {@code BuiltInRegistries.ITEM} and a real
+     * {@code Item.Properties.setId}.
+     *
+     * <p>Compiled and rewritten but NOT run — constructing an {@code Item}
+     * outside a registration window is precisely what the window exists to make
+     * legal, and doing it here would prove nothing about the rewrite.
+     */
+    private static void testRubySwordShapeIsFullySeamed(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.rubysword.RubySword", """
+                package vibemod.rubysword;
+
+                import net.fabricmc.api.ModInitializer;
+
+                import net.minecraft.core.Registry;
+                import net.minecraft.core.registries.BuiltInRegistries;
+                import net.minecraft.core.registries.Registries;
+                import net.minecraft.resources.Identifier;
+                import net.minecraft.resources.ResourceKey;
+                import net.minecraft.world.item.Item;
+                import net.minecraft.world.item.ToolMaterial;
+
+                public final class RubySword implements ModInitializer {
+
+                    public static Item RUBY_SWORD;
+
+                    @Override
+                    public void onInitialize() {
+                        Identifier id = Identifier.fromNamespaceAndPath("rubysword", "ruby_sword");
+                        ResourceKey<Item> key = ResourceKey.create(Registries.ITEM, id);
+                        RUBY_SWORD = Registry.register(BuiltInRegistries.ITEM, id, new Item(
+                                new Item.Properties().sword(ToolMaterial.IRON, 4.0F, -2.4F).setId(key)));
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("the RubySword few-shot shape passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.rubysword.RubySword"));
+        check("its Registry.register went through the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.registryRegister"));
+        check("its Item.Properties.setId went through the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.itemId"));
+        check("no raw Registry.register or Properties.setId survived (" + calls + ")",
+                !calls.contains("net/minecraft/core/Registry.register")
+                        && !calls.contains("net/minecraft/world/item/Item$Properties.setId"));
+        check("the builder call that is NOT a seam is untouched (" + calls + ")",
+                calls.contains("net/minecraft/world/item/Item$Properties.sword"));
+    }
+
+    /** §B: {@code EntityType.Builder.build} and the default-attribute registry. */
+    private static void testEntityTypeSeamsAreRewritten(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.critter.Critter", """
+                package vibemod.critter;
+
+                import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
+
+                import net.minecraft.resources.ResourceKey;
+                import net.minecraft.world.entity.EntityType;
+                import net.minecraft.world.entity.LivingEntity;
+                import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
+
+                public final class Critter {
+
+                    public EntityType<?> build(EntityType.Builder<?> builder,
+                                               ResourceKey<EntityType<?>> key) {
+                        return builder.build(key);
+                    }
+
+                    public void attributes(EntityType<? extends LivingEntity> type,
+                                           AttributeSupplier.Builder attributes) {
+                        FabricDefaultAttributeRegistry.register(type, attributes);
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod building an EntityType passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.critter.Critter"));
+        check("EntityType.Builder.build was redirected to the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.entityTypeBuild"));
+        check("FabricDefaultAttributeRegistry.register was redirected too (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.defaultAttributes"));
+        check("neither original survived (" + calls + ")",
+                !calls.contains("net/minecraft/world/entity/EntityType$Builder.build")
+                        && calls.stream().noneMatch(c -> c.startsWith("net/fabricmc/fabric/api/object/"
+                                + "builder/v1/entity/FabricDefaultAttributeRegistry.")));
+    }
+
+    /** §B: the client half — an entity renderer the host can take away again. */
+    private static void testEntityRendererSeamIsRewritten(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.critterclient.CritterClient", """
+                package vibemod.critterclient;
+
+                import net.fabricmc.api.ClientModInitializer;
+                import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
+
+                import net.minecraft.client.renderer.entity.EntityRendererProvider;
+                import net.minecraft.world.entity.Entity;
+                import net.minecraft.world.entity.EntityType;
+
+                public final class CritterClient implements ClientModInitializer {
+
+                    @Override
+                    public void onInitializeClient() {
+                    }
+
+                    @SuppressWarnings("deprecation")
+                    public void render(EntityType<Entity> type, EntityRendererProvider<Entity> provider) {
+                        EntityRendererRegistry.register(type, provider);
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a mod registering an entity renderer passes the policy: " + result.diagnostics(),
+                result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.critterclient.CritterClient"));
+        check("EntityRendererRegistry.register was redirected to the client shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/ClientShims.entityRenderer"));
+        check("no call to the real EntityRendererRegistry survived (" + calls + ")",
+                calls.stream().noneMatch(c -> c.startsWith(
+                        "net/fabricmc/fabric/api/client/rendering/v1/EntityRendererRegistry.")));
+    }
+
     // ------------------------------------------------------------------ plumbing
+
+    /** Records what a rewritten registry call site handed the shim (V3 Phase 3 §A). */
+    private static final class RegistryRecorder
+            implements com.gijsm.vibemod.fabric.shim.RegistryTarget {
+
+        private final List<Object> ids = new ArrayList<>();
+        private final List<Object> values = new ArrayList<>();
+
+        @Override
+        public Object register(net.minecraft.core.Registry<?> registry, Object id, Object value) {
+            ids.add(id);
+            values.add(value);
+            return value;
+        }
+
+        @Override
+        public net.minecraft.core.Holder.Reference<?> registerForHolder(
+                net.minecraft.core.Registry<?> registry, Object id, Object value) {
+            register(registry, id, value);
+            return null;
+        }
+
+        @Override
+        public net.minecraft.world.item.Item.Properties itemId(
+                net.minecraft.world.item.Item.Properties properties,
+                net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> key) {
+            ids.add(key);
+            return properties;
+        }
+
+        @Override
+        public net.minecraft.world.entity.EntityType<?> entityTypeBuild(
+                net.minecraft.world.entity.EntityType.Builder<?> builder,
+                net.minecraft.resources.ResourceKey<net.minecraft.world.entity.EntityType<?>> key) {
+            ids.add(key);
+            return null;
+        }
+
+        @Override
+        public void defaultAttributes(
+                net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.LivingEntity> type,
+                net.minecraft.world.entity.ai.attributes.AttributeSupplier supplier) {
+            values.add(supplier);
+        }
+
+        @Override
+        public void defaultAttributes(
+                net.minecraft.world.entity.EntityType<? extends net.minecraft.world.entity.LivingEntity> type,
+                net.minecraft.world.entity.ai.attributes.AttributeSupplier.Builder builder) {
+            values.add(builder);
+        }
+    }
 
     /** Records what the rewritten bytecode handed the shim. */
     private static final class Recorder implements com.gijsm.vibemod.fabric.shim.EventSeam {

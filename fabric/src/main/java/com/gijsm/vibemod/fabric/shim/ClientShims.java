@@ -2,11 +2,18 @@ package com.gijsm.vibemod.fabric.shim;
 
 import java.util.logging.Logger;
 
+import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElement;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.renderer.entity.EntityRendererProvider;
+import net.minecraft.client.renderer.entity.NoopRenderer;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
 
+import com.gijsm.vibemod.fabric.mixin.client.EntityRenderersAccessor;
 import com.gijsm.vibemod.loader.ModAttribution;
 import com.gijsm.vibemod.platform.Registration;
 import com.gijsm.vibemod.runtime.ModHandle;
@@ -98,6 +105,104 @@ public final class ClientShims {
     public static void hudAttach(Identifier anchor, Identifier id, HudElement element) {
         LOG.fine(() -> "Ignoring HUD anchor " + anchor + " (mod HUD elements share one host element)");
         hudAdd(id, element);
+    }
+
+    /**
+     * {@code EntityRendererRegistry.register(EntityType, EntityRendererProvider)}
+     * (V3 Phase 3 §B).
+     *
+     * <p>Late registration works, and the reason is worth stating because the
+     * brief expected it not to. fabric-rendering's
+     * {@code EntityRendererRegistryImpl} swaps its buffering handler for a
+     * direct write into vanilla's {@code EntityRenderers.PROVIDERS} the first
+     * time {@code createEntityRenderers} runs — and that map is a mutable
+     * {@code Object2ObjectOpenHashMap} read by
+     * {@code EntityRenderDispatcher.onResourceManagerReload}, which is a
+     * {@code ResourceManagerReloadListener}. So "register the provider, then
+     * reload client resources" is a complete, supported path to a rendering
+     * custom entity — and Phase 2's {@code ReloadCoordinator} already runs that
+     * reload for a mod that ships {@code assets/**}. This asks for one
+     * explicitly, so a mod with no assets still gets its renderer.
+     *
+     * <p>The removal is ours ({@link EntityRenderersAccessor}): fabric-api has
+     * no unregister, and a provider left behind for a disabled mod is a
+     * dangling class loader and a crash the next time such an entity is drawn.
+     */
+    public static void entityRenderer(EntityType<? extends Entity> type,
+                                      EntityRendererProvider<?> provider) {
+        ModHandle handle = require();
+        registerRenderer(type, provider);
+        rebuildRenderers();
+        handle.track(ModHandle.Kind.CLIENT, Registration.of(() -> {
+            ClientSeam seam = Shims.clientSeam();
+            if (seam == null) {
+                return;
+            }
+            // REPLACED, not removed — the client gate crashed on exactly this.
+            // Disabling a mod does not despawn the entities it already put in the
+            // world (there is no unregister for an EntityType either), so taking
+            // the provider out and rebuilding leaves the dispatcher with no
+            // renderer for something still being drawn:
+            //   NullPointerException: Cannot invoke "EntityRenderer.shouldRender(…)"
+            //   because "renderer" is null
+            // Vanilla's NoopRenderer draws nothing and drops the mod's own
+            // provider lambda, which is what the removal was for.
+            //
+            // The drain runs on the SERVER thread; the dispatcher is the render
+            // thread's.
+            seam.runOnRenderThread(() -> {
+                registerRenderer(type, NoopRenderer::new);
+                rebuildRenderers();
+            });
+        }));
+        LOG.fine(() -> "Mod " + handle.name() + " registered an entity renderer");
+    }
+
+    /**
+     * Vanilla's {@code NoopRenderer} for a type nothing has claimed yet
+     * (V3 Phase 3 §B) — see {@link ClientSeam#ensureEntityRenderer} for the
+     * crash this prevents. Render thread.
+     */
+    public static void ensureEntityRenderer(EntityType<?> type) {
+        if (EntityRenderersAccessor.getProviders().containsKey(type)) {
+            return;
+        }
+        registerRenderer(type, NoopRenderer::new);
+        rebuildRenderers();
+        LOG.fine(() -> "Installed a no-op renderer for the runtime-registered entity type " + type);
+    }
+
+    /**
+     * Rebuilds {@code EntityRenderDispatcher}'s baked renderer map from
+     * {@code EntityRenderers.PROVIDERS}, now.
+     *
+     * <p>{@code onResourceManagerReload} is public and, disassembled, entirely
+     * self-contained: every input is one of the dispatcher's own fields, so
+     * calling it outside a reload rebuilds exactly what a reload would and
+     * nothing else. That is the difference between "the renderer takes effect in
+     * two seconds, if the coordinator gets round to a full client reload" and
+     * "the renderer takes effect on this frame".
+     */
+    private static void rebuildRenderers() {
+        Minecraft client = Minecraft.getInstance();
+        if (client == null || client.getEntityRenderDispatcher() == null) {
+            return;
+        }
+        try {
+            client.getEntityRenderDispatcher().onResourceManagerReload(client.getResourceManager());
+        } catch (Throwable t) {
+            LOG.log(java.util.logging.Level.WARNING,
+                    "Could not rebuild the entity renderers; the next resource reload will", t);
+        }
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes", "deprecation"})
+    private static void registerRenderer(EntityType<?> type, EntityRendererProvider<?> provider) {
+        // The deprecated fabric wrapper rather than the access-widened vanilla
+        // EntityRenderers.register, because both end in the same map put and
+        // only this one is guaranteed to be on the compile classpath of a
+        // module that does not itself carry the transitive widener.
+        EntityRendererRegistry.register((EntityType) type, (EntityRendererProvider) provider);
     }
 
     private static ModHandle require() {

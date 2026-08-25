@@ -22,6 +22,7 @@ import net.minecraft.resources.Identifier;
 
 import com.gijsm.vibemod.fabric.shim.ClientRegistrations;
 import com.gijsm.vibemod.fabric.shim.ClientSeam;
+import com.gijsm.vibemod.fabric.shim.ClientShims;
 import com.gijsm.vibemod.loader.client.LoaderClientEventBridge;
 import com.gijsm.vibemod.platform.ModFailure;
 import com.gijsm.vibemod.platform.Registration;
@@ -71,6 +72,11 @@ public final class FabricClientEventBridge extends LoaderClientEventBridge
         // otherwise, which is exactly the contract; the host never blocks the
         // server thread waiting for a frame.
         client.execute(body);
+    }
+
+    @Override
+    public void ensureEntityRenderer(net.minecraft.world.entity.EntityType<?> type) {
+        runOnRenderThread(() -> ClientShims.ensureEntityRenderer(type));
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.gijsm.vibemod.runtime;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -51,6 +52,17 @@ public final class ModLifecycle implements ModFailure {
     private final LinkedHashMap<String, LoadedMod> mods = new LinkedHashMap<>();
     /** V3 Phase 2 §B: the host's resource channel, or {@link ModContent#NONE}. */
     private volatile ModContent content = ModContent.NONE;
+    /**
+     * V3 Phase 3 §A: notified when a mod is unloaded — deleted from the store,
+     * not merely disabled.
+     *
+     * <p>A separate hook rather than a branch inside {@link #unload} because the
+     * one thing that cares is a loader-side registry ledger, and {@code core}
+     * must not know what a registry is. The distinction it needs is exactly the
+     * one {@link #unload} already draws: {@link #disable} is reversible and
+     * {@code unload} is not, so only the latter is a tombstone.
+     */
+    private final List<java.util.function.Consumer<String>> unloadListeners = new ArrayList<>();
 
     public ModLifecycle(ModHost host, TickScheduler scheduler, Messenger messenger, Watchdog watchdog,
                         ModConfigs configs, ModErrors errors, DebugEcho debug) {
@@ -145,6 +157,14 @@ public final class ModLifecycle implements ModFailure {
         return true;
     }
 
+    /**
+     * Registers a listener for {@link #unload} (V3 Phase 3 §A). Never called
+     * for a plain {@link #disable}, which is the whole point of the hook.
+     */
+    public void onUnload(java.util.function.Consumer<String> listener) {
+        unloadListeners.add(listener);
+    }
+
     /** Disable + forget entirely. */
     public void unload(String name) {
         assertMainThread();
@@ -155,6 +175,14 @@ public final class ModLifecycle implements ModFailure {
         configs.forget(name);
         errors.forget(name);
         debug.forget(name);
+        for (java.util.function.Consumer<String> listener : unloadListeners) {
+            try {
+                listener.accept(name);
+            } catch (Throwable t) {
+                Logger.getLogger(ModLifecycle.class.getName())
+                        .log(Level.WARNING, "An unload listener threw for " + name, t);
+            }
+        }
     }
 
     /** Disable ALL mods. */

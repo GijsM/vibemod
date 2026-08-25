@@ -21,7 +21,29 @@ import com.gijsm.vibemod.store.ModStore;
  */
 public final class InstallCard {
 
+    /**
+     * Mod name -&gt; the registry ids it owns (V3 Phase 3 §A).
+     *
+     * <p>A static hook rather than a constructor parameter because the answer
+     * lives on the loader side (a registry ledger the {@code core} module must
+     * not know the shape of) and the question is asked from three UI surfaces
+     * that would each have to thread it through. Empty by default, so Paper and
+     * every self-test see exactly the card they saw before.
+     *
+     * <p>It is on the card at all because this is the one thing a mod acquires
+     * that {@code /vibe disable} does not take away: the id stays registered
+     * for the life of the world, and a player deserves to be told that by the
+     * screen that lists everything else the mod owns.
+     */
+    private static volatile java.util.function.Function<String, List<String>> registeredContent =
+            name -> List.of();
+
     private InstallCard() {
+    }
+
+    /** Installs the registry-ledger lookup. Hosts with no registry channel never call this. */
+    public static void setRegisteredContent(java.util.function.Function<String, List<String>> lookup) {
+        registeredContent = lookup == null ? name -> List.of() : lookup;
     }
 
     /**
@@ -96,6 +118,14 @@ public final class InstallCard {
             }
         } else {
             lines.add("(not currently loaded - live counts unavailable)");
+        }
+        // Deliberately outside the `live != null` branch: a registry id survives
+        // the mod being disabled, so it is exactly the fact that is still true
+        // when the live counts are not.
+        List<String> registered = registeredContent.apply(mod.name());
+        if (!registered.isEmpty()) {
+            lines.add("registered content: " + String.join(", ", registered)
+                    + "  (stays registered until the world is restarted)");
         }
         if (values != null && !values.isEmpty()) {
             lines.add("knobs:");

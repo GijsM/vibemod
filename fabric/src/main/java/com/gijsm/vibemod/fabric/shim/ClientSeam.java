@@ -44,6 +44,31 @@ public interface ClientSeam {
     ModFailure failures();
 
     /**
+     * Makes sure a runtime-registered entity type has SOME renderer, right now
+     * (V3 Phase 3 §B).
+     *
+     * <p>The client gate found why this has to exist. {@code EntityRenderDispatcher}
+     * bakes {@code EntityType -> EntityRenderer} once per resource reload; a
+     * type registered afterwards is simply absent from that map, and the first
+     * frame in which one is visible dies on the render thread with
+     * {@code NullPointerException: Cannot invoke "EntityRenderer.shouldRender(…)"
+     * because "renderer" is null}. Registering the mod's real renderer fixes it
+     * — but the mod registers that from {@code onInitializeClient}, which is
+     * DEFERRED to the render thread, while the entity type is registered
+     * synchronously in {@code onInitialize}. Between the two there is a window
+     * in which a mod (or a command) can spawn one and take the client down.
+     *
+     * <p>So the entity type's registration installs vanilla's own
+     * {@code NoopRenderer} immediately, and the mod's real renderer replaces it
+     * a frame later. An invisible mob is a bug report; a crashed client is a
+     * lost world.
+     *
+     * <p>{@code EntityType} is {@code net.minecraft.world.entity}, which exists
+     * on a dedicated server, so this signature keeps the no-client-types rule.
+     */
+    void ensureEntityRenderer(net.minecraft.world.entity.EntityType<?> type);
+
+    /**
      * Closes the open screen if its class was defined by {@code modLoader}
      * (V3 Phase 1 §E).
      *

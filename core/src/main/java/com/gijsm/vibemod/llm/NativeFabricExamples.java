@@ -39,25 +39,38 @@ import java.util.List;
  * GuiGraphicsExtractor, DeltaTracker)}; and
  * {@code GuiGraphicsExtractor.text(Font, String, int, int, int)}.
  *
- * <p>{@code RubyCharm} is Phase 2's, and it is the only one whose interesting
- * content is not Java at all: a recipe, an advancement, an item model
- * definition, a model, a lang file and a pixel-grid texture, with eleven lines
- * of Java holding them together. It is the answer to "add a custom item"
- * <em>without</em> a registry — a vanilla item wearing a
- * {@code minecraft:custom_name}, a {@code minecraft:lore} and a
- * {@code minecraft:item_model} out of the recipe result — which is the request
- * models get asked for most and the one the previous prompt had to refuse.
+ * <p>{@code RubySword} is Phase 2's resource example and Phase 3's registry one
+ * at once, and merging them was deliberate rather than economical. It replaced
+ * {@code RubyCharm}, which taught the same six file shapes around a
+ * <em>renamed vanilla item</em>; {@code RubySword} teaches them around a real
+ * registered one and carries every JSON shape {@code RubyCharm} carried — the
+ * recipe, the advancement, the two-file item model, the lang file, the pixel
+ * grid — plus {@code Registry.register}, {@code Item.Properties.setId} and an
+ * {@code Item} subclass with a {@code use} override. Two few-shots differing
+ * only in whether the item is real would have cost 4.5k characters of prompt on
+ * every round of every generation to say one thing twice. The one shape that
+ * did NOT survive the merge — a recipe result wearing
+ * {@code minecraft:custom_name}/{@code lore}/{@code item_model} components,
+ * which is still the ONLY answer on a dedicated server — moved into the cheat
+ * sheet as a literal, and {@code LlmSelfTest} asserts it is there.
  *
  * <p>Every JSON shape in it was read out of the running game's own data rather
- * than recalled: the recipe from {@code data/minecraft/recipe/golden_apple.json}
- * and the components block from {@code suspicious_stew_from_blue_orchid.json};
+ * than recalled: the recipe from {@code data/minecraft/recipe/golden_apple.json};
  * the advancement from {@code data/minecraft/advancement/story/mine_stone.json};
  * the {@code recipe_id} criterion field off
  * {@code RecipeCraftedTrigger$TriggerInstance}'s codec; and the two-file item
  * model layout ({@code assets/<ns>/items/<name>.json} pointing at
  * {@code assets/<ns>/models/item/<name>.json}) from
- * {@code assets/minecraft/items/apple.json}, which is a 26.x arrangement a model
- * trained on 1.20 gets wrong.
+ * {@code assets/minecraft/items/diamond_sword.json}, which is a 26.x
+ * arrangement a model trained on 1.20 gets wrong.
+ *
+ * <p>Its Java was compiled against the real Loom classpath with {@code javac}
+ * before being embedded, and every 26.2 signature in it was javap'd:
+ * {@code Item.Properties.setId(ResourceKey<Item>)} and
+ * {@code .sword(ToolMaterial, float, float)} (there is no {@code SwordItem}
+ * class in this era at all); {@code Item.use(Level, Player, InteractionHand)
+ * -> InteractionResult}; {@code InteractionResult.SUCCESS};
+ * {@code Entity.setRemainingFireTicks(int)}.
  */
 final class NativeFabricExamples {
 
@@ -81,17 +94,18 @@ final class NativeFabricExamples {
             """;
 
 
-    static final String RUBY_CHARM_USER =
-            "Create a mod: a craftable lucky charm made from an amethyst shard and redstone, "
-                    + "with its own name and icon (requested by Steve)";
 
-    static final String RUBY_CHARM_ASSISTANT = """
-            {"plan":{"name":"RubyCharm","files":[{"path":"RubyCharm.java","purpose":"Entry point + /rubycharm hint."},{"path":"data/vibemod_rubycharm/recipe/ruby.json","purpose":"The recipe."},{"path":"data/vibemod_rubycharm/advancement/ruby.json","purpose":"Granted on first craft."},{"path":"assets/vibemod_rubycharm/lang/en_us.json","purpose":"English text."},{"path":"assets/vibemod_rubycharm/items/ruby.json","purpose":"Item model definition."},{"path":"assets/vibemod_rubycharm/models/item/ruby.json","purpose":"The model."},{"path":"assets/vibemod_rubycharm/textures/item/ruby.png.grid","purpose":"16x16 pixel grid."}]},"name":"RubyCharm","description":"Adds a craftable Ruby Charm with its own name, icon and advancement.","usage":"Craft an amethyst shard surrounded by four redstone","manual":"## RubyCharm\\n\\nCraft a **Ruby Charm** from an amethyst shard framed by four redstone dust.\\n\\nIt is an ordinary amethyst shard wearing a new name, icon and glint, so it stacks like one. Your first craft grants *A Warm Glow*. The icon only shows on a client; on a server the charm still crafts.","changelog":"Added the craftable Ruby Charm, its icon and its advancement.","icon":"AMETHYST_SHARD","mainClass":"RubyCharm","files":[{"path":"RubyCharm.java","content":"package vibemod.rubycharm;\\n\\nimport net.fabricmc.api.ModInitializer;\\nimport net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;\\n\\nimport net.minecraft.commands.Commands;\\nimport net.minecraft.network.chat.Component;\\n\\npublic final class RubyCharm implements ModInitializer {\\n\\n    @Override\\n    public void onInitialize() {\\n        // The charm is DATA: recipe, advancement, model and texture are all\\n        // resource files below. The Java just tells a player about it.\\n        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->\\n                dispatcher.register(Commands.literal(\\"rubycharm\\").executes(ctx -> {\\n                    ctx.getSource().sendSuccess(() -> Component.literal(\\n                            \\"Ruby Charm: an amethyst shard framed by four redstone.\\"), false);\\n                    return 1;\\n                })));\\n    }\\n}\\n"},{"path":"data/vibemod_rubycharm/recipe/ruby.json","content":"{\\"type\\":\\"minecraft:crafting_shaped\\",\\"key\\":{\\"#\\":\\"minecraft:redstone\\",\\"X\\":\\"minecraft:amethyst_shard\\"},\\"pattern\\":[\\" # \\",\\"#X#\\",\\" # \\"],\\"result\\":{\\"id\\":\\"minecraft:amethyst_shard\\",\\"components\\":{\\"minecraft:custom_name\\":{\\"text\\":\\"Ruby Charm\\",\\"color\\":\\"red\\",\\"italic\\":false},\\"minecraft:lore\\":[{\\"text\\":\\"Warm to the touch.\\",\\"color\\":\\"gray\\",\\"italic\\":false}],\\"minecraft:item_model\\":\\"vibemod_rubycharm:ruby\\",\\"minecraft:enchantment_glint_override\\":true}}}\\n"},{"path":"data/vibemod_rubycharm/advancement/ruby.json","content":"{\\"parent\\":\\"minecraft:adventure/root\\",\\"criteria\\":{\\"crafted\\":{\\"trigger\\":\\"minecraft:recipe_crafted\\",\\"conditions\\":{\\"recipe_id\\":\\"vibemod_rubycharm:ruby\\"}}},\\"display\\":{\\"icon\\":{\\"id\\":\\"minecraft:amethyst_shard\\"},\\"title\\":{\\"translate\\":\\"advancements.vibemod_rubycharm.ruby.title\\"},\\"description\\":{\\"translate\\":\\"advancements.vibemod_rubycharm.ruby.description\\"}}}\\n"},{"path":"assets/vibemod_rubycharm/lang/en_us.json","content":"{\\"advancements.vibemod_rubycharm.ruby.title\\":\\"A Warm Glow\\",\\"advancements.vibemod_rubycharm.ruby.description\\":\\"Craft a ruby charm.\\"}\\n"},{"path":"assets/vibemod_rubycharm/items/ruby.json","content":"{\\"model\\":{\\"type\\":\\"minecraft:model\\",\\"model\\":\\"vibemod_rubycharm:item/ruby\\"}}\\n"},{"path":"assets/vibemod_rubycharm/models/item/ruby.json","content":"{\\"parent\\":\\"minecraft:item/generated\\",\\"textures\\":{\\"layer0\\":\\"vibemod_rubycharm:item/ruby\\"}}\\n"},{"path":"assets/vibemod_rubycharm/textures/item/ruby.png.grid","content":"{\\"palette\\":{\\".\\":\\"transparent\\",\\"d\\":\\"#5a1010\\",\\"r\\":\\"#b31c1c\\",\\"l\\":\\"#ff6b6b\\"},\\"rows\\":[\\"................\\",\\"................\\",\\"......dddd......\\",\\".....drrrrd.....\\",\\"....drrllrrd....\\",\\"...drrlllrrrd...\\",\\"...drllllrrrd...\\",\\"...drlllrrrrd...\\",\\"...drrlrrrrrd...\\",\\"...drrrrrrrrd...\\",\\"....drrrrrrd....\\",\\".....drrrrd.....\\",\\"......dddd......\\",\\"................\\",\\"................\\",\\"................\\"]}\\n"}]}
+    static final String RUBY_SWORD_USER =
+            "Create a mod: a ruby sword that is as strong as iron and sets me on fire when I "
+                    + "right-click it (requested by Alex)";
+
+    static final String RUBY_SWORD_ASSISTANT = """
+            {"plan":{"name":"RubySword","files":[{"path":"RubySword.java","purpose":"Registers the item and its right-click."},{"path":"data/vibemod_rubysword/recipe/ruby_sword.json","purpose":"How to craft it."},{"path":"data/vibemod_rubysword/advancement/ruby_sword.json","purpose":"Granted on first craft."},{"path":"assets/vibemod_rubysword/lang/en_us.json","purpose":"English text."},{"path":"assets/vibemod_rubysword/items/ruby_sword.json","purpose":"Item model definition."},{"path":"assets/vibemod_rubysword/models/item/ruby_sword.json","purpose":"The model."},{"path":"assets/vibemod_rubysword/textures/item/ruby_sword.png.grid","purpose":"16x16 texture."}]},"name":"RubySword","description":"A real registered Ruby Sword: iron-strength, craftable, and it sets you alight on right-click.","usage":"Craft one, then right-click while holding it","manual":"## RubySword\\n\\nA **Ruby Sword** - a real registered item, craftable from two amethyst shards, a redstone and a stick, or taken from the creative *Ingredients* tab.\\n\\nIt hits like an iron sword, and **right-clicking sets you on fire for two seconds**. Your first craft grants *A Warm Grip*.\\n\\nSingleplayer and LAN worlds only.","changelog":"Added the Ruby Sword item, its recipe, its model and its fiery right-click.","icon":"IRON_SWORD","mainClass":"RubySword","files":[{"path":"RubySword.java","content":"package vibemod.rubysword;\\n\\nimport net.fabricmc.api.ModInitializer;\\n\\nimport net.minecraft.core.Registry;\\nimport net.minecraft.core.registries.BuiltInRegistries;\\nimport net.minecraft.core.registries.Registries;\\nimport net.minecraft.resources.Identifier;\\nimport net.minecraft.resources.ResourceKey;\\nimport net.minecraft.world.InteractionHand;\\nimport net.minecraft.world.InteractionResult;\\nimport net.minecraft.world.entity.player.Player;\\nimport net.minecraft.world.item.Item;\\nimport net.minecraft.world.item.ToolMaterial;\\nimport net.minecraft.world.level.Level;\\n\\npublic final class RubySword implements ModInitializer {\\n\\n    // The namespace here must be the one the resource files use.\\n    public static final Identifier ID =\\n            Identifier.fromNamespaceAndPath(\\"vibemod_rubysword\\", \\"ruby_sword\\");\\n\\n    public static Item rubySword;\\n\\n    @Override\\n    public void onInitialize() {\\n        // setId(...) BEFORE the item exists; .sword(...) instead of a SwordItem class.\\n        ResourceKey<Item> key = ResourceKey.create(Registries.ITEM, ID);\\n        rubySword = Registry.register(BuiltInRegistries.ITEM, ID, new RubySwordItem(\\n                new Item.Properties().sword(ToolMaterial.IRON, 4.0F, -2.4F).setId(key)));\\n    }\\n\\n    public static final class RubySwordItem extends Item {\\n\\n        public RubySwordItem(Properties properties) {\\n            super(properties);\\n        }\\n\\n        @Override\\n        public InteractionResult use(Level level, Player player, InteractionHand hand) {\\n            if (!level.isClientSide()) {\\n                player.setRemainingFireTicks(40);\\n            }\\n            return InteractionResult.SUCCESS;\\n        }\\n    }\\n}\\n"},{"path":"data/vibemod_rubysword/recipe/ruby_sword.json","content":"{\\"type\\": \\"minecraft:crafting_shaped\\", \\"key\\": {\\"#\\": \\"minecraft:redstone\\", \\"X\\": \\"minecraft:amethyst_shard\\", \\"S\\": \\"minecraft:stick\\"}, \\"pattern\\": [\\" X \\", \\"X#X\\", \\" S \\"], \\"result\\": {\\"id\\": \\"vibemod_rubysword:ruby_sword\\"}}\\n"},{"path":"data/vibemod_rubysword/advancement/ruby_sword.json","content":"{\\"parent\\": \\"minecraft:adventure/root\\", \\"criteria\\": {\\"crafted\\": {\\"trigger\\": \\"minecraft:recipe_crafted\\", \\"conditions\\": {\\"recipe_id\\": \\"vibemod_rubysword:ruby_sword\\"}}}, \\"display\\": {\\"icon\\": {\\"id\\": \\"vibemod_rubysword:ruby_sword\\"}, \\"title\\": {\\"translate\\": \\"advancements.vibemod_rubysword.ruby_sword.title\\"}, \\"description\\": {\\"translate\\": \\"advancements.vibemod_rubysword.ruby_sword.description\\"}}}\\n"},{"path":"assets/vibemod_rubysword/lang/en_us.json","content":"{\\"item.vibemod_rubysword.ruby_sword\\": \\"Ruby Sword\\", \\"advancements.vibemod_rubysword.ruby_sword.title\\": \\"A Warm Grip\\", \\"advancements.vibemod_rubysword.ruby_sword.description\\": \\"Forge the ruby sword.\\"}\\n"},{"path":"assets/vibemod_rubysword/items/ruby_sword.json","content":"{\\"model\\": {\\"type\\": \\"minecraft:model\\", \\"model\\": \\"vibemod_rubysword:item/ruby_sword\\"}}\\n"},{"path":"assets/vibemod_rubysword/models/item/ruby_sword.json","content":"{\\"parent\\": \\"minecraft:item/handheld\\", \\"textures\\": {\\"layer0\\": \\"vibemod_rubysword:item/ruby_sword\\"}}\\n"},{"path":"assets/vibemod_rubysword/textures/item/ruby_sword.png.grid","content":"{\\"palette\\": {\\".\\": \\"transparent\\", \\"d\\": \\"#5a1010\\", \\"r\\": \\"#b31c1c\\", \\"l\\": \\"#ff6b6b\\", \\"h\\": \\"#8b5a2b\\"}, \\"rows\\": [\\"..............l.\\", \\".............lr.\\", \\"............lrr.\\", \\"...........lrrd.\\", \\"..........lrrd..\\", \\".........lrrd...\\", \\"........lrrd....\\", \\"...h...lrrd.....\\", \\"..hhh.lrrd......\\", \\"...h.lrrd.......\\", \\"..hh.lrd........\\", \\".hh..ldd........\\", \\"hh...d..........\\", \\"h...............\\", \\"................\\", \\"................\\"]}\\n"}]}
             """;
 
     /** The native Fabric profile's few-shots, in prompt order. */
     static final List<PlatformProfile.FewShot> NATIVE_FABRIC_FEW_SHOTS = List.of(
             new PlatformProfile.FewShot(BLOCK_TALLY_USER, BLOCK_TALLY_ASSISTANT),
             new PlatformProfile.FewShot(COORD_TOGGLE_USER, COORD_TOGGLE_ASSISTANT),
-            new PlatformProfile.FewShot(RUBY_CHARM_USER, RUBY_CHARM_ASSISTANT));
+            new PlatformProfile.FewShot(RUBY_SWORD_USER, RUBY_SWORD_ASSISTANT));
 }
