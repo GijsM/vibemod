@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "vibemod-clientgametest",
+  "version": "1.0.0",
+  "name": "VibeMod Phase D client gate",
+  "description": "The client half of the Phase D acceptance gate (ARCHITECTURE-V2 §9). Dev-only: this source set is never part of the shipped jar.",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": ["com.gijsm.vibemod.fabric.gametest.VibeModClientGateTest"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": ">=26.1",
+    "vibemod": "*"
+  }
+}

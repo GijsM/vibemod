@@ -47,10 +47,13 @@ public final class VibeModFabricClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
-        // The render watchdog has no TickScheduler: its only scheduler use is the
-        // main-thread hop on a trip, and a trip's action (disable the mod) is
-        // already hopped by the lifecycle. Null is the honest argument.
-        Watchdog renderWatchdog = new Watchdog(null, "render", DEFAULT_SINGLE_MS, DEFAULT_BUDGET_MS);
+        // The render watchdog's one scheduler use is hopping a trip onto the
+        // server thread — and `ModLifecycle.disable` asserts it is on that
+        // thread, so the hop is not optional. A deferred scheduler resolves the
+        // live one at call time, because a trip cannot happen before a server
+        // exists (it takes a loaded mod to trip a watchdog).
+        Watchdog renderWatchdog = new Watchdog(new DeferredTickScheduler(), "render",
+                DEFAULT_SINGLE_MS, DEFAULT_BUDGET_MS);
 
         // Failures route to the live lifecycle when there is one, so a HUD
         // renderer that throws counts towards its mod's error storm exactly like

@@ -160,6 +160,30 @@ dependencies {
 }
 
 // ---------------------------------------------------------------------------
+// Client game tests (ARCHITECTURE-V2 §9 Phase D: the CLIENT half of the gate)
+//
+// fabric-client-gametest-api drives a REAL client: it boots the game, creates a
+// singleplayer world, and runs assertions inside it. That is the only way to
+// prove the §8 client surface for real — a HUD element that is never asked to
+// draw has not been shown to survive drawing.
+//
+// The api is `devOnlyModules` in fabric-api, so it is not in the fat jar; it
+// arrives transitively on the dev classpath and is named explicitly here so the
+// dependency is visible rather than inherited by luck.
+// ---------------------------------------------------------------------------
+
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = "vibemod-clientgametest"
+        enableGameTests = false
+        enableClientGameTests = true
+        eula = true
+        username = "VibeModGate"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The artifact
 // ---------------------------------------------------------------------------
 

@@ -53,7 +53,31 @@ public final class FabricPlatformInfo implements PlatformInfo {
                 + " · dialogs=" + hasDialogs
                 + " · physicalClient=" + physicalClient
                 + " · dedicated=" + dedicated
-                + " · target=java" + maxTargetRelease;
+                + " · target=java" + maxTargetRelease
+                + " · java.compiler=" + (hasJavaCompilerModule() ? "present" : "ABSENT");
+    }
+
+    /**
+     * Whether the {@code java.compiler} module — the one that declares
+     * {@code javax.tools} — is in this JVM's boot layer.
+     *
+     * <p>ARCHITECTURE-V2 §7.3 asks for this probe before Phase D builds anything,
+     * because Mojang ships the client with a jlinked runtime rather than a full
+     * JDK, and a runtime built without {@code java.compiler} would leave even the
+     * bundled ECJ unusable: ECJ implements {@code javax.tools.JavaCompiler}, so
+     * the API has to exist for it to be loadable at all. The contingency in that
+     * case is to Jar-in-Jar the {@code javax.tools} API classes too.
+     *
+     * <p>Logged on every boot rather than only checked once here, so the answer
+     * comes from whatever runtime an actual user launched with instead of from
+     * the developer's JDK.
+     */
+    public static boolean hasJavaCompilerModule() {
+        try {
+            return ModuleLayer.boot().findModule("java.compiler").isPresent();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @Override

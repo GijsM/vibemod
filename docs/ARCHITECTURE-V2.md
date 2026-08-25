@@ -743,6 +743,337 @@ allows one capture per player, so opening a chat-rendered form ends chat mode. T
 the honest outcome when two flows both want the player's next line, and it can only
 happen on a server with no dialog support.
 
+## 10.3 Phase D record (Fabric) — what actually landed
+
+**Everything on the §9 Phase D checklist landed**, with three deviations flagged
+below and one residual human-QA item. The target is **MC 26.2** (newest stable
+26.x), fabric-loader **0.19.3**, fabric-api **0.158.0+26.2**, Loom **1.17.19**,
+Java **25**.
+
+Read this section before Phase E: most of it transposes, and the parts that do
+not are called out.
+
+### The unobfuscated era changes how you find things
+
+There is no mappings browser any more. The game jar Loom resolves *is* the
+documentation, and every Mojang and Fabric signature in `fabric/` was verified
+with `javap` against it rather than recalled. `:fabric:printCp` exists for
+exactly this and is kept deliberately:
+
+```
+javap -cp "$(./gradlew -q :fabric:printCp | tail -1)" net.minecraft.<X>
+```
+
+Three assumptions the plan carried did not survive that check:
+
+- **`GuiGraphics` does not exist on 26.x.** It is
+  `net.minecraft.client.gui.GuiGraphicsExtractor`, in a state-extraction
+  rendering model: `drawString` → `text(Font, String, x, y, colour[, shadow])`,
+  `renderItem` → `item(ItemStack, x, y)`, `fill`/`outline` survive, and
+  `pose()` returns a 2D `Matrix3x2fStack`. Fabric's HUD element is
+  `HudElement#extractRenderState(GuiGraphicsExtractor, DeltaTracker)`, not
+  `render`. **Decision 9 paid for itself here**: had generated code been
+  Mojang-typed as the client-design pass proposed, every stored HUD mod would
+  now be a compile error. Instead `FabricHudCanvas` is sixty lines and the six
+  methods generated code sees have not moved.
+- **`ResourceLocation` is `net.minecraft.resources.Identifier`.**
+- **`CommandSourceStack#hasPermission(int)` is gone.** 26.x has a typed
+  `net.minecraft.server.permissions.PermissionSet`. See "Permissions" below.
+
+Also worth knowing: `Level#getDayTime()` is gone (the clock is per-dimension —
+`getDefaultClockTime()` / `getOverworldClockTime()`), and `ResourceKey` exposes
+`identifier()` where it used to expose `location()`.
+
+### Loom under the no-remap plugin id
+
+The plugin is **`net.fabricmc.fabric-loom`**, which since Loom 1.14 means "the
+game is unobfuscated". Under it Loom registers *no* `mappings` configuration
+(`loom.officialMojangMappings()` throws at configuration time), *no*
+`modImplementation`/`modApi`/`modRuntimeOnly`, and *no* `remapJar` — the plain
+`jar` IS the mod jar and `include` nests into it. Access wideners are
+`.classtweaker` files now. Loom 1.17 needs Gradle ≥ 9.5; the repo is on 9.7.1.
+
+`fabric/` is the one module that leaves the repo-wide Java 21 toolchain: MC 26.x
+requires Java 25. `core`/`platform-api`/`sdk-client` stay at 21 and load fine.
+
+**`include` is not transitive.** Nesting `adventure-api` alone ships a mod that
+boots and then dies with `NoClassDefFoundError: net/kyori/examination/Examinable`
+the first time it builds a message. The nesting is driven off the resolved
+artifact graph instead, skipping `adventure-bom` (a platform with no jar, which
+Loom refuses to nest with a variant-matching error).
+
+### adventure-platform-mod: NOT used — the §8.5 check, answered
+
+§1 assumed it would provide Adventure on the loaders and §8.5 asked whether it
+ships `Audience#showDialog` before building a dialog renderer. It was checked.
+**The answer is no, three times over:**
+
+1. **No dialog support at all.** A full-tree grep of its 143 sources for
+   "dialog" is empty. Neither `ServerPlayerAudience` nor `ClientAudience`
+   overrides `showDialog`/`closeDialog`, so those inherit Adventure's default
+   *no-op*: calling them compiles and silently does nothing. (Adventure's own
+   `DialogLike`, `@since 4.22.0`, is still an empty marker interface —
+   "initial native support until Adventure has full API".) It therefore buys
+   nothing for the single reason §8.5 named it.
+2. **It would force an Adventure major bump.** Its MC 26.2 build (7.1.1) pulls
+   **Adventure 5.2.0**; the rest of this project compiles against 4.24.0,
+   which is what Paper provides. `core` is compiled once and shipped to both
+   hosts, so a different Adventure major under it is a binary-compatibility
+   risk in dozens of places.
+3. **It cannot honour the MC 26.1+ floor with one Adventure.** 7.1.1 is 26.2 +
+   Adventure 5; 6.9.0 is 26.1.x + Adventure 4.26. Supporting the stated floor
+   through it means two Adventure majors in one product.
+
+Instead: **Adventure 4.24.0 is nested directly**, and the four `Audience`
+methods `core` actually uses are implemented over vanilla in `FabricAudience`
+(`sendMessage`, `playSound`, `showBossBar`, `hideBossBar` — that is the entire
+Adventure surface `core` and `platform-api` touch, verified by grep). Text
+crosses into the game through `FabricText`: Adventure → JSON → vanilla
+`ComponentSerialization.CODEC`, which is lossless because both sides implement
+the same wire format.
+
+The boss bar is the only non-trivial one. Adventure's `BossBar` is a live
+mutable observable object that `Progress` animates; vanilla's `ServerBossEvent`
+is a server-side object you push players into. Each shown bar gets a paired
+`ServerBossEvent` plus a `BossBar.Listener` forwarding mutations, dropped on
+hide. **Phase E can reuse `FabricAudience` and `FabricText` essentially
+verbatim** — neither names a Fabric type.
+
+**Gson is not nested either**, contra §1: Minecraft depends on it (2.14.0) and
+Fabric shares game libraries with mods.
+
+### Dialogs, and the one mixin
+
+Built natively per §8.5. `FabricDialogRenderer` maps the same `Screen` model
+`PaperDialogRenderer` does onto vanilla records — `FORM → ConfirmationDialog`,
+`MENU → MultiActionDialog`, `NOTICE → NoticeDialog`, inputs 1:1 onto
+`TextInput`/`BooleanInput`/`SingleOptionInput`/`NumberRangeInput` — and shows it
+with `ServerPlayer#openDialog(Holder.direct(dialog))`. **`Holder.direct` is what
+makes this possible without a datapack**: `Dialog.STREAM_CODEC` encodes a direct
+holder inline, so nothing is registered.
+
+Two vanilla details that will bite Phase E identically:
+
+- `CommonDialogData`'s codec **rejects `pause=true` with an after-action that
+  never unpauses**. The renderer passes `pause=false` regardless, which is also
+  the only sane answer in singleplayer: pausing would freeze the very server
+  generating the mod behind the dialog.
+- `ItemBody.item` is an **`ItemStackTemplate`**, not an `ItemStack`.
+
+**Responses need a mixin, and there is no way around it.** Vanilla has no
+callback channel: a button's `CustomAll` action makes the client send
+`ServerboundCustomClickActionPacket(Identifier, Optional<Tag>)`, and vanilla's
+handler forwards to `MinecraftServer#handleCustomClickAction(Identifier,
+Optional<Tag>)` — which is a `LOGGER.debug` no-op **and does not receive the
+player**. The only hook that knows *who* clicked is
+`ServerCommonPacketListenerImpl#handleCustomClickAction`, where `this` is the
+connection. One mixin, injected at HEAD and hopped with `server.execute` (at
+HEAD `PacketUtils.ensureRunningOnSameThread` has not run yet, so we may be on a
+Netty thread), casting to `ServerGamePacketListenerImpl` for `.player`.
+`ServerGamePacketListenerImpl` does not override the method, so mixing in there
+instead is not an option.
+
+`DialogClicks` mints one-shot, per-player, 5-minute-TTL tokens as the
+Identifier's path — the same discipline the chat renderer's `/vibe ui <token>`
+route already uses, and for the same reason: a dialog can sit open on a client
+forever.
+
+### The classpath, and the bug the dev environment hides
+
+`FabricClasspathProvider` asks four sources and unions them: the `minecraft`,
+`fabricloader` and `vibemod` mod containers, every `fabric-*` container, **the
+loader's own classpath**, and `java.class.path`.
+
+That fourth one is the one that matters and the one the first version missed.
+On a real Fabric server `java.class.path` holds exactly one entry — the launcher
+jar — because Knot loads the game and its ~50 libraries itself, and those are
+game libraries, not mods. Under Loom's dev run Gradle puts everything on
+`java.class.path`, so the gap is completely invisible there. The acceptance gate
+found it the first time it compiled a mod calling `src.sendSystemMessage(...)`:
+`cannot access com.mojang.brigadier.Message`. Two independent answers are now
+used, because "VibeMod cannot compile anything" is the worst failure this mod
+has: reflective `FabricLauncher#getClassPath()` (loader-internal, no public
+equivalent exists) and a walk of the `libraries/` tree beside the game dir.
+**Phase E must answer the same question for ModLauncher.**
+
+### cpcache (§7.2) — landed, in core
+
+`core/compile/CpCache`: content-addressed, extract-once materialization of any
+classpath origin a compiler cannot open, pruning orphans each assembly. It lives
+in `core` rather than in `fabric` because NeoForge needs exactly the same thing.
+
+The load-bearing test is `path.getFileSystem() != FileSystems.getDefault()` — a
+Jar-in-Jar entry also ends in `.jar` and also reports as a regular file, and
+only its filesystem gives it away. Directories are zipped rather than passed
+through (a directory reached through a nested filesystem is exactly as unreadable
+to javac as a nested jar) and hashed by entry path/size/mtime rather than by
+content, because an exploded classes directory can be hundreds of megabytes and
+this runs every boot.
+
+**Phase E adds `union:` URL translation** on top: strip the scheme and the
+`%23n!/` suffix. `CpCache` will then materialize the result like any other
+non-plain path.
+
+### `maxTargetRelease()` on Fabric — the §10.2 question, answered
+
+**The runtime's own feature version, and nothing lower.** The chain was checked
+end to end: generated classes are defined by `ModLifecycle.BytesClassLoader`, a
+plain `ClassLoader` subclass calling `defineClass` directly, whose parent is
+Knot. Knot's transformer and Mixin's transformer only see classes they themselves
+*load* — Mixin applies inside `KnotClassDelegate`'s class-load path, and a child
+loader that defines bytes itself never enters it. Nothing between the compiler
+output and the JVM reads the class file.
+
+Paper's answer differed only because its plugin remapper pipes every dynamically
+defined class through ASM. **Phase E must check whether ModLauncher does the
+same** — it transforms far more aggressively than Knot, so the answer may well
+be NeoForge's own class-file version rather than the JVM's.
+
+Verified empirically: the gate compiles and hot-loads mods at `target=java25` on
+a real 26.2 server. `InMemoryCompiler` still clamps to
+`min(runtime, backend, host)`, so a bundled ECJ that lags the JVM lowers it on
+its own — which is the case that actually bites, not the host.
+
+### Permissions on 26.x
+
+`CommandSourceStack#hasPermission(int)` is gone; permissions are a
+`PermissionSet` of typed `Permission`s. fabric-api ships
+**`fabric-permission-api-v1`** (new, and `CommandSourceStack` implements its
+`PermissionContextOwner`), whose
+`checkPermission(Identifier, PermissionLevel)` asks any installed permission
+manager about a real node first and falls back to the level when nothing
+answers. So `vibe.admin` becomes the node `vibemod:admin` with a GAMEMASTERS
+(op 2) fallback: a server with LuckPerms grants it by node, a vanilla-ish server
+by op, and VibeMod never learns which.
+
+### The client (§8)
+
+All of it landed in the first client commit, as §8.1 requires.
+
+- **Dispatchers**: one `HudElement` (`HudElementRegistry.addLast`), one
+  `ClientTickEvents.END_CLIENT_TICK` listener, one `/vibec` root. Mods attach to
+  and detach from mutable registries behind them.
+- **Key pool**: 8 `KeyMapping`s registered at client init through
+  `KeyMappingHelper`, under a `KeyMapping.Category` registered by Identifier
+  (26.x: the 4th constructor argument is a `Category`, not a String). Lease =
+  lowest free slot; the requested default is auto-bound **only** if the slot is
+  unbound or was auto-bound before, so a rebind the player made in Controls
+  always wins; release unbinds only what we bound.
+- **`/vibec`**: one static root whose `mod`/`command` arguments are served by
+  suggestion providers reading the live registry, so the tree never needs
+  rebuilding as mods come and go.
+- **Watchdog**: a second `Watchdog` instance measuring the render thread, sharing
+  the server's budgets (pushed in at server start and on every `/vibe reload`)
+  and the same trip path.
+- **Storm path**: every dispatch is guarded; a failure is journalled with
+  `where="client"` and counts towards the mod's error storm. **On top of that, a
+  throwing entry is detached from its dispatch list immediately** rather than
+  after the storm threshold — ten failures at sixty frames a second is ten
+  frames, not ten seconds, and each one builds a stack trace on the render
+  thread.
+
+`FabricModHost` never names a client-only type: it takes a
+`Function<ModHandle, ClientContext>` that is null on a dedicated server. That is
+what lets one jar serve both, and Phase E should copy the seam.
+
+### The acceptance gate
+
+`scripts/smoke-fabric.sh` — the dedicated-server half, **25/25 green**. It
+downloads a real Fabric server launcher and fabric-api, installs the built jar
+beside a pre-seeded canned mod, boots, and drives the whole flow over RCON with
+assertions on every reply.
+
+**It runs against the INSTALLED jar, not Loom's dev classpath**, and that is the
+point: on the dev classpath Adventure and ECJ are plain classpath entries, while
+in the shipped jar they are nested and have to be found through the loader and
+materialized by the cpcache before javac can read them. Both bugs it found (the
+classpath gap above, and RCON) are invisible under `runServer`.
+
+The second bug is worth repeating because it is a design trap. `FabricSender`
+originally routed console replies to the logging audience, reasoning that command
+feedback and the log are different channels. They are — but **RCON's reply IS the
+command's feedback and nothing else**, so routing away from it made the entire
+management surface silent to the only caller that has no other one. Console
+replies now go through the `CommandSourceStack`.
+
+`fabric/src/gametest` — the client half, via **fabric-client-gametest**
+(`./gradlew :fabric:runClientGameTest`), driving a real client through a real
+singleplayer world with a real GL context. **28/28 green**, covering:
+
+- the host initialises inside the client's integrated server, with
+  `hasClient()` true and `isDedicatedServer()` false (the two really are
+  different questions);
+- a canned client-flavor mod's HUD, client tick, key lease and `/vibec` command
+  all land in the live dispatchers and the key pool;
+- `/vibec <mod> <command>` actually routes into the mod's handler — observed
+  through a marker file the handler writes, because the alternative (a toast) is
+  a thing on a screen and asserting on pixels would be testing that Minecraft
+  draws toasts;
+- disabling drains all four, and re-enabling re-leases a key slot and
+  re-attaches the renderer (a pool that hands a slot back but never hands it out
+  again would pass a teardown assertion and still exhaust itself after eight
+  reloads);
+- a deliberately-**throwing** HUD renderer is detached and its mod degraded,
+  with the client still running;
+- a deliberately-**slow** HUD renderer — the failure a try/catch cannot catch —
+  trips the render-thread watchdog and is auto-disabled, with the client still
+  running;
+- **bare `/vibe` opens a native `DialogScreen` on the client.** That closes the
+  §9 "singleplayer dialog path" item with an end-to-end observation rather than
+  packet-level inference: player command → `Screen` model →
+  `FabricDialogRenderer` → inline `Holder.direct` dialog →
+  `ClientboundShowDialogPacket` → a screen the client actually put up.
+
+Two of those checks needed a fix in the host rather than in the test. The
+render watchdog was built with a `null` scheduler on the reasoning that its
+trip handler needed no hop — but `ModLifecycle.disable` asserts it is on the
+server thread, so the trip *cannot* do its job from the render thread. It now
+takes a `DeferredTickScheduler` that resolves the live scheduler at call time,
+which is sound because a trip needs a loaded mod and mods load with the world.
+
+`runClientGameTest` is deliberately NOT wired into `check`: it boots a real
+client and needs a display, which is a CI decision for Phase F, not a
+precondition for `./gradlew build`.
+
+**The `java.compiler` module probe** §9 asks for is implemented in
+`FabricPlatformInfo.hasJavaCompilerModule()` and printed in the boot line on
+every start, so the answer comes from whatever runtime a user actually launched
+rather than from a developer's JDK. On this machine (a full JDK 25, dev client
+and real dedicated server alike) it reads `java.compiler=present` and no
+contingency is needed. **Not yet observed on a Mojang-launcher jlink runtime** —
+if one ever reports `ABSENT`, the fix is to Jar-in-Jar the `javax.tools` API
+classes, because ECJ implements `javax.tools.JavaCompiler` and cannot even load
+without them.
+
+### Deviations, flagged
+
+1. **adventure-platform-mod is not used** (§1, §8.5). Reasons above. The
+   consequence for Phase E: NeoForge should reuse `FabricAudience`/`FabricText`
+   rather than reach for `adventure-platform-neoforge`, which has the same three
+   problems.
+2. **Gson is not nested** (§1). The game provides it.
+3. **`/vibe` routing was promoted to `core`** as `command/VibeRouter` — which
+   §1.1 explicitly permits ("Phase D may promote shared routing to core") but
+   did not require. Fabric needs all 27 subcommands and the completion table
+   verbatim, and the only Bukkit in the 1124-line original was
+   `CommandSender`/`Player`, which is exactly what `Sender` abstracts. Paper's
+   `VibeCommand` is now a 40-line adapter and **Phase E writes only a Brigadier
+   node**. `PaperChatMode` moved to `core` as `runtime/ChatMode` unchanged.
+4. **§6.1's profile-free `makePrompt`** (a §10.2 deviation) is unchanged. The
+   `side` guidance §6.2's "all" row asks for is carried in the fabric profile's
+   cheat sheet instead, where it reads as a manual-writing rule rather than as a
+   field nobody sets.
+
+### Residual human-QA item
+
+**A screen-by-screen visual check of the 17 dialogs on a Fabric client.** The
+renderer is verified to construct and show (the client gate proves the host is
+live and the dedicated gate proves the flow), and the mapping is mechanical from
+the same `Screen` data Paper's renderer consumes — but "does screen 12's source
+listing wrap correctly at 400px in the vanilla dialog widget" needs a human
+looking at it. This is the same item Phase C left open for Paper, for the same
+reason.
+
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 
 Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;
