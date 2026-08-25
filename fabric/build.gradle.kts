@@ -99,15 +99,14 @@ dependencies {
     // would mean two Adventure majors in one product. FabricMessenger implements
     // the four Audience methods core actually uses over vanilla instead.
     implementation("net.kyori:adventure-api:${property("adventureVersion")}")
-    include("net.kyori:adventure-api:${property("adventureVersion")}")
     implementation("net.kyori:adventure-key:${property("adventureVersion")}")
-    include("net.kyori:adventure-key:${property("adventureVersion")}")
     // Component -> JSON -> net.minecraft.network.chat.Component is how Adventure
     // text reaches the game (ComponentSerialization.CODEC on the other side).
     implementation("net.kyori:adventure-text-serializer-gson:${property("adventureVersion")}")
-    include("net.kyori:adventure-text-serializer-gson:${property("adventureVersion")}")
     implementation("net.kyori:adventure-text-serializer-plain:${property("adventureVersion")}")
-    include("net.kyori:adventure-text-serializer-plain:${property("adventureVersion")}")
+    // The nesting itself is done below, transitively: `include` takes exactly the
+    // artifact it is handed, and adventure-api alone would leave `examination-api`
+    // (which every Component implements) unnested and the mod dead on first use.
 
     // Gson: NOT nested. §1 assumed the loaders would have to ship it; they do
     // not — Minecraft itself depends on Gson (2.14.0 wins the conflict with our
@@ -121,6 +120,43 @@ dependencies {
     // META-INF/services entry are both load-bearing.
     implementation("org.eclipse.jdt:ecj:${property("ecjVersion")}")
     include("org.eclipse.jdt:ecj:${property("ecjVersion")}")
+}
+
+/**
+ * Nests Adventure and everything it drags in.
+ *
+ * <p>Loom's `include` nests exactly the artifact it is handed and nothing
+ * transitive. Adventure is a five-jar graph — `adventure-api` implements
+ * `Examinable` from `examination-api` on every Component, and the gson
+ * serializer pulls `adventure-text-serializer-json` and `option` — so nesting
+ * only the four we name would produce a mod that loads, boots, and dies with a
+ * NoClassDefFoundError the first time it builds a message. Resolving the graph
+ * and nesting each file is the version of this that cannot rot: a new Adventure
+ * transitive arrives already handled.
+ *
+ * <p>Gson is excluded on purpose: the game already has it (see above).
+ */
+val adventureBundle: Configuration = configurations.detachedConfiguration(
+    dependencies.create("net.kyori:adventure-api:${property("adventureVersion")}"),
+    dependencies.create("net.kyori:adventure-text-serializer-gson:${property("adventureVersion")}"),
+    dependencies.create("net.kyori:adventure-text-serializer-plain:${property("adventureVersion")}"),
+).apply {
+    exclude(group = "com.google.code.gson")
+}
+
+dependencies {
+    // By coordinates, not by file: Loom refuses to nest an artifact that is not a
+    // module component ("has no capabilities"), because a nested jar needs a
+    // group:name:version to synthesize its fabric.mod.json from.
+    // Driven off the resolved ARTIFACTS, not the resolution graph: the graph also
+    // contains `adventure-bom`, which is a platform with no jar at all, and
+    // asking Loom to nest it fails the build with a variant-matching error.
+    adventureBundle.incoming.artifacts.artifacts.forEach { artifact ->
+        val id = artifact.id.componentIdentifier
+        if (id is ModuleComponentIdentifier) {
+            include("${id.group}:${id.module}:${id.version}")
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
