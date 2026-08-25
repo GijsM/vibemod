@@ -32,133 +32,17 @@ public final class PromptLibrary {
     private static final Set<String> VALID_KNOB_TYPES = Set.of("boolean", "integer", "decimal", "text", "choice");
 
     // ------------------------------------------------------------------
-    // Frozen API sources, embedded verbatim so the model always sees the
+    // The frozen API sources are embedded verbatim so the model always sees the
     // exact contract it must code against, regardless of plugin jar layout.
+    // They are NOT hand-copied here: GeneratedApiSources is emitted at build
+    // time straight from the sdk module's real files by the
+    // `:core:generatePromptSources` task (ARCHITECTURE-V2 §6.4), so prompt and
+    // api cannot drift apart. LlmSelfTest still asserts the match on disk.
     // ------------------------------------------------------------------
-
-    private static final String MOD_SOURCE = """
-            package com.gijsm.vibemod.api;
-
-            /**
-             * The contract every generated mod implements. Exactly one public class per mod
-             * implements this interface; it must have a public no-arg constructor.
-             *
-             * All registrations (listeners, tasks, commands, actions) MUST go through the
-             * supplied {@link VibeContext} so the mod can be torn down exactly on
-             * disable/unload. A mod must never call Bukkit registration APIs directly.
-             */
-            public interface Mod {
-
-                /**
-                 * Called on the main server thread when the mod is enabled.
-                 * Register listeners/tasks/commands via {@code ctx} here.
-                 */
-                void onEnable(VibeContext ctx) throws Exception;
-
-                /**
-                 * Called on the main server thread just before teardown. Registrations made
-                 * through the context are cleaned up automatically after this returns; only
-                 * override to release resources the context does not know about.
-                 */
-                default void onDisable(VibeContext ctx) {
-                }
-            }
-            """;
-
-    private static final String VIBE_CONTEXT_SOURCE = """
-            package com.gijsm.vibemod.api;
-
-            import java.nio.file.Path;
-            import java.util.logging.Logger;
-
-            import org.bukkit.Server;
-            import org.bukkit.event.Listener;
-            import org.bukkit.plugin.Plugin;
-            import org.bukkit.scheduler.BukkitTask;
-
-            /**
-             * Everything a generated mod may touch. All registrations are tracked per mod
-             * and undone exactly when the mod is disabled or unloaded.
-             *
-             * All methods must be called from the main server thread.
-             */
-            public interface VibeContext {
-
-                /** The host plugin (VibeMod). For advanced use only. */
-                Plugin plugin();
-
-                /** Convenience for {@code plugin().getServer()}. */
-                Server server();
-
-                /** This mod's name. */
-                String modName();
-
-                /** Logger prefixed with the mod name. */
-                Logger log();
-
-                /** Per-mod data directory, created on first call. */
-                Path dataFolder();
-
-                /** Register an event listener (methods annotated with @EventHandler). Tracked. */
-                void listen(Listener listener);
-
-                /** Schedule a repeating main-thread task with an initial delay. Tracked. */
-                BukkitTask repeat(long delayTicks, long periodTicks, Runnable task);
-
-                /** Schedule a repeating main-thread task starting after one period. Tracked. */
-                default BukkitTask repeat(long periodTicks, Runnable task) {
-                    return repeat(periodTicks, periodTicks, task);
-                }
-
-                /** Schedule a one-shot delayed main-thread task. Tracked. */
-                BukkitTask later(long delayTicks, Runnable task);
-
-                /**
-                 * Register a real top-level command, e.g. {@code command("boom", "Explodes things", h)}
-                 * gives players {@code /boom}. Falls back to an action (see {@link #action}) if
-                 * top-level registration is unavailable. Tracked and removed on disable.
-                 */
-                void command(String name, String description, ModCommandHandler handler);
-
-                /** Register a named action invocable as {@code /vibe do <mod> <name> [args]}. Tracked. */
-                void action(String name, ModCommandHandler handler);
-
-                // ---- live config ----
-                // Mods declare tunable settings in their generation output ("config" knobs);
-                // these accessors serve the CURRENT value at call time: stored value, else the
-                // knob's declared default, else the type's zero value with a one-time warning.
-                // Read config at the moment of use - never cache it in a field - so that
-                // knob changes apply instantly without a reload.
-
-                /** Current value of a boolean knob. */
-                boolean configBool(String key);
-
-                /** Current value of an integer knob. */
-                long configInt(String key);
-
-                /** Current value of a decimal knob. */
-                double configDouble(String key);
-
-                /** Current value of a text or choice knob. */
-                String configString(String key);
-            }
-            """;
-
-    private static final String MOD_COMMAND_HANDLER_SOURCE = """
-            package com.gijsm.vibemod.api;
-
-            import org.bukkit.command.CommandSender;
-
-            /** Handler for a mod-registered command or named action. Runs on the main thread. */
-            @FunctionalInterface
-            public interface ModCommandHandler {
-                void run(CommandSender sender, String[] args) throws Exception;
-            }
-            """;
 
     // ------------------------------------------------------------------
     // Few-shot examples. Kept as constants so they are easy to eyeball and
-    // compile-check independently (see plugin/src/test/java/LlmSelfTest.java).
+    // compile-check independently (see core/src/test/java/LlmSelfTest.java).
     // ------------------------------------------------------------------
 
     private static final String EXAMPLE_1_USER =
@@ -196,11 +80,11 @@ public final class PromptLibrary {
                 """);
 
         sb.append("--- com/gijsm/vibemod/api/Mod.java ---\n");
-        sb.append(MOD_SOURCE).append('\n');
+        sb.append(GeneratedApiSources.MOD).append('\n');
         sb.append("--- com/gijsm/vibemod/api/VibeContext.java ---\n");
-        sb.append(VIBE_CONTEXT_SOURCE).append('\n');
+        sb.append(GeneratedApiSources.VIBE_CONTEXT).append('\n');
         sb.append("--- com/gijsm/vibemod/api/ModCommandHandler.java ---\n");
-        sb.append(MOD_COMMAND_HANDLER_SOURCE).append('\n');
+        sb.append(GeneratedApiSources.MOD_COMMAND_HANDLER).append('\n');
 
         sb.append("""
                 ================ OUTPUT CONTRACT ================

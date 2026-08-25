@@ -3,8 +3,10 @@
 # the OpenRouter key in plugins/VibeMod/config.yml). None of it is source.
 server/
 
-# --- Maven build output ---
-plugin/target/
+# --- Gradle build output ---
+.gradle/
+build/
+*/build/
 
 # --- Node tooling for scripts/ ---
 scripts/node_modules/
