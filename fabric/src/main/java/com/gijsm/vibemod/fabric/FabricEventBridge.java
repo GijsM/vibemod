@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
@@ -69,65 +70,91 @@ public final class FabricEventBridge implements EventBridge {
     }
 
     /**
-     * Subscribes the host's one permanent listener to each Fabric event. Called
-     * exactly once, at mod init — never per mod, and never undone.
+     * Subscribes the host's one permanent listener to each Fabric event.
+     *
+     * <p><b>Static, and called exactly once from mod init — never per server.</b>
+     * A Fabric event cannot be unregistered, which is the premise this entire
+     * class is built on, and it applies to the host as much as to a generated
+     * mod. An earlier version registered these from the per-server bootstrap: on
+     * a client that loads a second world in the same session, that leaves a
+     * second full set of hooks dispatching into the first world's dead bridge,
+     * forever. The subscriptions therefore live as long as the process and
+     * resolve the live bridge — which IS per server — each time they fire.
+     *
+     * @param live the current bridge, or null between worlds
      */
-    public void installDispatchers() {
+    public static void installDispatchers(Supplier<FabricEventBridge> live) {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
-                fire(joins, "onPlayerJoin", hook -> hook.accept(handler.player)));
+                with(live, b -> b.fire(b.joins, "onPlayerJoin", hook -> hook.accept(handler.player))));
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
-                fire(quits, "onPlayerQuit", hook -> hook.accept(handler.player)));
+                with(live, b -> b.fire(b.quits, "onPlayerQuit", hook -> hook.accept(handler.player))));
 
         ServerTickEvents.END_SERVER_TICK.register(server ->
-                fire(ticks, "onServerTick", hook -> hook.accept(server)));
+                with(live, b -> b.fire(b.ticks, "onServerTick", hook -> hook.accept(server))));
 
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) ->
-                fire(respawns, "onRespawn", hook -> hook.accept(newPlayer)));
+                with(live, b -> b.fire(b.respawns, "onRespawn", hook -> hook.accept(newPlayer))));
 
         // ALLOW_DEATH is the only player-death hook Fabric offers. VibeMod's
         // onPlayerDeath does not cancel (§4.1: it is a Consumer), so this always
         // allows the death and just notifies.
         ServerPlayerEvents.ALLOW_DEATH.register((player, source, amount) -> {
-            fire(playerDeaths, "onPlayerDeath", hook -> hook.accept(player));
+            with(live, b -> b.fire(b.playerDeaths, "onPlayerDeath", hook -> hook.accept(player)));
             return true;
         });
 
         ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) ->
-                fire(deaths, "onEntityDeath", hook -> hook.accept(entity, source)));
+                with(live, b -> b.fire(b.deaths, "onEntityDeath", hook -> hook.accept(entity, source))));
 
         // The cancelling hooks below run every handler even after one has voted
         // to cancel. Short-circuiting would make a mod's behaviour depend on the
         // order mods happen to have loaded, which is exactly the kind of
         // irreproducible bug the error journal cannot explain.
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, params) -> {
+            FabricEventBridge bridge = live.get();
+            if (bridge == null) {
+                return true;
+            }
             String text = message.decoratedContent().getString();
-            return every(chats, "onChat", hook -> hook.handle(sender, text));
+            return bridge.every(bridge.chats, "onChat", hook -> hook.handle(sender, text));
         });
 
         PlayerBlockBreakEvents.BEFORE.register((level, player, pos, state, blockEntity) -> {
-            if (!(player instanceof ServerPlayer serverPlayer)) {
+            FabricEventBridge bridge = live.get();
+            if (bridge == null || !(player instanceof ServerPlayer serverPlayer)) {
                 return true;
             }
-            return every(breaks, "onBlockBreak", hook -> hook.handle(serverPlayer, pos, state));
+            return bridge.every(bridge.breaks, "onBlockBreak", hook -> hook.handle(serverPlayer, pos, state));
         });
 
         UseBlockCallback.EVENT.register((player, level, hand, hitResult) -> {
-            if (!(player instanceof ServerPlayer serverPlayer)) {
+            FabricEventBridge bridge = live.get();
+            if (bridge == null || !(player instanceof ServerPlayer serverPlayer)) {
                 return InteractionResult.PASS;
             }
-            boolean allow = every(useBlocks, "onUseBlock",
+            boolean allow = bridge.every(bridge.useBlocks, "onUseBlock",
                     hook -> hook.handle(serverPlayer, hand, hitResult.getBlockPos()));
             return allow ? InteractionResult.PASS : InteractionResult.FAIL;
         });
 
         UseItemCallback.EVENT.register((player, level, hand) -> {
-            if (!(player instanceof ServerPlayer serverPlayer)) {
+            FabricEventBridge bridge = live.get();
+            if (bridge == null || !(player instanceof ServerPlayer serverPlayer)) {
                 return InteractionResult.PASS;
             }
-            boolean allow = every(useItems, "onUseItem", hook -> hook.handle(serverPlayer, hand, null));
+            boolean allow = bridge.every(bridge.useItems, "onUseItem",
+                    hook -> hook.handle(serverPlayer, hand, null));
             return allow ? InteractionResult.PASS : InteractionResult.FAIL;
         });
+    }
+
+    /** Runs {@code body} against the live bridge, or does nothing when there is none. */
+    private static void with(Supplier<FabricEventBridge> live, Consumer<FabricEventBridge> body) {
+        FabricEventBridge bridge = live.get();
+        if (bridge != null) {
+            body.accept(bridge);
+        }
     }
 
     // ---- the ten registration methods FabricModHost's VibeContext calls ----

@@ -3,6 +3,7 @@ package com.gijsm.vibemod.fabric;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
@@ -36,22 +37,39 @@ public final class FabricChatBridge implements ChatBridge {
         this.scheduler = scheduler;
     }
 
-    /** Subscribes the host's one permanent chat listener. Called once, at mod init. */
-    public void installDispatcher() {
+    /**
+     * Subscribes the host's one permanent chat listener.
+     *
+     * <p>Static and called once from mod init, for the same reason as
+     * {@code FabricEventBridge.installDispatchers}: Fabric events cannot be
+     * unregistered, so registering per server would leave a listener per world
+     * loaded in the session, each still holding its own dead capture map.
+     *
+     * @param live the current bridge, or null between worlds
+     */
+    public static void installDispatcher(Supplier<FabricChatBridge> live) {
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, params) -> {
+            FabricChatBridge bridge = live.get();
+            if (bridge == null) {
+                return true;
+            }
             UUID id = sender.getUUID();
-            Capture capture = captures.get(id);
+            Capture capture = bridge.captures.get(id);
             if (capture == null) {
                 return true;
             }
             String text = message.signedContent();
-            scheduler.runOnMain(() -> deliver(id, capture, text));
+            bridge.scheduler.runOnMain(() -> bridge.deliver(id, capture, text));
             // Swallow the line: it is input to a flow, not something to broadcast.
             return false;
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            Capture capture = captures.get(handler.player.getUUID());
+            FabricChatBridge bridge = live.get();
+            if (bridge == null) {
+                return;
+            }
+            Capture capture = bridge.captures.get(handler.player.getUUID());
             if (capture != null) {
                 capture.registration.close();
             }

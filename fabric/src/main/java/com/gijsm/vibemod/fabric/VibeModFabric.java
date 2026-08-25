@@ -82,6 +82,17 @@ public final class VibeModFabric implements ModInitializer {
     private static volatile ClientHooks clientHooks;
     /** The live services, or null between worlds. */
     private static volatile Services services;
+    /**
+     * The live bridges, or null between worlds.
+     *
+     * <p>Separate from {@link #services} because the process-lived subscriptions
+     * in {@link #onInitialize()} need them, and because they exist slightly
+     * earlier in {@code wire()} than the fully-built {@link Services} record
+     * does.
+     */
+    private static volatile FabricEventBridge eventBridge;
+    private static volatile FabricChatBridge chatBridge;
+    private static volatile FabricCommandBridge commandBridge;
 
     /**
      * What the client entrypoint contributes: the bridge, its watchdog wiring,
@@ -97,10 +108,16 @@ public final class VibeModFabric implements ModInitializer {
                               Watchdog renderWatchdog) {
     }
 
-    /** Everything the host built for the currently running server. */
+    /**
+     * Everything the host built for the currently running server.
+     *
+     * <p>{@code chatRenderer} is null when native dialogs are in use — then there
+     * is no per-player form state to forget.
+     */
     public record Services(MinecraftServer server, FabricPlatformInfo platform, ModLifecycle lifecycle,
                            ModStore store, ModErrors errors, FabricMessenger messenger,
-                           FabricTickScheduler scheduler, UiRenderer ui, VibeRouter router) {
+                           FabricTickScheduler scheduler, UiRenderer ui, VibeRouter router,
+                           ChatRenderer chatRenderer) {
     }
 
     /** The live services, or null when no server is running. */
@@ -113,11 +130,60 @@ public final class VibeModFabric implements ModInitializer {
         clientHooks = hooks;
     }
 
+    /**
+     * Every Fabric subscription VibeMod makes on the server side, made exactly
+     * once, here.
+     *
+     * <p>This is not tidiness — it is the same rule §8.1 states for the client,
+     * and it applies just as hard to the host. A Fabric {@code Event} cannot be
+     * unregistered. A client can load world A, quit to the menu, and load world
+     * B in the same process, and each of those starts and stops a whole VibeMod
+     * host. Registering from that per-server bootstrap therefore leaves one
+     * subscription per world ever loaded, all but the last dispatching into a
+     * dead scheduler and a dead bridge. So the subscriptions live for the
+     * process and resolve the live per-server objects when they fire, which is
+     * null between worlds.
+     */
     @Override
     public void onInitialize() {
         LOG.info("VibeMod loading — waiting for a server");
         ServerLifecycleEvents.SERVER_STARTING.register(VibeModFabric::start);
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> stop());
+
+        FabricEventBridge.installDispatchers(() -> eventBridge);
+        FabricChatBridge.installDispatcher(() -> chatBridge);
+
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            Services live = services;
+            if (live != null) {
+                live.scheduler().tick();
+            }
+        });
+
+        // Fires at startup AND after every /reload, each time with a fresh
+        // dispatcher — which would silently drop every generated-mod command if
+        // the bridge did not re-add them.
+        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) -> {
+            FabricCommandBridge live = commandBridge;
+            if (live != null) {
+                live.reinstallInto(dispatcher);
+            }
+        });
+
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> forget(handler.player.getUUID()));
+    }
+
+    /** Drops everything a leaving player left behind: click tokens, form state, their audience. */
+    private static void forget(UUID playerId) {
+        DialogClicks.forget(playerId);
+        Services live = services;
+        if (live == null) {
+            return;
+        }
+        live.messenger().forget(playerId);
+        if (live.chatRenderer() != null) {
+            live.chatRenderer().forget(playerId);
+        }
     }
 
     // ------------------------------------------------------------------ boot
@@ -184,7 +250,13 @@ public final class VibeModFabric implements ModInitializer {
 
     private static void stop() {
         Services live = services;
+        // Cleared BEFORE teardown: the process-lived subscriptions are still
+        // armed, and a tick or a chat line landing mid-shutdown must find
+        // nothing rather than a half-torn-down host.
         services = null;
+        eventBridge = null;
+        chatBridge = null;
+        commandBridge = null;
         if (live == null) {
             return;
         }
@@ -298,13 +370,12 @@ public final class VibeModFabric implements ModInitializer {
             };
             ModDispatch dispatch = new ModDispatch(watchdog, failureSink);
 
+            // Published to the statics the process-lived subscriptions read; the
+            // subscriptions themselves were made once, in onInitialize().
             commandBridge = new FabricCommandBridge(server, messenger, dispatch,
                     config.getBoolean("commands.allow-top-level", true));
-            FabricEventBridge eventBridge = new FabricEventBridge(dispatch);
-            eventBridge.installDispatchers();
-
+            eventBridge = new FabricEventBridge(dispatch);
             chatBridge = new FabricChatBridge(scheduler);
-            chatBridge.installDispatcher();
 
             ClientHooks hooks = clientHooks;
             FabricModHost modHost = new FabricModHost(server, dataFolder, eventBridge, commandBridge,
@@ -353,25 +424,13 @@ public final class VibeModFabric implements ModInitializer {
                     client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
                     this::reloadConfig);
             commandBridge.setRouter(router);
-
-            CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
-                    commandBridge.reinstallInto(dispatcher));
-            // The dispatcher for THIS server was already built before our callback
-            // was registered, so install into it directly as well.
+            // CommandRegistrationCallback already fired for THIS server's
+            // dispatcher, before the bridge existed, so install into it directly.
+            // The process-lived callback covers every later /reload.
             commandBridge.reinstallInto(server.getCommands().getDispatcher());
 
-            ServerTickEvents.END_SERVER_TICK.register(ticked -> scheduler.tick());
-            ServerPlayConnectionEvents.DISCONNECT.register((handler, ignored) -> {
-                UUID id = handler.player.getUUID();
-                if (chatRenderer != null) {
-                    chatRenderer.forget(id);
-                }
-                DialogClicks.forget(id);
-                messenger.forget(id);
-            });
-
             services = new Services(server, platform, lifecycle, store, modErrors, messenger,
-                    scheduler, ui, router);
+                    scheduler, ui, router, chatRenderer);
 
             restoreModsFromDisk();
             LOG.info("VibeMod ready — /vibe make \"something wonderful\"");

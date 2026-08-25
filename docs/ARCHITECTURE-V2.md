@@ -976,6 +976,29 @@ All of it landed in the first client commit, as §8.1 requires.
 `Function<ModHandle, ClientContext>` that is null on a dedicated server. That is
 what lets one jar serve both, and Phase E should copy the seam.
 
+### The §8.1 rule applies to the HOST, not just to generated mods
+
+Worth its own heading because it was got wrong once here and the mistake is
+invisible on a dedicated server.
+
+"A Fabric event cannot be unregistered" is stated in §8.1 as the reason
+*generated mods* must not subscribe directly. It applies just as hard to
+VibeMod itself. A **client** can load world A, quit to the menu, and load world
+B in one process — and each of those starts and stops a complete VibeMod host,
+because the host lives with the integrated server. The first version registered
+`ServerTickEvents.END_SERVER_TICK`, `ServerPlayConnectionEvents.DISCONNECT`,
+`CommandRegistrationCallback` and all ten curated hooks from that per-server
+bootstrap, which would leave one subscription per world ever loaded, all but the
+last dispatching into a dead scheduler and a dead bridge, forever.
+
+Every Fabric subscription now happens exactly once in `onInitialize()` and
+resolves the live per-server object when it fires (null between worlds); the
+bridges' `installDispatchers` are static and take a supplier. A dedicated server
+never loads a second world, so no gate catches this — it needs reading for, and
+**Phase E must read for it too**: NeoForge's bus does support removal, but the
+same "the host is per-world, the subscription is per-process" asymmetry exists
+and the mod-loading events differ.
+
 ### The acceptance gate
 
 `scripts/smoke-fabric.sh` — the dedicated-server half, **25/25 green**. It

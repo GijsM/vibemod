@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 21 is the toolchain every module but `fabric` uses; `fabric` needs 25
+      # (MC 26.x requires it) and the foojay resolver provisions that itself.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,8 +27,10 @@ jobs:
       - name: Build and self-test
         run: ./gradlew build --stacktrace
 
-      - name: Upload jar
+      - name: Upload jars
         uses: actions/upload-artifact@v4
         with:
           name: VibeMod
-          path: paper/build/libs/VibeMod.jar
+          path: |
+            paper/build/libs/VibeMod.jar
+            fabric/build/libs/vibemod-fabric-*.jar
