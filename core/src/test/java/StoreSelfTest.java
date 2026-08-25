@@ -25,6 +25,10 @@ import com.gijsm.vibemod.store.ModStore;
  * config caching, and a real compile + jar export (with an embedded
  * config.yml for knobbed mods) whose contents are verified with
  * java.util.jar.JarFile.
+ *
+ * <p>Finally it recompiles a real stored-mod corpus (every version of every mod
+ * under {@code -Dvibemod.mods.dir}) against the live sdk, so an api change that
+ * would break mods already on disk fails the build.
  */
 public class StoreSelfTest {
 
@@ -47,6 +51,7 @@ public class StoreSelfTest {
         testModConfigsLiveReads();
         testJarExporter();
         testJarExporterEmbedsConfigYml();
+        testStoredCorpusCompiles();
 
         if (failures == 0) {
             System.out.println("ALL CHECKS PASSED");
@@ -536,6 +541,9 @@ public class StoreSelfTest {
                     jarFile.getJarEntry("com/gijsm/vibemod/api/VibeContext.class") != null);
             check("api class ModCommandHandler embedded",
                     jarFile.getJarEntry("com/gijsm/vibemod/api/ModCommandHandler.class") != null);
+            check("api client contract embedded (VibeContext.client names it)",
+                    jarFile.getJarEntry("com/gijsm/vibemod/api/client/ClientContext.class") != null
+                            && jarFile.getJarEntry("com/gijsm/vibemod/api/client/HudCanvas.class") != null);
             check("manifest present", jarFile.getJarEntry("META-INF/MANIFEST.MF") != null);
         }
 
@@ -605,6 +613,69 @@ public class StoreSelfTest {
 
         System.out.println("PASS: JarExporter embeds a config.yml seeded with resolved values for a knobbed mod, "
                 + "and the wrapper (with baked-in defaults) compiles");
+    }
+
+    /**
+     * Reads every stored mod out of a real mods directory and recompiles every
+     * version of every one of them against the live sdk. This is the corpus gate
+     * on api compatibility: the frozen {@code com.gijsm.vibemod.api} surface must
+     * keep compiling the sources already on disk (including pre-v3 mods that
+     * declare {@code implements VibeMod}), whatever the module layout does.
+     *
+     * <p>The directory comes from {@code -Dvibemod.mods.dir}; the Gradle task
+     * defaults it to {@code <repo>/server/plugins/VibeMod/mods} and it can be
+     * pointed elsewhere with {@code -Pvibemod.modsDir=...} (needed in git
+     * worktrees, where {@code server/} is runtime state and not checked out).
+     * When the directory is absent the check reports SKIPPED rather than failing,
+     * so the self-test still runs on a fresh clone and in CI.
+     */
+    private static void testStoredCorpusCompiles() {
+        String configured = System.getProperty("vibemod.mods.dir", "");
+        if (configured.isBlank()) {
+            System.out.println("SKIPPED: stored-corpus compile (no -Dvibemod.mods.dir)");
+            return;
+        }
+        Path modsDir = Path.of(configured);
+        if (!Files.isDirectory(modsDir)) {
+            System.out.println("SKIPPED: stored-corpus compile (no such directory: " + modsDir + ")");
+            return;
+        }
+
+        ModStore store = new ModStore(modsDir);
+        List<ModStore.StoredMod> mods = store.all();
+        int versions = 0;
+        int files = 0;
+        List<String> broken = new java.util.ArrayList<>();
+
+        for (ModStore.StoredMod mod : mods) {
+            for (ModStore.StoredVersion version : mod.versions()) {
+                Map<String, String> sources = store.sources(mod.name(), version.version());
+                if (sources.isEmpty()) {
+                    continue;
+                }
+                versions++;
+                files += sources.size();
+                String label = mod.name() + " v" + version.version();
+                try {
+                    var result = new InMemoryCompiler().compile(sources);
+                    if (!result.success()) {
+                        broken.add(label + ": " + result.diagnostics().lines().findFirst().orElse(""));
+                    }
+                } catch (RuntimeException e) {
+                    broken.add(label + ": threw " + e);
+                }
+            }
+        }
+
+        System.out.println("  corpus: " + mods.size() + " mods, " + versions + " versions, " + files + " sources"
+                + " from " + modsDir);
+        check("stored corpus has content", files > 0);
+        check("every stored source compiles against the sdk", broken.isEmpty());
+        for (String failure : broken) {
+            System.out.println("    broken: " + failure);
+        }
+
+        System.out.println("PASS: the whole stored-mod corpus recompiles against the current api");
     }
 
     private static Path tempDir(String prefix) throws Exception {

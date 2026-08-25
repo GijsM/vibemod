@@ -46,10 +46,17 @@ import com.gijsm.vibemod.gen.GeneratedProject.ConfigKnob;
  */
 public final class JarExporter {
 
-    // Mod (the current interface) plus the deprecated VibeMod bridge are both
-    // embedded so mod sources stored before the v3 rename (which still declare
-    // `implements VibeMod`) keep linking in an exported jar.
-    private static final String[] API_CLASSES = {"Mod", "VibeMod", "VibeContext", "ModCommandHandler"};
+    // Names relative to com/gijsm/vibemod/api/. Mod (the current interface) plus
+    // the deprecated VibeMod bridge are both embedded so mod sources stored
+    // before the v3 rename (which still declare `implements VibeMod`) keep
+    // linking in an exported jar. The client/ classes come along because
+    // VibeContext's client(Consumer<ClientContext>) default method names them:
+    // without them an exported mod that touches ctx.client would not link.
+    private static final String[] API_CLASSES = {
+        "Mod", "VibeMod", "VibeContext", "ModCommandHandler",
+        "client/ClientContext", "client/HudRenderer", "client/HudCanvas",
+        "client/KeyLease", "client/ClientTickHandler", "client/ClientCommandHandler",
+    };
 
     private final InMemoryCompiler compiler;
 
@@ -58,7 +65,7 @@ public final class JarExporter {
     }
 
     /**
-     * Standalone Paper plugin jar. Embeds compiled mod classes, copies of the three
+     * Standalone Paper plugin jar. Embeds compiled mod classes, copies of the
      * api classes, a generated {@code <Name>ExportPlugin} wrapper with a standalone
      * {@code VibeContext} impl, and a generated {@code plugin.yml}. Also writes the
      * source tree next to it as {@code <Name>-src/}. Returns the jar path.
@@ -197,8 +204,8 @@ public final class JarExporter {
     // -- api class byte loading --
 
     /**
-     * Loads the four api interface classes as bytecode so they can be embedded in
-     * the export jar. Prefers reading them as classloader resources (works whether
+     * Loads the {@link #API_CLASSES} interfaces as bytecode so they can be embedded
+     * in the export jar. Prefers reading them as classloader resources (works whether
      * VibeMod itself is running from a jar or, as in tests, from a directory of
      * .class files); falls back to reading them directly out of VibeMod's own code
      * source (jar file or classes directory) if the resource lookup fails.
