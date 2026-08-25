@@ -172,6 +172,20 @@ tasks.named("check") { dependsOn("checkPlatformFree") }
 val modsDir: String = (findProperty("vibemod.modsDir") as String?)
     ?: rootProject.layout.projectDirectory.dir("server/plugins/VibeMod/mods").asFile.absolutePath
 
+/**
+ * The FIXTURE corpus: three small mods checked in under
+ * `core/src/test/resources/corpus`, in the same on-disk layout `ModStore` reads.
+ *
+ * The real corpus above is the honest api-compatibility gate, but it is a user's
+ * own generated mods on one machine — it cannot be committed, so on a fresh
+ * clone and on every CI runner the corpus check printed SKIPPED and proved
+ * nothing. The fixture is what makes that path actually run in CI. It is
+ * REQUIRED (StoreSelfTest fails if it is missing) and deliberately small; see
+ * its README for what each mod is there to protect.
+ */
+val fixtureModsDir: String =
+    layout.projectDirectory.dir("src/test/resources/corpus").asFile.absolutePath
+
 fun registerSelfTest(name: String, main: String, configure: JavaExec.() -> Unit = {}) =
     tasks.register<JavaExec>(name) {
         group = "verification"
@@ -190,6 +204,7 @@ registerSelfTest("selfTestLlm", "LlmSelfTest") {
 
 registerSelfTest("selfTestStore", "StoreSelfTest") {
     systemProperty("vibemod.mods.dir", modsDir)
+    systemProperty("vibemod.fixture.mods.dir", fixtureModsDir)
 }
 
 registerSelfTest("selfTestCatalog", "com.gijsm.vibemod.llm.CatalogSelfTest")
@@ -209,6 +224,7 @@ registerSelfTest("selfTestCompilerEcj", "CompilerSelfTest") {
 
 registerSelfTest("selfTestStoreEcj", "StoreSelfTest") {
     systemProperty("vibemod.mods.dir", modsDir)
+    systemProperty("vibemod.fixture.mods.dir", fixtureModsDir)
     systemProperty("vibemod.compiler", "ecj")
 }
 

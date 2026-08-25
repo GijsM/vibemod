@@ -1,0 +1,68 @@
+{
+  "schema": 3,
+  "platform": "paper",
+  "mcVersion": "1.21.8",
+  "side": "server",
+  "name": "FixtureCanary",
+  "description": "Fixture corpus: the ordinary case, two versions deep.",
+  "usage": "/fixtureping",
+  "manual": "## FixtureCanary\n\nA compile fixture. Not a real mod.",
+  "icon": "",
+  "mainClass": "vibemod.fixturecanary.FixtureCanary",
+  "currentVersion": 2,
+  "enabled": true,
+  "creator": "fixture",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "fixture corpus v1",
+      "model": "fixture",
+      "createdAt": 1756000000000,
+      "changelog": "",
+      "kind": "create",
+      "costUsd": 0.0,
+      "requester": "fixture"
+    },
+    {
+      "version": 2,
+      "prompt": "fixture corpus v2",
+      "model": "fixture",
+      "createdAt": 1756000001000,
+      "changelog": "Adds the delayed greeting.",
+      "kind": "edit",
+      "costUsd": 0.0,
+      "requester": "fixture"
+    }
+  ],
+  "config": [
+    {
+      "key": "greeting",
+      "type": "text",
+      "def": "hi",
+      "description": "What /fixtureping echoes back."
+    },
+    {
+      "key": "count",
+      "type": "integer",
+      "def": "7",
+      "description": "How many times the action echoes.",
+      "min": 1.0,
+      "max": 64.0,
+      "step": 1.0
+    },
+    {
+      "key": "loud",
+      "type": "boolean",
+      "def": "false",
+      "description": "Shout the greeting."
+    },
+    {
+      "key": "scale",
+      "type": "decimal",
+      "def": "1.5",
+      "description": "A decimal knob, so configDouble is in the fixture too."
+    }
+  ],
+  "configValues": {},
+  "debugEcho": null
+}

@@ -26,9 +26,11 @@ import com.gijsm.vibemod.store.ModStore;
  * config.yml for knobbed mods) whose contents are verified with
  * java.util.jar.JarFile.
  *
- * <p>Finally it recompiles a real stored-mod corpus (every version of every mod
- * under {@code -Dvibemod.mods.dir}) against the live sdk, so an api change that
- * would break mods already on disk fails the build.
+ * <p>Finally it recompiles two stored-mod corpora against the live sdk, so an
+ * api change that would break mods already on disk fails the build: the
+ * checked-in fixture corpus ({@code -Dvibemod.fixture.mods.dir}, always
+ * present, always required) and — where it exists — the maintainer's real one
+ * ({@code -Dvibemod.mods.dir}, hundreds of sources, skipped when absent).
  */
 public class StoreSelfTest {
 
@@ -52,6 +54,7 @@ public class StoreSelfTest {
         testModConfigsLiveReads();
         testJarExporter();
         testJarExporterEmbedsConfigYml();
+        testFixtureCorpusCompiles();
         testStoredCorpusCompiles();
 
         if (failures == 0) {
@@ -695,6 +698,31 @@ public class StoreSelfTest {
     }
 
     /**
+     * The corpus gate, run over the checked-in fixture corpus
+     * ({@code core/src/test/resources/corpus}, wired by the Gradle task as
+     * {@code -Dvibemod.fixture.mods.dir}).
+     *
+     * <p>REQUIRED, not skippable — that is the whole point of it existing. The
+     * real corpus below is the honest gate but it lives on one machine and
+     * cannot be committed (it is a user's generated mods, and it is large), so
+     * on a fresh clone and on every CI runner the corpus check used to print
+     * SKIPPED and prove nothing. Three small mods in the real on-disk layout
+     * cover the paths that matter: multi-version history, a multi-file mod, the
+     * Bukkit-typed half of the api, the {@code sdk-client} surface, and a
+     * pre-rename mod that still {@code implements VibeMod} and still imports
+     * {@code com.gijsm.vibemine.api}.
+     */
+    private static void testFixtureCorpusCompiles() {
+        String configured = System.getProperty("vibemod.fixture.mods.dir", "");
+        if (configured.isBlank() || !Files.isDirectory(Path.of(configured))) {
+            check("the fixture corpus is present (it is checked in; -Dvibemod.fixture.mods.dir="
+                    + (configured.isBlank() ? "<unset>" : configured) + ")", false);
+            return;
+        }
+        compileCorpus(Path.of(configured), "fixture corpus", true);
+    }
+
+    /**
      * Reads every stored mod out of a real mods directory and recompiles every
      * version of every one of them against the live sdk. This is the corpus gate
      * on api compatibility: the frozen {@code com.gijsm.vibemod.api} surface must
@@ -705,8 +733,8 @@ public class StoreSelfTest {
      * defaults it to {@code <repo>/server/plugins/VibeMod/mods} and it can be
      * pointed elsewhere with {@code -Pvibemod.modsDir=...} (needed in git
      * worktrees, where {@code server/} is runtime state and not checked out).
-     * When the directory is absent the check reports SKIPPED rather than failing,
-     * so the self-test still runs on a fresh clone and in CI.
+     * When the directory is absent the check reports SKIPPED rather than failing
+     * — {@link #testFixtureCorpusCompiles()} is the one that always runs.
      */
     private static void testStoredCorpusCompiles() {
         String configured = System.getProperty("vibemod.mods.dir", "");
@@ -719,14 +747,20 @@ public class StoreSelfTest {
             System.out.println("SKIPPED: stored-corpus compile (no such directory: " + modsDir + ")");
             return;
         }
+        compileCorpus(modsDir, "stored corpus", false);
+    }
 
+    /** Compiles every version of every mod under {@code modsDir}. Shared by both corpora. */
+    private static void compileCorpus(Path modsDir, String label, boolean fixture) {
         ModStore store = new ModStore(modsDir);
         List<ModStore.StoredMod> mods = store.all();
         int versions = 0;
         int files = 0;
         List<String> broken = new java.util.ArrayList<>();
+        List<String> names = new java.util.ArrayList<>();
 
         for (ModStore.StoredMod mod : mods) {
+            names.add(mod.name());
             for (ModStore.StoredVersion version : mod.versions()) {
                 Map<String, String> sources = store.sources(mod.name(), version.version());
                 if (sources.isEmpty()) {
@@ -734,14 +768,14 @@ public class StoreSelfTest {
                 }
                 versions++;
                 files += sources.size();
-                String label = mod.name() + " v" + version.version();
+                String what = mod.name() + " v" + version.version();
                 try {
                     var result = new InMemoryCompiler().compile(sources);
                     if (!result.success()) {
-                        broken.add(label + ": " + result.diagnostics().lines().findFirst().orElse(""));
+                        broken.add(what + ": " + result.diagnostics().lines().findFirst().orElse(""));
                     }
                 } catch (RuntimeException e) {
-                    broken.add(label + ": threw " + e);
+                    broken.add(what + ": threw " + e);
                 }
             }
         }
@@ -751,21 +785,31 @@ public class StoreSelfTest {
         // silently fell back to javac would answer the wrong question.
         String backend = com.gijsm.vibemod.platform.CompilerProvider.resolve()
                 .map(com.gijsm.vibemod.platform.CompilerProvider::name).orElse("none");
-        System.out.println("  corpus: " + mods.size() + " mods, " + versions + " versions, " + files + " sources"
-                + " from " + modsDir + " · backend " + backend);
+        System.out.println("  " + label + ": " + mods.size() + " mods, " + versions + " versions, " + files
+                + " sources from " + modsDir + " · backend " + backend);
         String requested = System.getProperty(
                 com.gijsm.vibemod.platform.CompilerProvider.BACKEND_PROPERTY, "");
         if (!requested.isBlank()) {
             check("requested backend '" + requested + "' was actually used",
                     backend.startsWith(requested));
         }
-        check("stored corpus has content", files > 0);
-        check("every stored source compiles against the sdk", broken.isEmpty());
+        check(label + " has content", files > 0);
+        check("every source in the " + label + " compiles against the sdk", broken.isEmpty());
         for (String failure : broken) {
             System.out.println("    broken: " + failure);
         }
 
-        System.out.println("PASS: the whole stored-mod corpus recompiles against the current api");
+        // The fixture is checked in, so its inventory is knowable and asserting on
+        // it is what stops it rotting into "one empty directory that trivially
+        // passes". The real corpus grows every time somebody types /vibe make, so
+        // there is nothing to assert about its shape.
+        if (fixture) {
+            check("the fixture corpus still holds all three mods " + names,
+                    names.equals(List.of("FixtureCanary", "FixtureClient", "FixtureLegacy")));
+            check("FixtureCanary still has two versions on disk", versions == 4);
+        }
+
+        System.out.println("PASS: the whole " + label + " recompiles against the current api");
     }
 
     private static Path tempDir(String prefix) throws Exception {
