@@ -60,3 +60,12 @@ debug:
   # Default state of the per-mod debug echo (ctx.log() + caught exceptions
   # streamed to ops) for mods that haven't had it explicitly toggled.
   default-echo: false
+
+ui:
+  # Force the plain-chat UI even on a server that has the native dialog API.
+  # VibeMod normally picks its renderer from a capability probe: dialogs on
+  # Paper 1.21.7+, clickable chat everywhere else (1.20.6 through 1.21.6). This
+  # exists so the chat path can be exercised on a modern server. Applied at
+  # startup only - swapping renderers under open screens would strand their
+  # callbacks - so a change needs a restart, not /vibe reload.
+  force-chat: false

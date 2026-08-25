@@ -1,8 +1,17 @@
+import xyz.jpenilla.runtask.task.AbstractRun
+
 // paper: the Paper host. Everything Bukkit-typed lives here, plus the plugin
-// bootstrap and plugin.yml. Produces the single shipped artifact, VibeMod.jar
-// (the Maven build's `<finalName>VibeMod</finalName>`), which bundles core,
-// platform-api, sdk and sdk-client so generated mods compile and link against
-// the api straight out of the running plugin jar.
+// bootstrap and plugin.yml. Produces the single shipped artifact, VibeMod.jar,
+// which bundles core, platform-api, sdk and sdk-client so generated mods compile
+// and link against the api straight out of the running plugin jar.
+
+plugins {
+    // Boots a real Paper server with the freshly built jar installed
+    // (ARCHITECTURE-V2 §9 Phase C). One task per supported floor/ceiling so the
+    // 1.20.6 chat-renderer path and the 1.21.8 dialog path are both one command
+    // away.
+    id("xyz.jpenilla.run-paper") version "3.1.0"
+}
 
 dependencies {
     implementation(project(":core"))
@@ -11,9 +20,6 @@ dependencies {
     implementation(project(":sdk-client"))
 
     compileOnly("io.papermc.paper:paper-api:${property("paperApiVersion")}")
-
-    // ErrorsSelfTest drives the Bukkit-typed ModErrors.
-    testImplementation("io.papermc.paper:paper-api:${property("paperApiVersion")}")
 }
 
 // Everything on the runtime classpath is one of our own modules (Gson,
@@ -30,20 +36,34 @@ tasks.jar {
 }
 
 // ---------------------------------------------------------------------------
-// Self-tests: plain main() classes, no JUnit (ARCHITECTURE-V2 §9 Phase B)
+// run-paper targets (ARCHITECTURE-V2 §9 Phase C)
+//
+// The three servers the acceptance gate names: the 1.20.6 floor (no dialog API,
+// so the chat renderer is the whole UI), the 1.21.8 dialog baseline, and the
+// newest 26.x line. Each gets its own run directory so worlds, configs and the
+// stored mods of one version never leak into another.
 // ---------------------------------------------------------------------------
 
-tasks.register<JavaExec>("selfTestErrors") {
-    group = "verification"
-    description = "Runs com.gijsm.vibemod.runtime.ErrorsSelfTest."
-    classpath = sourceSets["test"].runtimeClasspath
-    mainClass = "com.gijsm.vibemod.runtime.ErrorsSelfTest"
+/** Every run directory lives under `paper/run/`, which is git-ignored runtime state. */
+fun AbstractRun.useRunDirFor(version: String) {
+    runDirectory = layout.projectDirectory.dir("run/$version")
 }
 
-tasks.register("selfTest") {
-    group = "verification"
-    description = "Runs paper's self-tests."
-    dependsOn("selfTestErrors")
+tasks.runServer {
+    minecraftVersion(property("paperRunVersionModern") as String)
+    useRunDirFor(property("paperRunVersionModern") as String)
 }
 
-tasks.named("check") { dependsOn("selfTest") }
+listOf(
+    "paperRunVersionLegacy" to "the 1.20.6 floor: no dialog API, chat renderer only",
+    "paperRunVersionNext" to "the newest supported line",
+).forEach { (versionProperty, why) ->
+    val version = property(versionProperty) as String
+    tasks.register<xyz.jpenilla.runpaper.task.RunServer>("runServer${version.replace('.', '_')}") {
+        group = "run paper"
+        description = "Runs a Paper $version server with VibeMod installed ($why)."
+        minecraftVersion(version)
+        useRunDirFor(version)
+        pluginJars.from(tasks.jar.flatMap { it.archiveFile })
+    }
+}

@@ -3,30 +3,50 @@ package com.gijsm.vibemod.runtime;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 
-import org.bukkit.Bukkit;
-import org.bukkit.plugin.Plugin;
+import com.gijsm.vibemod.platform.TickScheduler;
 
 /**
  * Times mod entry points (listener callbacks, tasks, commands) and trips a mod
  * off when it is too slow, either in a single invocation or accumulated over a
  * rolling one second window. A tripped mod's wrapped bodies are short-circuited
  * (not run) until {@link #reset(String)} is called.
+ *
+ * <p>v2 change (ARCHITECTURE-V2 §1.1, §8.4): the measured thread is a
+ * constructor parameter. The server instance measures the main server thread;
+ * a loader host builds a second instance measuring the render thread, with the
+ * same budgets and the same trip path — that is the whole difference between
+ * watchdogging a listener and watchdogging a HUD renderer.
  */
 public final class Watchdog {
 
     private static final long WINDOW_NANOS = 1_000_000_000L;
 
-    private final Plugin plugin;
+    private static final Logger LOG = Logger.getLogger(Watchdog.class.getName());
+
+    private final TickScheduler scheduler;
+    private final String threadLabel;
     private volatile long singleInvocationMs;
     private volatile long perSecondBudgetMs;
     private final ConcurrentHashMap<String, ModStats> stats = new ConcurrentHashMap<>();
     private volatile Consumer<String> onTrip;
 
-    public Watchdog(Plugin plugin, long singleInvocationMs, long perSecondBudgetMs) {
-        this.plugin = plugin;
+    /**
+     * @param threadLabel which thread this instance measures ({@code "main"},
+     *                    {@code "render"}) — appears in trip diagnostics
+     */
+    public Watchdog(TickScheduler scheduler, String threadLabel,
+                    long singleInvocationMs, long perSecondBudgetMs) {
+        this.scheduler = scheduler;
+        this.threadLabel = threadLabel;
         this.singleInvocationMs = singleInvocationMs;
         this.perSecondBudgetMs = perSecondBudgetMs;
+    }
+
+    /** Which thread this watchdog measures. */
+    public String threadLabel() {
+        return threadLabel;
     }
 
     /** Registry hooks in so a tripped mod is auto-disabled + broadcast. */
@@ -89,10 +109,11 @@ public final class Watchdog {
             return;
         }
         try {
-            Bukkit.getScheduler().runTask(plugin, () -> handler.accept(mod));
+            scheduler.runOnMain(() -> handler.accept(mod));
         } catch (Throwable t) {
-            plugin.getLogger().log(Level.WARNING,
-                    "Watchdog could not schedule trip handler for mod " + mod + ", running inline", t);
+            LOG.log(Level.WARNING,
+                    "Watchdog (" + threadLabel + ") could not schedule the trip handler for mod " + mod
+                            + ", running inline", t);
             handler.accept(mod);
         }
     }

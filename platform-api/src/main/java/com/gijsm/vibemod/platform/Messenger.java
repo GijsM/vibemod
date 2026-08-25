@@ -18,11 +18,26 @@ public interface Messenger {
     /** The server console. */
     Audience console();
 
+    /**
+     * Whether that player is connected right now. The progress boss bar needs
+     * it to stop animating for someone who logged off mid-generation, which
+     * {@link Audience} alone cannot answer.
+     */
+    boolean online(UUID playerId);
+
     /** Broadcast to everyone + console. */
     void broadcast(Component message);
 
     /** Broadcast to holders of {@code permission} + console. */
     void broadcast(Component message, String permission);
+
+    /**
+     * Broadcast to holders of {@code permission} but NOT the console. The
+     * debug-echo surface needs this: it mirrors a mod's JUL records, which the
+     * console already prints through its own log handler, so including it would
+     * double every line.
+     */
+    void broadcastToPlayers(Component message, String permission);
 
     /**
      * A small celebration at the player (particles/sound — v1 Paper: firework

@@ -53,6 +53,17 @@ tasks.register("selfTest") {
         ":core:selfTestLlm",
         ":core:selfTestStore",
         ":core:selfTestCatalog",
-        ":paper:selfTestErrors",
+        ":core:selfTestErrors",
     )
+}
+
+/**
+ * The ECJ-forced compile gate (ARCHITECTURE-V2 7.3). Deliberately NOT wired into
+ * `check`: it doubles the corpus compile time and its job is to answer a
+ * portability question for the loader hosts, not to guard every build.
+ */
+tasks.register("selfTestEcj") {
+    group = "verification"
+    description = "Runs the compile-heavy self-tests with the ECJ backend forced."
+    dependsOn(":core:selfTestEcj")
 }

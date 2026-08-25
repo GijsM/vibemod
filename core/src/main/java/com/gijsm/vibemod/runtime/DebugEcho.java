@@ -11,12 +11,11 @@ import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
 
-import org.bukkit.Bukkit;
-import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
-
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+
+import com.gijsm.vibemod.platform.Messenger;
+import com.gijsm.vibemod.platform.TickScheduler;
 
 /**
  * Live echo of a mod's {@code ctx.log()} output (including caught exceptions,
@@ -34,15 +33,20 @@ public final class DebugEcho {
     private static final int RATE_LIMIT = 10;
     private static final long RATE_WINDOW_MS = 5_000L;
 
-    private final Plugin plugin;
+    /** Who sees the echo — the same permission the admin subcommands require. */
+    private static final String ADMIN_PERMISSION = "vibe.admin";
+
+    private final Messenger messenger;
+    private final TickScheduler scheduler;
     private final Map<String, Logger> loggers = new ConcurrentHashMap<>();
     private final Map<String, EchoHandler> handlers = new ConcurrentHashMap<>();
     private final Map<String, Boolean> overrides = new ConcurrentHashMap<>();
     private volatile boolean defaultEnabled;
     private volatile BiConsumer<String, Boolean> persister;
 
-    public DebugEcho(Plugin plugin) {
-        this.plugin = plugin;
+    public DebugEcho(Messenger messenger, TickScheduler scheduler) {
+        this.messenger = messenger;
+        this.scheduler = scheduler;
     }
 
     /** Sets the fallback used by {@link #enabled} for any mod without an explicit override. */
@@ -123,19 +127,13 @@ public final class DebugEcho {
         });
     }
 
+    /**
+     * Permission-scoped broadcast on the main thread (ARCHITECTURE-V2 §1.1:
+     * {@code Messenger} replaces the direct {@code Server#broadcast} walk over
+     * online players). {@code runOnMain} already runs inline when we are there.
+     */
     private void deliver(Component message) {
-        Runnable task = () -> {
-            for (Player p : plugin.getServer().getOnlinePlayers()) {
-                if (p.hasPermission("vibe.admin")) {
-                    p.sendMessage(message);
-                }
-            }
-        };
-        if (Bukkit.isPrimaryThread()) {
-            task.run();
-        } else {
-            Bukkit.getScheduler().runTask(plugin, task);
-        }
+        scheduler.runOnMain(() -> messenger.broadcastToPlayers(message, ADMIN_PERMISSION));
     }
 
     private static String lower(String s) {

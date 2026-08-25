@@ -29,4 +29,36 @@ public interface PlatformInfo {
 
     /** True on a dedicated server, false when running inside a client process. */
     boolean isDedicatedServer();
+
+    // ---- era capabilities (Phase C: the 1.20.6 floor) -------------------
+    // Probes, never version comparisons (§0#8). Defaults are the conservative
+    // answer so a host that does not care need not implement them.
+
+    /**
+     * True when an item's enchantment glint can be forced on
+     * ({@code ItemMeta#setEnchantmentGlintOverride}, MC 1.20.5+). The dialog
+     * renderer's "this mod is running" cue depends on it.
+     */
+    default boolean hasItemGlintOverride() {
+        return false;
+    }
+
+    /**
+     * True when the command tree can be pushed to a connected player
+     * ({@code Player#updateCommands} on Paper, {@code sendCommands} on the
+     * loaders) so a freshly registered dynamic command tab-completes without
+     * a rejoin.
+     */
+    default boolean hasCommandResync() {
+        return false;
+    }
+
+    /**
+     * The {@code PlatformProfile} id this host should generate code for —
+     * {@code "paper-modern"}, {@code "paper-legacy"}, {@code "fabric"} or
+     * {@code "neoforge"} (ARCHITECTURE-V2 §6.2). Kept here, next to
+     * {@link #mcVersion()}, because the era split is the host's own knowledge;
+     * core only looks the id up in its profile table.
+     */
+    String profileId();
 }

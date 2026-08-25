@@ -11,6 +11,14 @@ dependencies {
     compileOnlyApi("net.kyori:adventure-api:${property("adventureVersion")}")
     compileOnly("com.google.code.gson:gson:${property("gsonVersion")}")
 
+    // ECJ: the compiler backend of last resort (ARCHITECTURE-V2 7.3). compileOnly,
+    // and reached only reflectively / via ServiceLoader - so the Paper jar never
+    // ships it (Paper servers run a JDK), while the loader hosts Jar-in-Jar it
+    // unrelocated in Phases D/E. On the test runtime it IS present, so
+    // `-Dvibemod.compiler=ecj` can force the ECJ path over the real corpus.
+    compileOnly("org.eclipse.jdt:ecj:${property("ecjVersion")}")
+    testRuntimeOnly("org.eclipse.jdt:ecj:${property("ecjVersion")}")
+
     // The self-tests drive InMemoryCompiler/JarExporter, which compile generated
     // mod sources against the live classpath: the sdk (the generated-code
     // contract) and paper-api (which those sources import) must be present at
@@ -176,10 +184,34 @@ registerSelfTest("selfTestStore", "StoreSelfTest") {
 
 registerSelfTest("selfTestCatalog", "com.gijsm.vibemod.llm.CatalogSelfTest")
 
+registerSelfTest("selfTestErrors", "com.gijsm.vibemod.runtime.ErrorsSelfTest")
+
+/**
+ * The ECJ-forced runs (ARCHITECTURE-V2 7.3): the same two compile-heavy
+ * self-tests, but with `CompilerProvider.resolve()` steered past the system
+ * javac onto the Eclipse compiler. This is the only way to find out whether ECJ
+ * can actually build the stored corpus through our own InMemoryFileManager
+ * before a loader host depends on it.
+ */
+registerSelfTest("selfTestCompilerEcj", "CompilerSelfTest") {
+    systemProperty("vibemod.compiler", "ecj")
+}
+
+registerSelfTest("selfTestStoreEcj", "StoreSelfTest") {
+    systemProperty("vibemod.mods.dir", modsDir)
+    systemProperty("vibemod.compiler", "ecj")
+}
+
+tasks.register("selfTestEcj") {
+    group = "verification"
+    description = "Runs the compile-heavy self-tests with the ECJ backend forced."
+    dependsOn("selfTestCompilerEcj", "selfTestStoreEcj")
+}
+
 tasks.register("selfTest") {
     group = "verification"
     description = "Runs core's self-tests."
-    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog")
+    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog", "selfTestErrors")
 }
 
 tasks.named("check") { dependsOn("selfTest") }

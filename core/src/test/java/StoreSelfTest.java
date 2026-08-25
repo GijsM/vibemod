@@ -524,7 +524,11 @@ public class StoreSelfTest {
             check("plugin.yml name correct", pluginYml.contains("name: Trivial"));
             check("plugin.yml version correct", pluginYml.contains("version: 1.0"));
             check("plugin.yml main points at wrapper FQCN", pluginYml.contains("main: " + wrapperFqcn));
-            check("plugin.yml api-version 1.21", pluginYml.contains("api-version: '1.21'"));
+            // The floor drop (ARCHITECTURE-V2 §6.3): api-version comes from the
+            // PlatformProfile now, and both Paper profiles declare the 1.20 floor
+            // so an export can load on the oldest server VibeMod supports.
+            check("plugin.yml api-version 1.20 (the floor, from the profile)",
+                    pluginYml.contains("api-version: '1.20'"));
             check("plugin.yml author present", pluginYml.contains("author: \"gijs\""));
 
             check("no-knob mod exports with NO config.yml (exactly as v1)",
@@ -667,8 +671,19 @@ public class StoreSelfTest {
             }
         }
 
+        // Naming the backend is not decoration: this is the gate that answers
+        // "can ECJ build the real corpus" (ARCHITECTURE-V2 §7.3), and a run that
+        // silently fell back to javac would answer the wrong question.
+        String backend = com.gijsm.vibemod.platform.CompilerProvider.resolve()
+                .map(com.gijsm.vibemod.platform.CompilerProvider::name).orElse("none");
         System.out.println("  corpus: " + mods.size() + " mods, " + versions + " versions, " + files + " sources"
-                + " from " + modsDir);
+                + " from " + modsDir + " · backend " + backend);
+        String requested = System.getProperty(
+                com.gijsm.vibemod.platform.CompilerProvider.BACKEND_PROPERTY, "");
+        if (!requested.isBlank()) {
+            check("requested backend '" + requested + "' was actually used",
+                    backend.startsWith(requested));
+        }
         check("stored corpus has content", files > 0);
         check("every stored source compiles against the sdk", broken.isEmpty());
         for (String failure : broken) {

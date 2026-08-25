@@ -22,6 +22,15 @@ import com.gijsm.vibemod.gen.GeneratedProject;
  * with a hard rule that mods read them live via {@code ctx.configX} rather than
  * caching them) and a lightweight edit-response shape ({@code {"edits":[...]}})
  * that edit/repair rounds may use instead of resending the full project.
+ *
+ * <p>v2.0 makes the platform-specific half of the prompt data: a
+ * {@link PlatformProfile} supplies the role line, the verbatim sdk sources, the
+ * import rules, the era cheat sheet, the threading contract, the icon rule and
+ * the few-shots, and {@link #systemPrompt(PlatformProfile)} slots them into one
+ * skeleton shared by every platform (ARCHITECTURE-V2 §6). The four user-message
+ * builders below stay profile-free: nothing in "Create a mod: X", the current
+ * sources, the knob table or a javac diagnostic differs per platform, so
+ * threading a profile through them would be a parameter nobody reads.
  */
 public final class PromptLibrary {
 
@@ -32,59 +41,36 @@ public final class PromptLibrary {
     private static final Set<String> VALID_KNOB_TYPES = Set.of("boolean", "integer", "decimal", "text", "choice");
 
     // ------------------------------------------------------------------
-    // The frozen API sources are embedded verbatim so the model always sees the
-    // exact contract it must code against, regardless of plugin jar layout.
-    // They are NOT hand-copied here: GeneratedApiSources is emitted at build
-    // time straight from the sdk module's real files by the
-    // `:core:generatePromptSources` task (ARCHITECTURE-V2 §6.4), so prompt and
-    // api cannot drift apart. LlmSelfTest still asserts the match on disk.
+    // The prompt is assembled from a fixed skeleton plus the running platform's
+    // PlatformProfile (ARCHITECTURE-V2 §6.1): the role line, the verbatim api
+    // sources, the import rules, the era cheat sheet, the threading contract,
+    // the icon rule and the few-shots all come from the profile, and everything
+    // between them is shared by every platform.
+    //
+    // The api sources inside the profile are NOT hand-copied: GeneratedApiSources
+    // is emitted at build time straight from the sdk module's real files by the
+    // `:core:generatePromptSources` task (§6.4), so prompt and api cannot drift
+    // apart. LlmSelfTest still asserts the match on disk.
     // ------------------------------------------------------------------
 
-    // ------------------------------------------------------------------
-    // Few-shot examples. Kept as constants so they are easy to eyeball and
-    // compile-check independently (see core/src/test/java/LlmSelfTest.java).
-    // ------------------------------------------------------------------
-
-    private static final String EXAMPLE_1_USER =
-            "Create a mod: when a creeper dies, spawn a chicken at its location with a poof (requested by Steve)";
-
-    private static final String EXAMPLE_1_ASSISTANT = """
-            {"plan":{"name":"ChickenCreepers","files":[{"path":"ChickenCreepers.java","purpose":"Mod entry point: registers the listener."},{"path":"CreeperDeathListener.java","purpose":"Listens for creeper deaths and spawns chickens."}]},"name":"ChickenCreepers","description":"When a creeper dies it turns into one or more chickens with a puff of smoke.","usage":"Kill a creeper and watch","manual":"## ChickenCreepers\\n\\nEvery time a creeper dies anywhere on the server, it bursts into a **cloud of smoke** and leaves behind chickens instead. A short puff of particles and a chicken sound play at the creeper's location so the swap is obvious even in a crowd.\\n\\n### Settings\\n\\n- `chicken-count` - how many chickens spawn per creeper kill (default **1**, from 1 up to 10).\\n\\nChange it any time from the mod's config dialog (/vibe config ChickenCreepers) - the very next creeper that dies uses the new count immediately, *no reload needed*.","changelog":"Creepers now burst into chickens (with a poof) when they die.","icon":"CHICKEN","mainClass":"ChickenCreepers","files":[{"path":"ChickenCreepers.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemod.api.VibeContext;\\nimport com.gijsm.vibemod.api.Mod;\\n\\npublic final class ChickenCreepers implements Mod {\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        ctx.listen(new CreeperDeathListener(ctx));\\n        ctx.log().info(\\"ChickenCreepers enabled.\\");\\n    }\\n}\\n"},{"path":"CreeperDeathListener.java","content":"package vibemod.chickencreepers;\\n\\nimport com.gijsm.vibemod.api.VibeContext;\\nimport org.bukkit.Location;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.World;\\nimport org.bukkit.entity.EntityType;\\nimport org.bukkit.entity.LivingEntity;\\nimport org.bukkit.event.EventHandler;\\nimport org.bukkit.event.Listener;\\nimport org.bukkit.event.entity.EntityDeathEvent;\\n\\npublic final class CreeperDeathListener implements Listener {\\n\\n    private final VibeContext ctx;\\n\\n    public CreeperDeathListener(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    @EventHandler\\n    public void onCreeperDeath(EntityDeathEvent event) {\\n        LivingEntity entity = event.getEntity();\\n        if (entity == null || entity.getType() != EntityType.CREEPER) {\\n            return;\\n        }\\n        World world = entity.getWorld();\\n        if (world == null) {\\n            return;\\n        }\\n        Location loc = entity.getLocation();\\n        long chickenCount = ctx.configInt(\\"chicken-count\\");\\n        if (chickenCount < 1) {\\n            chickenCount = 1;\\n        }\\n        for (long i = 0; i < chickenCount; i++) {\\n            world.spawnEntity(loc, EntityType.CHICKEN);\\n        }\\n        world.spawnParticle(Particle.POOF, loc, 12, 0.3, 0.3, 0.3, 0.01);\\n        world.playSound(loc, Sound.ENTITY_CHICKEN_AMBIENT, 1.0f, 1.2f);\\n    }\\n}\\n"}],"config":[{"key":"chicken-count","type":"integer","default":"1","description":"How many chickens spawn per creeper kill.","min":1,"max":10,"step":1}]}
-            """;
-
-    private static final String EXAMPLE_2_USER =
-            "Create a mod: every 10 seconds all players get a brief speed boost (requested by Alex)";
-
-    private static final String EXAMPLE_2_ASSISTANT = """
-            {"plan":{"name":"SpeedPulse","files":[{"path":"SpeedPulse.java","purpose":"Mod entry point: schedules the repeating task."},{"path":"SpeedPulseTask.java","purpose":"Ticks the timer and applies the speed pulse."}]},"name":"SpeedPulse","description":"On a repeating timer, all online players get a short burst of Speed.","usage":"Stand around and feel the speed boost kick in","manual":"## SpeedPulse\\n\\nOn a repeating timer, every player currently online gets a brief **Speed** effect together with a puff of cloud particles and a level-up sound. Both settings are read fresh every time the timer fires, so changing them from the mod's config dialog (/vibe config SpeedPulse) takes effect on the very next pulse - *no reload or re-enable needed*.\\n\\n### Settings\\n\\n- `period-seconds` - seconds between pulses (default **10**, from 1 up to 120).\\n- `strength` - how strong the boost is: weak, normal, or strong (default **normal**).","changelog":"Every online player now gets a brief Speed burst on a repeating timer.","icon":"SUGAR","mainClass":"SpeedPulse","files":[{"path":"SpeedPulse.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemod.api.VibeContext;\\nimport com.gijsm.vibemod.api.Mod;\\n\\npublic final class SpeedPulse implements Mod {\\n\\n    private static final long TICK_PERIOD = 20L;\\n\\n    @Override\\n    public void onEnable(VibeContext ctx) throws Exception {\\n        SpeedPulseTask task = new SpeedPulseTask(ctx);\\n        ctx.repeat(TICK_PERIOD, TICK_PERIOD, task::tick);\\n        ctx.log().info(\\"SpeedPulse enabled.\\");\\n    }\\n}\\n"},{"path":"SpeedPulseTask.java","content":"package vibemod.speedpulse;\\n\\nimport com.gijsm.vibemod.api.VibeContext;\\nimport org.bukkit.Particle;\\nimport org.bukkit.Sound;\\nimport org.bukkit.entity.Player;\\nimport org.bukkit.potion.PotionEffect;\\nimport org.bukkit.potion.PotionEffectType;\\n\\n/** Ticks once a second; fires the actual speed pulse once period-seconds have elapsed. */\\npublic final class SpeedPulseTask {\\n\\n    private final VibeContext ctx;\\n    private long secondsSinceLastPulse = 0L;\\n\\n    public SpeedPulseTask(VibeContext ctx) {\\n        this.ctx = ctx;\\n    }\\n\\n    public void tick() {\\n        secondsSinceLastPulse++;\\n        long periodSeconds = ctx.configInt(\\"period-seconds\\");\\n        if (periodSeconds < 1) {\\n            periodSeconds = 1;\\n        }\\n        if (secondsSinceLastPulse < periodSeconds) {\\n            return;\\n        }\\n        secondsSinceLastPulse = 0L;\\n        pulse();\\n    }\\n\\n    private void pulse() {\\n        int amplifier = amplifierFor(ctx.configString(\\"strength\\"));\\n        for (Player player : ctx.server().getOnlinePlayers()) {\\n            if (player == null || !player.isOnline()) {\\n                continue;\\n            }\\n            player.addPotionEffect(new PotionEffect(PotionEffectType.SPEED, 60, amplifier, false, true, true));\\n            player.getWorld().spawnParticle(Particle.CLOUD, player.getLocation().add(0, 1, 0), 10, 0.3, 0.3, 0.3, 0.01);\\n            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 0.6f, 1.5f);\\n        }\\n    }\\n\\n    private int amplifierFor(String strength) {\\n        if (strength == null) {\\n            return 1;\\n        }\\n        return switch (strength) {\\n            case \\"weak\\" -> 0;\\n            case \\"strong\\" -> 2;\\n            default -> 1;\\n        };\\n    }\\n}\\n"}],"config":[{"key":"period-seconds","type":"integer","default":"10","description":"Seconds between speed pulses.","min":1,"max":120,"step":1},{"key":"strength","type":"choice","default":"normal","description":"How strong the speed boost is.","choices":["weak","normal","strong"]}]}
-            """;
-
-    /** The full system prompt sent with every generation/edit/repair call. */
-    public static String systemPrompt() {
+    /**
+     * The full system prompt sent with every generation/edit/repair call, for
+     * the platform the host is actually running.
+     */
+    public static String systemPrompt(PlatformProfile profile) {
         StringBuilder sb = new StringBuilder();
 
+        sb.append(profile.roleLine());
+        if (!profile.roleLine().endsWith("\n")) {
+            sb.append('\n');
+        }
         sb.append("""
-                You are an expert Paper 1.21.8 gameplay-mod author. You write small, delightful,
-                self-contained Minecraft server mods entirely in Java, targeting exactly one API:
-                the Mod/VibeContext contract shown below. You never touch anything else.
-
-                Your mods run hot-loaded inside a host plugin called VibeMod. A mod is not a
-                Bukkit plugin: it is one or more plain Java classes, exactly one of which
-                implements Mod, compiled in-process and loaded into a child class loader.
-                Everything your mod does with the Bukkit API must be routed through the
-                VibeContext instance you are handed in onEnable, so the host can cleanly tear
-                your mod down later.
 
                 ================ FROZEN API (verbatim source, do not deviate) ================
 
                 """);
 
-        sb.append("--- com/gijsm/vibemod/api/Mod.java ---\n");
-        sb.append(GeneratedApiSources.MOD).append('\n');
-        sb.append("--- com/gijsm/vibemod/api/VibeContext.java ---\n");
-        sb.append(GeneratedApiSources.VIBE_CONTEXT).append('\n');
-        sb.append("--- com/gijsm/vibemod/api/ModCommandHandler.java ---\n");
-        sb.append(GeneratedApiSources.MOD_COMMAND_HANDLER).append('\n');
+        sb.append(profile.apiSourceBlock());
 
         sb.append("""
                 ================ OUTPUT CONTRACT ================
@@ -131,12 +117,14 @@ public final class PromptLibrary {
                 - "changelog" is REQUIRED: ONE short player-facing plain-text line (roughly 100
                   characters at most, no Markdown) saying what this version changes. For a
                   brand-new mod it describes what the mod does.
-                - "icon" is ONE thematic, obtainable ITEM Material name from vanilla Minecraft 1.21,
-                  in UPPER_SNAKE_CASE, that best represents the mod to a player browsing a menu
-                  (e.g. "CHICKEN" for a mod about chickens, "SUGAR" for a speed effect, "TNT" for
-                  an explosion mod, "DIAMOND_SWORD" for a combat mod). It must be a real obtainable
-                  item a player could hold, NEVER a block-only or technical/internal material (e.g.
-                  never "BEDROCK", "COMMAND_BLOCK", "AIR", "STRUCTURE_VOID"), and NEVER "AIR" itself.
+                """);
+
+        sb.append(profile.iconInstruction());
+        if (!profile.iconInstruction().endsWith("\n")) {
+            sb.append('\n');
+        }
+
+        sb.append("""
                 - "mainClass" is the simple (no package) name of the one public class that
                   implements Mod, and must have a public no-arg constructor.
                 - Every entry in "files" has a "path" ending in ".java" and "content" holding the
@@ -158,27 +146,33 @@ public final class PromptLibrary {
 
                 ================ HARD RULES ================
 
-                - Imports are limited to `java.*` and `org.bukkit.*` ONLY. NEVER import
-                  `net.minecraft.*`, NEVER `io.papermc.*` internals, and NEVER
-                  `java.lang.reflect.*` or any other reflection API. If the request seems to need
-                  something outside this surface, implement the closest tasteful approximation
-                  using only java.* and org.bukkit.*.
+                """);
+
+        sb.append(profile.importRules());
+        sb.append('\n');
+
+        sb.append("""
                 - NEVER call `Bukkit.getPluginManager().registerEvents(...)`,
                   `Bukkit.getScheduler()...`, or `Bukkit.getCommandMap()` directly. Registration
                   always goes through the VibeContext you are given: `ctx.listen(...)` for event
                   listeners, `ctx.repeat(...)` / `ctx.later(...)` for scheduled work,
                   `ctx.command(...)` for a real top-level command, `ctx.action(...)` for a named
                   `/vibe do <mod> <name>` action.
-                - Event handler methods and Runnables passed to ctx.repeat/ctx.later already run
-                  on the main server thread — do not spawn your own threads and do not attempt to
-                  hop threads yourself.
+                """);
+
+        sb.append(profile.threadingContract());
+        sb.append('\n');
+
+        sb.append("""
                 - Be defensive: null-check worlds, entities, and players before using them; use
                   `instanceof` checks before casting entities to more specific types; guard against
                   players being offline/dead when tasks fire later.
-                - Use only real Paper 1.21 enum constants for Material, EntityType, Sound, and
-                  Particle. Do not invent names. If unsure, prefer a very common, obviously-real
-                  constant (e.g. Material.DIAMOND_SWORD, EntityType.ZOMBIE, Sound.ENTITY_PLAYER_LEVELUP,
-                  Particle.CLOUD) over a guess.
+                """);
+
+        sb.append(profile.cheatSheet());
+        sb.append('\n');
+
+        sb.append("""
                 - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
                   construct entity instances directly.
                 - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
@@ -246,12 +240,12 @@ public final class PromptLibrary {
 
                 """);
 
-        sb.append("--- Example 1 ---\n");
-        sb.append("User: ").append(EXAMPLE_1_USER).append('\n');
-        sb.append("Assistant: ").append(EXAMPLE_1_ASSISTANT).append('\n');
-        sb.append("--- Example 2 ---\n");
-        sb.append("User: ").append(EXAMPLE_2_USER).append('\n');
-        sb.append("Assistant: ").append(EXAMPLE_2_ASSISTANT).append('\n');
+        List<PlatformProfile.FewShot> fewShots = profile.fewShots();
+        for (int i = 0; i < fewShots.size(); i++) {
+            sb.append("--- Example ").append(i + 1).append(" ---\n");
+            sb.append("User: ").append(fewShots.get(i).user()).append('\n');
+            sb.append("Assistant: ").append(fewShots.get(i).assistant()).append('\n');
+        }
 
         sb.append("""
 
@@ -262,6 +256,15 @@ public final class PromptLibrary {
                 """);
 
         return sb.toString();
+    }
+
+    /**
+     * The Paper 1.21.7+ prompt. Kept as the no-argument default because the
+     * whole stored corpus and every self-test assertion were written against
+     * it; a host always passes its own profile explicitly.
+     */
+    public static String systemPrompt() {
+        return systemPrompt(PlatformProfiles.PAPER_MODERN);
     }
 
     /** Prompt for a brand-new mod. Always answered with the full project shape. */

@@ -12,14 +12,15 @@ import java.util.function.IntSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.bukkit.Bukkit;
-import org.bukkit.plugin.Plugin;
+import java.util.logging.Logger;
 
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.llm.OpenRouterClient;
+import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PromptLibrary;
-import com.gijsm.vibemod.runtime.ModRegistry;
+import com.gijsm.vibemod.platform.TickScheduler;
+import com.gijsm.vibemod.runtime.ModLifecycle;
 import com.gijsm.vibemod.store.ModStore;
 
 /**
@@ -31,8 +32,14 @@ import com.gijsm.vibemod.store.ModStore;
  * rounds may answer with surgical search/replace {@code edits} instead of full
  * files; blocks that fail to apply cleanly trigger a full-project retry. On
  * success the sources are persisted to the {@link ModStore} and the compiled
- * classes are hot-loaded on the main thread via the {@link ModRegistry},
+ * classes are hot-loaded on the main thread via the {@link ModLifecycle},
  * carrying the mod's config schema and current values.
+ *
+ * <p>v2 change (ARCHITECTURE-V2 §1.1, §6.1): no Bukkit. Thread hops go through
+ * a {@link TickScheduler}, and the {@link PlatformProfile} the host resolved at
+ * boot is threaded into every system prompt this generator sends, so the same
+ * engine generates 1.21.8-era and 1.20.6-era code without knowing how they
+ * differ.
  */
 public final class ModGenerator {
 
@@ -75,11 +82,14 @@ public final class ModGenerator {
 
     private static final Pattern PACKAGE_DECL = Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
 
-    private final Plugin plugin;
+    private static final Logger LOG = Logger.getLogger(ModGenerator.class.getName());
+
+    private final TickScheduler scheduler;
+    private final PlatformProfile profile;
     private final OpenRouterClient client;
     private final InMemoryCompiler compiler;
     private final ModStore store;
-    private final ModRegistry registry;
+    private final ModLifecycle lifecycle;
     private final IntSupplier maxRetries;
     private final java.util.function.BooleanSupplier streamingEnabled;
     private final ExecutorService executor;
@@ -89,8 +99,9 @@ public final class ModGenerator {
             new java.util.concurrent.atomic.AtomicInteger();
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
-    public ModGenerator(Plugin plugin, OpenRouterClient client, InMemoryCompiler compiler,
-                        ModStore store, ModRegistry registry, IntSupplier maxRetries,
+    public ModGenerator(TickScheduler scheduler, PlatformProfile profile, OpenRouterClient client,
+                        InMemoryCompiler compiler, ModStore store, ModLifecycle lifecycle,
+                        IntSupplier maxRetries,
                         java.util.function.BooleanSupplier streamingEnabled, int concurrency) {
         this.poolSize = Math.max(1, concurrency);
         this.executor = Executors.newFixedThreadPool(this.poolSize, r -> {
@@ -98,13 +109,53 @@ public final class ModGenerator {
             t.setDaemon(true);
             return t;
         });
-        this.plugin = plugin;
+        this.scheduler = scheduler;
+        this.profile = profile;
         this.client = client;
         this.compiler = compiler;
         this.store = store;
-        this.registry = registry;
+        this.lifecycle = lifecycle;
         this.maxRetries = maxRetries;
         this.streamingEnabled = streamingEnabled;
+    }
+
+    /**
+     * Bridges a generation's progress stream into a {@link com.gijsm.vibemod.ui.Progress}
+     * bar. Lives here rather than in a host because every host needs exactly
+     * this bridge and there is nothing platform-specific about it.
+     */
+    public static ProgressListener listenerFor(com.gijsm.vibemod.ui.Progress progress) {
+        return new ProgressListener() {
+            @Override
+            public void phase(String label) {
+                progress.phase(label);
+            }
+
+            @Override
+            public void detail(String line) {
+                progress.detail(line);
+            }
+
+            @Override
+            public void planReady(String name, List<String> files) {
+                progress.planReady(name, files);
+            }
+
+            @Override
+            public void fileStarted(String path, int index, int total) {
+                progress.fileStarted(path, index, total);
+            }
+
+            @Override
+            public void streamStats(int chars, int approxTokens) {
+                progress.streamStats(chars, approxTokens);
+            }
+
+            @Override
+            public void queued(int position, int running) {
+                progress.queued(position, running);
+            }
+        };
     }
 
     /** Create a brand-new mod from a prompt. */
@@ -185,14 +236,14 @@ public final class ModGenerator {
             try {
                 Result result = body.call();
                 if (result.success()) {
-                    plugin.getLogger().info("Generated " + result.modName() + " v" + result.version()
+                    LOG.info("Generated " + result.modName() + " v" + result.version()
                             + (result.retries() > 0 ? " after " + result.retries() + " repair round(s)" : ""));
                 } else {
-                    plugin.getLogger().warning("Generation failed: " + result.message());
+                    LOG.warning("Generation failed: " + result.message());
                 }
                 out.complete(result);
             } catch (Throwable t) {
-                plugin.getLogger().warning("Generation failed: " + t);
+                LOG.warning("Generation failed: " + t);
                 out.complete(new Result(false, null, 0, 0, brief(t), 0.0));
             } finally {
                 unfinished.decrementAndGet();
@@ -224,9 +275,9 @@ public final class ModGenerator {
             String response;
             try {
                 OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
-                        ? client.completeStreaming(PromptLibrary.systemPrompt(), messages,
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(profile), messages,
                                 new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
-                        : client.complete(PromptLibrary.systemPrompt(), messages)
+                        : client.complete(PromptLibrary.systemPrompt(profile), messages)
                                 .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();
@@ -237,7 +288,7 @@ public final class ModGenerator {
                     costUsd += costAware.costUsd(); // the call was still billed even though it failed
                 }
                 String reason = brief(cause);
-                plugin.getLogger().warning("LLM round failed (" + reason + "), retrying");
+                LOG.warning("LLM round failed (" + reason + "), retrying");
                 if (attempt++ >= budget) {
                     return new Result(false, forcedName, 0, attempt - 1,
                             "The model's response failed " + attempt + " time(s): " + reason, costUsd);
@@ -257,7 +308,7 @@ public final class ModGenerator {
                 GeneratedProject parsed = PromptLibrary.parse(response);
                 project = parsed.isEditResponse() ? applyEdits(current, parsed) : merge(current, parsed);
             } catch (IllegalArgumentException bad) {
-                plugin.getLogger().warning("Unusable model response: " + bad.getMessage());
+                LOG.warning("Unusable model response: " + bad.getMessage());
                 if (attempt++ >= budget) {
                     return new Result(false, forcedName, 0, attempt - 1,
                             "Model returned an unusable project: " + bad.getMessage(), costUsd);
@@ -274,7 +325,7 @@ public final class ModGenerator {
             Map<String, String> sources = toFqcnSources(project);
             CompileResult compiled = compiler.compile(sources);
             if (!compiled.success()) {
-                plugin.getLogger().warning("Mod compile round failed:\n" + compiled.diagnostics());
+                LOG.warning("Mod compile round failed:\n" + compiled.diagnostics());
                 if (attempt++ >= budget) {
                     return new Result(false, name, 0, attempt - 1,
                             "Compile failed after " + attempt + " attempt(s):\n" + compiled.diagnostics(), costUsd);
@@ -297,7 +348,7 @@ public final class ModGenerator {
 
             l.phase("Loading");
             try {
-                onMainThread(() -> registry.load(saved.name(), saved.currentVersion(),
+                onMainThread(() -> lifecycle.load(saved.name(), saved.currentVersion(),
                         saved.description(), mainFqcn, compiled.classes(),
                         saved.config(), store.resolvedConfigValues(saved.name()), saved.debugEcho()));
                 return new Result(true, saved.name(), saved.currentVersion(), attempt,
@@ -346,7 +397,7 @@ public final class ModGenerator {
                     + content.substring(first + edit.find().length()));
             applied++;
         }
-        plugin.getLogger().info("Applied " + applied + " edit block(s) from an edit-shaped response");
+        LOG.info("Applied " + applied + " edit block(s) from an edit-shaped response");
         List<GeneratedProject.GeneratedFile> files = byPath.entrySet().stream()
                 .map(e -> new GeneratedProject.GeneratedFile(e.getKey(), e.getValue()))
                 .toList();
@@ -413,12 +464,12 @@ public final class ModGenerator {
 
     /** Run a throwing action on the main server thread and wait for it here. */
     private void onMainThread(ThrowingRunnable action) throws Exception {
-        if (Bukkit.isPrimaryThread()) {
+        if (scheduler.onMain()) {
             action.run();
             return;
         }
         CompletableFuture<Void> done = new CompletableFuture<>();
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        scheduler.runOnMain(() -> {
             try {
                 action.run();
                 done.complete(null);

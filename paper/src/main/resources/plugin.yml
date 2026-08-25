@@ -1,7 +1,10 @@
 name: VibeMod
 version: 1.0.0
 main: com.gijsm.vibemod.VibeMod
-api-version: '1.21'
+# The floor is Paper 1.20.6 (ARCHITECTURE-V2 §0#5, §6.3). Everything newer than
+# that which VibeMod touches is capability-gated at runtime, never assumed —
+# the native dialog UI included, which is why 1.20.6 falls back to chat.
+api-version: '1.20'
 author: gijsm
 description: "Vibe-code gameplay mods from in-game prompts"
 

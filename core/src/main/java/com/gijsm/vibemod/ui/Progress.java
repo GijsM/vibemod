@@ -1,21 +1,20 @@
 package com.gijsm.vibemod.ui;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
+import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.bossbar.BossBar;
+import net.kyori.adventure.key.Key;
+import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 
-import org.bukkit.Bukkit;
-import org.bukkit.Location;
-import org.bukkit.Particle;
-import org.bukkit.Sound;
-import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
-import org.bukkit.scheduler.BukkitTask;
+import com.gijsm.vibemod.platform.Messenger;
+import com.gijsm.vibemod.platform.TaskHandle;
+import com.gijsm.vibemod.platform.TickScheduler;
 
 /**
  * Visual + chat feedback for one in-flight generation, with vibe-coding
@@ -34,6 +33,11 @@ import org.bukkit.scheduler.BukkitTask;
  * <p>{@code streamStats} is volatile-write only (called from HTTP threads at
  * up to ~4/s); the animator task — main thread, every 6 ticks — is the single
  * renderer for the bar. Chat receives only milestones.
+ *
+ * <p>v2 change (ARCHITECTURE-V2 §1.1): the boss bar and the finale sound are
+ * pure Adventure, so they work on every platform; the one genuinely
+ * platform-specific flourish — the firework particles at the player — went
+ * behind {@link Messenger#celebrate}, which loaders may no-op.
  */
 public final class Progress {
 
@@ -42,6 +46,11 @@ public final class Progress {
     private static final long MAX_ANIMATION_TICKS = 20 * 60 * 10; // 10 minutes
     private static final int TICKER_WINDOW = 32;
     private static final String TICKER_LOOP_GAP = "  ·  ";
+
+    private static final Sound SUCCESS_SOUND = Sound.sound(
+            Key.key("minecraft", "ui.toast.challenge_complete"), Sound.Source.MASTER, 1f, 1f);
+    private static final Sound FAILURE_SOUND = Sound.sound(
+            Key.key("minecraft", "entity.villager.no"), Sound.Source.MASTER, 1f, 1f);
 
     /** Claude-ish warm shimmer for the label text. */
     private static final List<TextColor> SHIMMER = List.of(
@@ -72,12 +81,14 @@ public final class Progress {
     private static final List<String> LOADING = List.of(
             "Breathing life into it", "Hatching", "Plugging it in", "Waking it up");
 
-    private final Plugin plugin;
-    private final CommandSender viewer;
+    private final TickScheduler scheduler;
+    private final Messenger messenger;
+    private final Audience viewer;
     private final String title;
-    private final Player player;
+    /** The viewer's player id, or null when the viewer is the console (no boss bar, no sound). */
+    private final UUID playerId;
     private BossBar bossBar;
-    private BukkitTask animator;
+    private TaskHandle animator;
     private long frame = 0;
     private int verbOffset = 0;
     private List<String> verbs = THINKING;
@@ -98,11 +109,13 @@ public final class Progress {
     private volatile int streamChars = 0;
     private volatile int approxTokens = 0;
 
-    public Progress(Plugin plugin, CommandSender viewer, String title) {
-        this.plugin = plugin;
+    /** {@code playerId} null = a console/RCON viewer: chat milestones only, no boss bar. */
+    public Progress(TickScheduler scheduler, Messenger messenger, Audience viewer, UUID playerId, String title) {
+        this.scheduler = scheduler;
+        this.messenger = messenger;
         this.viewer = viewer;
+        this.playerId = playerId;
         this.title = title;
-        this.player = (viewer instanceof Player p) ? p : null;
     }
 
     /**
@@ -117,7 +130,7 @@ public final class Progress {
             }
             queuedNotice = true;
             planName = "in queue (#" + position + ")";
-            if (player != null) {
+            if (playerId != null) {
                 ensureBossBar();
                 startAnimation();
             }
@@ -135,7 +148,7 @@ public final class Progress {
             verbs = verbPool(label);
             verbOffset = ThreadLocalRandom.current().nextInt(verbs.size());
             applySpan(label);
-            if (player != null) {
+            if (playerId != null) {
                 ensureBossBar();
                 startAnimation();
             }
@@ -166,7 +179,7 @@ public final class Progress {
     public void fileStarted(String path, int index, int total) {
         this.currentFile = path;
         this.filesStarted = total > 0 ? Math.min(index, total) : index;
-        if (player == null) {
+        if (playerId == null) {
             // Console narration: one bounded line per file, no char ticks.
             runOnMain(() -> chat(Style.info("→ [" + index + (total > 0 ? "/" + total : "") + "] " + path)));
         }
@@ -183,22 +196,21 @@ public final class Progress {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
-            if (player != null) {
+            if (playerId != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
                 BossBar.Color[] flash = {BossBar.Color.PINK, BossBar.Color.YELLOW, BossBar.Color.GREEN};
                 for (int i = 0; i < flash.length; i++) {
                     BossBar.Color c = flash[i];
                     boolean last = i == flash.length - 1;
-                    Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    scheduler.later(i * 3L, () -> {
                         bossBar.color(c);
                         bossBar.name(Component.text("✔ " + message,
                                 last ? NamedTextColor.GREEN : NamedTextColor.YELLOW));
-                    }, i * 3L);
+                    });
                 }
-                player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1f, 1f);
-                Location loc = player.getLocation();
-                player.getWorld().spawnParticle(Particle.FIREWORK, loc, 30, 0.5, 0.5, 0.5);
+                viewer.playSound(SUCCESS_SOUND);
+                messenger.celebrate(playerId);
                 hideAfter(70);
             }
             chat(Style.ok(message));
@@ -210,12 +222,12 @@ public final class Progress {
         runOnMain(() -> {
             finished = true;
             stopAnimation();
-            if (player != null) {
+            if (playerId != null) {
                 ensureBossBar();
                 bossBar.progress(1f);
                 bossBar.color(BossBar.Color.RED);
                 bossBar.name(Component.text(message, NamedTextColor.RED));
-                player.playSound(player.getLocation(), Sound.ENTITY_VILLAGER_NO, 1f, 1f);
+                viewer.playSound(FAILURE_SOUND);
                 hideAfter(100);
             }
             chat(Style.err(message));
@@ -278,7 +290,7 @@ public final class Progress {
         if (animator != null) {
             return;
         }
-        animator = Bukkit.getScheduler().runTaskTimer(plugin, this::animate, 0, ANIMATION_PERIOD_TICKS);
+        animator = scheduler.repeat(0, ANIMATION_PERIOD_TICKS, this::animate);
     }
 
     private void animate() {
@@ -292,7 +304,7 @@ public final class Progress {
             hideNow();
             return;
         }
-        if (player != null && !player.isOnline()) {
+        if (playerId != null && !messenger.online(playerId)) {
             stopAnimation();
             hideNow();
             return;
@@ -386,18 +398,18 @@ public final class Progress {
         if (bossBar == null) {
             bossBar = BossBar.bossBar(Component.text(title), phaseFloor,
                     BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
-            player.showBossBar(bossBar);
+            viewer.showBossBar(bossBar);
         }
     }
 
     private void hideNow() {
-        if (bossBar != null && player != null) {
-            player.hideBossBar(bossBar);
+        if (bossBar != null) {
+            viewer.hideBossBar(bossBar);
         }
     }
 
     private void hideAfter(long ticks) {
-        Bukkit.getScheduler().runTaskLater(plugin, this::hideNow, ticks);
+        scheduler.later(ticks, this::hideNow);
     }
 
     private void chat(Component line) {
@@ -405,10 +417,6 @@ public final class Progress {
     }
 
     private void runOnMain(Runnable r) {
-        if (Bukkit.isPrimaryThread()) {
-            r.run();
-        } else {
-            Bukkit.getScheduler().runTask(plugin, r);
-        }
+        scheduler.runOnMain(r);
     }
 }

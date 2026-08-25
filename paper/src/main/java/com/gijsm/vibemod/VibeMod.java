@@ -7,11 +7,20 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.logging.Level;
 
-import org.bukkit.Bukkit;
+import net.kyori.adventure.audience.Audience;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import com.gijsm.vibemod.command.VibeCommand;
@@ -20,35 +29,75 @@ import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.gen.ModGenerator;
 import com.gijsm.vibemod.llm.ModelCatalog;
 import com.gijsm.vibemod.llm.OpenRouterClient;
+import com.gijsm.vibemod.llm.PlatformProfile;
+import com.gijsm.vibemod.llm.PlatformProfiles;
+import com.gijsm.vibemod.paper.PaperChatBridge;
+import com.gijsm.vibemod.paper.PaperChatMode;
+import com.gijsm.vibemod.paper.PaperClasspathProvider;
+import com.gijsm.vibemod.paper.PaperCommandBridge;
+import com.gijsm.vibemod.paper.PaperEventBridge;
+import com.gijsm.vibemod.paper.PaperMessenger;
+import com.gijsm.vibemod.paper.PaperModHost;
+import com.gijsm.vibemod.paper.PaperPlatformInfo;
+import com.gijsm.vibemod.paper.PaperTickScheduler;
+import com.gijsm.vibemod.platform.CompilerProvider;
+import com.gijsm.vibemod.platform.ModFailure;
+import com.gijsm.vibemod.platform.ui.UiRenderer;
 import com.gijsm.vibemod.runtime.DebugEcho;
-import com.gijsm.vibemod.runtime.DynamicCommands;
+import com.gijsm.vibemod.runtime.ModDispatch;
 import com.gijsm.vibemod.runtime.ModErrors;
-import com.gijsm.vibemod.runtime.ModRegistry;
+import com.gijsm.vibemod.runtime.ModLifecycle;
+import com.gijsm.vibemod.runtime.ModLoadException;
 import com.gijsm.vibemod.runtime.Watchdog;
 import com.gijsm.vibemod.store.JarExporter;
 import com.gijsm.vibemod.store.ModConfigs;
 import com.gijsm.vibemod.store.ModStore;
-import com.gijsm.vibemod.ui.ChatMode;
-import com.gijsm.vibemod.ui.Dialogs;
 import com.gijsm.vibemod.ui.InstallCard;
-import com.gijsm.vibemod.ui.ModHubDialog;
 import com.gijsm.vibemod.ui.Progress;
-import com.gijsm.vibemod.ui.SettingsDialog;
 import com.gijsm.vibemod.ui.Style;
-
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
+import com.gijsm.vibemod.ui.chat.ChatRenderer;
+import com.gijsm.vibemod.ui.screens.FormScreens;
+import com.gijsm.vibemod.ui.screens.HubScreens;
+import com.gijsm.vibemod.ui.screens.InfoScreens;
+import com.gijsm.vibemod.ui.screens.SettingsScreens;
 
 /**
  * VibeMod: vibe-code gameplay mods from in-game prompts. One plugin that asks
  * an LLM for Java, compiles it in-process, and hot-loads the result as a mod —
  * no restarts, no external services. Mods that error are marked degraded with
- * a one-click [fix]; native dialogs replace book items for all typing and
- * virtual books for all reading (console keeps plain chat dumps).
+ * a one-click [fix].
+ *
+ * <p>v2 makes this class the Paper <em>bootstrap</em> and nothing else
+ * (ARCHITECTURE-V2 §1.1): it probes what the server can do, builds the SPI
+ * implementations, hands them to the platform-free engine in {@code core}, and
+ * picks a renderer. Every line of behaviour it used to own moved somewhere
+ * reusable.
+ *
+ * <p>Two things here are load-bearing and easy to break:
+ * <ul>
+ *   <li><b>The dialog renderer is loaded reflectively.</b> VibeMod compiles
+ *       against 1.21.8 paper-api and ships a renderer referencing
+ *       {@code io.papermc.paper.dialog}. On a 1.20.6 server those classes do not
+ *       exist, so the JVM must never be asked to link that renderer — a plain
+ *       {@code new} in a dead branch is not a guarantee, a {@code Class.forName}
+ *       behind a capability probe is.</li>
+ *   <li><b>The floor is 1.20.6.</b> Anything newer that this class or its
+ *       collaborators touch is capability-gated through
+ *       {@link PaperPlatformInfo}, never version-compared.</li>
+ * </ul>
  */
 public final class VibeMod extends JavaPlugin {
 
-    private ModRegistry registry;
+    /** FQCN of the dialog renderer, loaded only when {@code hasDialogs()} says the server has the API. */
+    private static final String DIALOG_RENDERER_CLASS = "com.gijsm.vibemod.ui.PaperDialogRenderer";
+
+    private PaperPlatformInfo platform;
+    private PaperTickScheduler scheduler;
+    private PaperMessenger messenger;
+    private PaperChatBridge chatBridge;
+    private PaperCommandBridge commandBridge;
+    private PaperChatMode chatMode;
+    private ModLifecycle lifecycle;
     private ModStore store;
     private ModConfigs configs;
     private ModErrors modErrors;
@@ -58,26 +107,42 @@ public final class VibeMod extends JavaPlugin {
     private ModelCatalog catalog;
     private InMemoryCompiler compiler;
     private Watchdog watchdog;
-    private DynamicCommands dynamicCommands;
-    private Dialogs dialogs;
-    private SettingsDialog settingsDialog;
+    private PlatformProfile profile;
+    private UiRenderer ui;
+    /** Non-null only when the chat renderer is the active UI: it owns the {@code /vibe ui} route. */
+    private ChatRenderer chatRenderer;
+    private FormScreens forms;
+    private HubScreens hub;
+    private InfoScreens info;
+    private SettingsScreens settingsScreens;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
 
-        if (!InMemoryCompiler.available()) {
-            getLogger().severe("No system Java compiler: start the server with a full JDK "
+        platform = new PaperPlatformInfo();
+        profile = PlatformProfiles.forPlatform(platform);
+        getLogger().info("Platform: " + platform.describe() + " → prompt profile " + profile.displayName());
+
+        scheduler = new PaperTickScheduler(this);
+        messenger = new PaperMessenger(this);
+
+        Optional<CompilerProvider> compilerProvider = CompilerProvider.resolve();
+        if (compilerProvider.isEmpty()) {
+            getLogger().severe("No Java compiler available: start the server with a full JDK "
                     + "(not a JRE) or VibeMod cannot compile mods.");
+        } else {
+            getLogger().info("Compiler backend: " + compilerProvider.get().name()
+                    + " (max --release " + compilerProvider.get().maxSupportedRelease() + ")");
         }
+        compiler = new InMemoryCompiler(compilerProvider.orElse(null), new PaperClasspathProvider());
+
         String apiKey = resolveApiKey();
         if (apiKey == null) {
             getLogger().warning("No OpenRouter API key found (config openrouter.api-key, "
                     + "$OPENROUTER_API_KEY, or ~/.config/vibemod/openrouter.key). "
                     + "/vibe make will fail until one is set.");
         }
-
-        compiler = new InMemoryCompiler(serverLibraryJars());
         client = new OpenRouterClient(apiKey == null ? "" : apiKey,
                 getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"),
                 Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
@@ -86,59 +151,77 @@ public final class VibeMod extends JavaPlugin {
         catalog = new ModelCatalog();
         catalog.refreshAsync();
 
-        watchdog = new Watchdog(this, watchdogSingleMs(), perSecondBudgetMs());
-        dynamicCommands = new DynamicCommands(this, getConfig().getBoolean("commands.allow-top-level", true));
+        watchdog = new Watchdog(scheduler, "main", watchdogSingleMs(), perSecondBudgetMs());
         store = new ModStore(getDataFolder().toPath().resolve("mods"));
         configs = new ModConfigs(store);
-        modErrors = new ModErrors(this, getDataFolder().toPath().resolve("mods"));
+        modErrors = new ModErrors(scheduler, getDataFolder().toPath().resolve("mods"));
         applyErrorLimits();
-        debugEcho = new DebugEcho(this);
+        debugEcho = new DebugEcho(messenger, scheduler);
         debugEcho.setDefault(getConfig().getBoolean("debug.default-echo", false));
         // Every explicit toggle/set writes through to meta.json, so overrides survive restarts.
         debugEcho.onChange((mod, on) -> store.setDebugEcho(mod, on));
-        registry = new ModRegistry(this, dynamicCommands, watchdog, configs, modErrors, debugEcho);
 
-        // Supersede the registry defaults so the store flag follows disables.
+        // The bridges dispatch into mod code and must report failures to the lifecycle,
+        // which does not exist yet (it needs the bridges, via the host). Reading the
+        // field at call time breaks the cycle without a mutable setter.
+        ModFailure failureSink = (mod, cause, where) -> {
+            if (lifecycle != null) {
+                lifecycle.markFailure(mod, cause, where);
+            }
+        };
+        ModDispatch dispatch = new ModDispatch(watchdog, failureSink);
+        commandBridge = new PaperCommandBridge(this, platform, dispatch,
+                getConfig().getBoolean("commands.allow-top-level", true));
+        PaperEventBridge eventBridge = new PaperEventBridge(this, dispatch);
+        PaperModHost modHost = new PaperModHost(this, eventBridge, commandBridge, configs, dispatch, scheduler);
+        lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
+
+        // Supersede the lifecycle defaults so the store flag follows disables.
         watchdog.onTrip(modName -> {
-            registry.disable(modName);
+            lifecycle.disable(modName);
             store.setEnabled(modName, false);
             modErrors.note(modName, "WatchdogTrip", "exceeded time budget", "watchdog");
-            getServer().broadcast(Style.warn(modName + " was auto-disabled by the watchdog (too slow)"));
+            messenger.broadcast(Style.warn(modName + " was auto-disabled by the watchdog (too slow)"));
             getLogger().warning(modName + " was auto-disabled by the watchdog (too slow)");
         });
         modErrors.onStorm(modName -> {
-            registry.disable(modName);
+            lifecycle.disable(modName);
             store.setEnabled(modName, false);
-            getServer().broadcast(Style.warn(modName + " was auto-disabled after an error storm")
+            messenger.broadcast(Style.warn(modName + " was auto-disabled after an error storm")
                     .append(Component.text("  "))
-                    .append(Style.button("fix", "/vibe fix " + modName, "Send the errors to the model", NamedTextColor.GOLD)));
+                    .append(Style.button("fix", "/vibe fix " + modName,
+                            "Send the errors to the model", NamedTextColor.GOLD)));
             getLogger().warning(modName + " was auto-disabled after an error storm");
         });
 
-        generator = new ModGenerator(this, client, compiler, store, registry,
+        chatBridge = new PaperChatBridge(this, scheduler);
+        chatMode = new PaperChatMode(chatBridge, this::generateFromPrompt);
+        ui = chooseRenderer();
+
+        forms = new FormScreens(messenger, ui);
+        hub = new HubScreens(lifecycle, store, modErrors, debugEcho);
+        info = new InfoScreens(ui);
+        settingsScreens = new SettingsScreens(messenger, ui, this::settingsSnapshot, this::applySettings,
+                this::openSettingsModelPicker, this::reloadVibeConfig);
+
+        generator = new ModGenerator(scheduler, profile, client, compiler, store, lifecycle,
                 () -> getConfig().getInt("generation.max-retries", 3),
                 () -> getConfig().getBoolean("openrouter.streaming", true),
                 getConfig().getInt("generation.concurrency", 4));
-        JarExporter exporter = new JarExporter(compiler);
-
-        ChatMode chatMode = new ChatMode(this, this::generateFromPrompt);
-        dialogs = new Dialogs(this,
-                this::generateFromPrompt,
-                (player, mod, changes) -> editFromPrompt(player, mod, changes),
-                this::applyConfigValues);
-        settingsDialog = new SettingsDialog(this, this::settingsSnapshot, this::applySettings,
-                this::openSettingsModelPicker, this::reloadVibeConfig);
-        ModHubDialog hub = new ModHubDialog(this, registry, store, modErrors, debugEcho);
+        JarExporter exporter = new JarExporter(compiler, profile);
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
-            VibeCommand handler = new VibeCommand(this, generator, registry, store, configs,
-                    modErrors, debugEcho, catalog, exporter, chatMode, dialogs, settingsDialog, hub,
+            VibeCommand handler = new VibeCommand(this, scheduler, messenger, platform, generator, lifecycle,
+                    store, configs, modErrors, debugEcho, catalog, exporter, chatMode, ui, chatRenderer,
+                    forms, hub, info, settingsScreens,
                     client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
                     this::reloadVibeConfig);
             vibe.setExecutor(handler);
             vibe.setTabCompleter(handler);
         }
+
+        getServer().getPluginManager().registerEvents(new QuitCleanup(), this);
 
         restoreModsFromDisk();
         getLogger().info("VibeMod ready — /vibe make \"something wonderful\"");
@@ -149,11 +232,53 @@ public final class VibeMod extends JavaPlugin {
         if (generator != null) {
             generator.shutdown();
         }
-        if (registry != null) {
-            registry.panic();
+        if (lifecycle != null) {
+            lifecycle.panic();
         }
         if (modErrors != null) {
             modErrors.flush();
+        }
+    }
+
+    /**
+     * Dialogs where the server has them, chat everywhere else.
+     *
+     * <p>{@code ui.force-chat} forces the chat renderer on a server that could
+     * do dialogs — QA needs to exercise the fallback on the machine it has, not
+     * only on a 1.20.6 box. The capability probe itself stays honest: it answers
+     * what the server can do, not what we chose.
+     */
+    private UiRenderer chooseRenderer() {
+        boolean forceChat = getConfig().getBoolean("ui.force-chat", false);
+        if (platform.hasDialogs() && !forceChat) {
+            UiRenderer dialogs = loadDialogRenderer();
+            if (dialogs != null) {
+                getLogger().info("UI: native dialogs");
+                return dialogs;
+            }
+            getLogger().warning("UI: dialog API probe passed but the renderer would not load; using chat");
+        } else {
+            getLogger().info("UI: chat" + (forceChat ? " (forced by ui.force-chat)"
+                    : " (this server has no dialog API)"));
+        }
+        chatRenderer = new ChatRenderer(messenger, chatBridge, scheduler);
+        return chatRenderer;
+    }
+
+    /**
+     * Reflection, not {@code new}: the dialog renderer names classes a 1.20.6
+     * server does not have, and resolving them must be impossible unless the
+     * probe already said yes.
+     */
+    private UiRenderer loadDialogRenderer() {
+        try {
+            Class<?> cls = Class.forName(DIALOG_RENDERER_CLASS, true, getClass().getClassLoader());
+            return (UiRenderer) cls
+                    .getConstructor(org.bukkit.plugin.Plugin.class, com.gijsm.vibemod.platform.PlatformInfo.class)
+                    .newInstance(this, platform);
+        } catch (ReflectiveOperationException | LinkageError e) {
+            getLogger().log(Level.WARNING, "Could not load the dialog renderer", e);
+            return null;
         }
     }
 
@@ -169,14 +294,16 @@ public final class VibeMod extends JavaPlugin {
 
     /**
      * Pushes every reloadable config value into the live components. Shared by
-     * {@link #reloadVibeConfig} and the settings-dialog save path so the two can
+     * {@link #reloadVibeConfig} and the settings-screen save path so the two can
      * never drift; generation retries/streaming need no push (the generator reads
      * them through live suppliers) and concurrency is deliberately absent (the
-     * pool is sized at construction - a reload/restart applies it).
+     * pool is sized at construction - a reload/restart applies it). {@code
+     * ui.force-chat} is also absent: swapping renderers under live screens would
+     * strand every open callback, so it applies on the next boot.
      */
     private void applyLiveConfig() {
         watchdog.setBudgets(watchdogSingleMs(), perSecondBudgetMs());
-        dynamicCommands.setAllowTopLevel(getConfig().getBoolean("commands.allow-top-level", true));
+        commandBridge.setAllowTopLevel(getConfig().getBoolean("commands.allow-top-level", true));
         client.setModel(getConfig().getString("openrouter.model", "anthropic/claude-sonnet-5"));
         client.setTimeout(Duration.ofSeconds(getConfig().getLong("openrouter.timeout-seconds", 120)));
         client.setMaxTokens(getConfig().getInt("openrouter.max-tokens", 0));
@@ -201,11 +328,6 @@ public final class VibeMod extends JavaPlugin {
         return getConfig().getLong("watchdog.per-second-budget-ms", 500);
     }
 
-    /** {@link #applyStoredVersion(CommandSender, String, Runnable)} with no completion hook. */
-    private void applyStoredVersion(CommandSender feedback, String modName) {
-        applyStoredVersion(feedback, modName, null);
-    }
-
     /**
      * Recompile a mod's current stored version and hot-load it. Used by
      * rollback/enable/reload/boot. {@code onLive} (nullable) runs on the main
@@ -219,16 +341,16 @@ public final class VibeMod extends JavaPlugin {
             return;
         }
         Map<String, String> sources = store.sources(mod.name(), mod.currentVersion());
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+        scheduler.async(() -> {
             CompileResult compiled = compiler.compile(sources);
-            Bukkit.getScheduler().runTask(this, () -> {
+            scheduler.runOnMain(() -> {
                 if (!compiled.success()) {
                     feedback.sendMessage(Style.err("Stored version failed to compile: "
                             + firstLine(compiled.diagnostics())));
                     return;
                 }
                 try {
-                    registry.load(mod.name(), mod.currentVersion(), mod.description(),
+                    lifecycle.load(mod.name(), mod.currentVersion(), mod.description(),
                             mod.mainClass(), compiled.classes(),
                             mod.config(), store.resolvedConfigValues(mod.name()), mod.debugEcho());
                     store.setEnabled(mod.name(), true);
@@ -236,7 +358,7 @@ public final class VibeMod extends JavaPlugin {
                     if (onLive != null) {
                         onLive.run();
                     }
-                } catch (ModRegistry.ModLoadException e) {
+                } catch (ModLoadException e) {
                     feedback.sendMessage(Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
                 }
             });
@@ -248,48 +370,26 @@ public final class VibeMod extends JavaPlugin {
         for (ModStore.StoredMod mod : store.all()) {
             if (mod.enabled()) {
                 getLogger().info("Restoring mod " + mod.name() + " v" + mod.currentVersion());
-                applyStoredVersion(Bukkit.getConsoleSender(), mod.name());
+                applyStoredVersion(getServer().getConsoleSender(), mod.name(), null);
             }
         }
     }
 
-    // ---- generation entry points shared by chat mode and dialogs ----
+    // ---- generation entry points shared by chat mode and the screens ----
 
-    private void generateFromPrompt(Player player, String prompt) {
-        Progress progress = new Progress(this, player, "vibe: " + shorten(prompt));
-        generator.make(prompt, player.getName(), listenerFor(progress))
-                .thenAccept(result -> finish(player, progress, result));
+    private void generateFromPrompt(UUID playerId, String prompt) {
+        Progress progress = progressFor(playerId, "vibe: " + shorten(prompt));
+        generator.make(prompt, nameOf(playerId), ModGenerator.listenerFor(progress))
+                .thenAccept(result -> finish(playerId, progress, result));
     }
 
-    private void editFromPrompt(Player player, String modName, String changes) {
-        Progress progress = new Progress(this, player, "vibe: edit " + modName);
-        generator.edit(modName, changes, player.getName(), listenerFor(progress))
-                .thenAccept(result -> finish(player, progress, result));
+    private Progress progressFor(UUID playerId, String title) {
+        return new Progress(scheduler, messenger, messenger.player(playerId), playerId, title);
     }
 
-    // ---- dialog/config plumbing ----
-
-    /**
-     * Config-dialog submission: apply every value, returning per-key errors. An
-     * unloaded mod has no live config cache, so its values go straight to the disk
-     * store (same validation - {@code ModStore.validateKnobValue} backs both paths)
-     * and apply when the mod is next enabled.
-     */
-    private List<String> applyConfigValues(Player player, String modName, Map<String, String> values) {
-        List<String> errors = new ArrayList<>();
-        boolean unloaded = configs.schema(modName).isEmpty() && registry.get(modName) == null;
-        for (Map.Entry<String, String> e : values.entrySet()) {
-            try {
-                if (unloaded) {
-                    store.setConfigValue(modName, e.getKey(), e.getValue());
-                } else {
-                    configs.set(modName, e.getKey(), e.getValue());
-                }
-            } catch (IllegalArgumentException bad) {
-                errors.add(e.getKey() + ": " + bad.getMessage());
-            }
-        }
-        return errors;
+    private String nameOf(UUID playerId) {
+        Player player = getServer().getPlayer(playerId);
+        return player != null ? player.getName() : "unknown";
     }
 
     private void setModel(String model) {
@@ -316,17 +416,17 @@ public final class VibeMod extends JavaPlugin {
     }
 
     /** {@link #setModel} plus a chat confirmation naming the new model and its live price. */
-    private void setModelAndNotify(Player player, String model) {
+    private void setModelAndNotify(UUID playerId, String model) {
         setModel(model);
         String price = catalog.find(model).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown");
-        player.sendMessage(Style.ok("Model set to " + model + " (" + price + ")"));
+        messenger.player(playerId).sendMessage(Style.ok("Model set to " + model + " (" + price + ")"));
     }
 
-    // ---- settings dialog plumbing ----
+    // ---- settings plumbing ----
 
-    /** Current config values as the settings dialog's prefill snapshot. */
-    private SettingsDialog.Values settingsSnapshot() {
-        return new SettingsDialog.Values(
+    /** Current config values as the settings screen's prefill snapshot. */
+    private SettingsScreens.Values settingsSnapshot() {
+        return new SettingsScreens.Values(
                 client.model(),
                 catalog.find(client.model()).map(ModelCatalog.ModelInfo::priceLabel).orElse("price unknown"),
                 client.sessionCostUsd(),
@@ -343,12 +443,12 @@ public final class VibeMod extends JavaPlugin {
     }
 
     /**
-     * Settings-dialog save: persist every submitted value to config.yml, then push the
+     * Settings-screen save: persist every submitted value to config.yml, then push the
      * reloadable ones into the live components via {@link #applyLiveConfig} (concurrency
      * intentionally not live-applied - the generator pool is sized at construction, as
-     * the dialog's label says).
+     * the screen's label says).
      */
-    private void applySettings(Player player, SettingsDialog.Values v) {
+    private void applySettings(UUID playerId, SettingsScreens.Values v) {
         setReasoningEffort(v.effort());
         getConfig().set("openrouter.streaming", v.streaming());
         getConfig().set("openrouter.timeout-seconds", v.timeoutSeconds());
@@ -361,94 +461,40 @@ public final class VibeMod extends JavaPlugin {
         getConfig().set("debug.default-echo", v.debugEcho());
         saveConfig();
         applyLiveConfig();
-        player.sendMessage(Style.ok("Settings saved and applied (concurrency applies on next reload)."));
+        messenger.player(playerId).sendMessage(
+                Style.ok("Settings saved and applied (concurrency applies on next reload)."));
     }
 
     /**
-     * The settings dialog's [Model…] button: the same picker {@code /vibe model} opens,
-     * except its onPick also reopens the settings dialog (fresh snapshot) so the admin
+     * The settings screen's [Model…] button: the same picker {@code /vibe model} opens,
+     * except its onPick also reopens the settings screen (fresh snapshot) so the admin
      * lands back on the form they came from.
      */
-    private void openSettingsModelPicker(Player player) {
-        dialogs.openModelPicker(player, catalog.featured(client.model()), client.model(),
+    private void openSettingsModelPicker(UUID playerId) {
+        ui.show(playerId, forms.modelPicker(catalog.featured(client.model()), client.model(),
                 client.sessionCostUsd(), model -> {
-                    setModelAndNotify(player, model);
-                    settingsDialog.open(player);
-                });
+                    setModelAndNotify(playerId, model);
+                    ui.show(playerId, settingsScreens.settings());
+                }));
     }
 
-    /** Bridge a ModGenerator progress stream into a Progress UI. */
-    public static ModGenerator.ProgressListener listenerFor(Progress progress) {
-        return new ModGenerator.ProgressListener() {
-            @Override
-            public void phase(String label) {
-                progress.phase(label);
-            }
-
-            @Override
-            public void detail(String line) {
-                progress.detail(line);
-            }
-
-            @Override
-            public void planReady(String name, java.util.List<String> files) {
-                progress.planReady(name, files);
-            }
-
-            @Override
-            public void fileStarted(String path, int index, int total) {
-                progress.fileStarted(path, index, total);
-            }
-
-            @Override
-            public void streamStats(int chars, int approxTokens) {
-                progress.streamStats(chars, approxTokens);
-            }
-
-            @Override
-            public void queued(int position, int running) {
-                progress.queued(position, running);
-            }
-        };
-    }
-
-    /** Completion handling for chat/dialog generation: progress verdict + install card. */
-    private void finish(CommandSender viewer, Progress progress, ModGenerator.Result result) {
-        Bukkit.getScheduler().runTask(this, () -> {
+    /** Completion handling for chat/screen generation: progress verdict + install card. */
+    private void finish(UUID playerId, Progress progress, ModGenerator.Result result) {
+        scheduler.runOnMain(() -> {
+            Audience viewer = messenger.player(playerId);
             if (result.success()) {
                 String costSuffix = result.costUsd() <= 0 ? "" : " · " + Style.fmtCost(result.costUsd());
                 progress.succeed("✔ " + result.modName() + " v" + result.version() + " installed"
                         + (result.retries() > 0 ? " (self-healed ×" + result.retries() + ")" : "") + costSuffix);
                 ModStore.StoredMod mod = store.get(result.modName());
                 if (mod != null) {
-                    viewer.sendMessage(InstallCard.build(mod, registry.get(mod.name())));
+                    viewer.sendMessage(InstallCard.build(mod, lifecycle.get(mod.name())));
                 }
             } else {
                 String costNote = result.costUsd() > 0 ? " (spent " + Style.fmtCost(result.costUsd()) + ")" : "";
                 progress.fail("✘ " + firstLine(result.message()) + costNote);
             }
         });
-    }
-
-    /**
-     * Paper's bundler extracts the server + all its libraries (paper-api included)
-     * to disk; inside the running server {@code java.class.path} only holds the
-     * paperclip bootstrap, so hand every extracted jar to the compiler explicitly.
-     */
-    private static Path[] serverLibraryJars() {
-        List<Path> jars = new ArrayList<>();
-        for (String dir : new String[] {"libraries", "versions"}) {
-            Path root = Path.of(dir);
-            if (!Files.isDirectory(root)) {
-                continue;
-            }
-            try (var stream = Files.walk(root)) {
-                stream.filter(p -> p.toString().endsWith(".jar")).forEach(jars::add);
-            } catch (IOException ignored) {
-                // best effort - the compiler also tries code-source detection
-            }
-        }
-        return jars.toArray(Path[]::new);
     }
 
     private String resolveApiKey() {
@@ -482,5 +528,20 @@ public final class VibeMod extends JavaPlugin {
 
     private static String shorten(String s) {
         return s.length() <= 40 ? s : s.substring(0, 37) + "…";
+    }
+
+    /**
+     * Drops a leaving player's chat-renderer state. The chat bridge already ends
+     * their capture; this also frees the pending form values and click tokens,
+     * which would otherwise sit out their five-minute TTL.
+     */
+    private final class QuitCleanup implements Listener {
+
+        @EventHandler
+        public void onQuit(PlayerQuitEvent event) {
+            if (chatRenderer != null) {
+                chatRenderer.forget(event.getPlayer().getUniqueId());
+            }
+        }
     }
 }

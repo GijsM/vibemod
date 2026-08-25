@@ -18,4 +18,58 @@ public interface Registration extends AutoCloseable {
 
     /** Whether this registration is still active (i.e. not yet closed). */
     boolean active();
+
+    /**
+     * The canonical implementation: {@code revoke} runs at most once, on the
+     * first {@link #close()}, and anything it throws is swallowed (teardown is
+     * best-effort by contract).
+     */
+    static Registration of(Runnable revoke) {
+        return new Registration() {
+            private final java.util.concurrent.atomic.AtomicBoolean open =
+                    new java.util.concurrent.atomic.AtomicBoolean(true);
+
+            @Override
+            public void close() {
+                if (open.compareAndSet(true, false)) {
+                    try {
+                        revoke.run();
+                    } catch (Throwable ignored) {
+                        // teardown is best-effort; close() never throws
+                    }
+                }
+            }
+
+            @Override
+            public boolean active() {
+                return open.get();
+            }
+        };
+    }
+
+    /** A registration that never did anything — what an unavailable capability returns. */
+    static Registration inactive() {
+        return new Registration() {
+            @Override
+            public void close() {
+            }
+
+            @Override
+            public boolean active() {
+                return false;
+            }
+        };
+    }
+
+    /** Closes every registration in {@code list} and clears it. Never throws. */
+    static void closeAll(java.util.Collection<? extends Registration> list) {
+        for (Registration r : java.util.List.copyOf(list)) {
+            try {
+                r.close();
+            } catch (Throwable ignored) {
+                // best-effort
+            }
+        }
+        list.clear();
+    }
 }

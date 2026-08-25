@@ -21,6 +21,8 @@ import java.util.jar.Manifest;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.gen.GeneratedProject.ConfigKnob;
+import com.gijsm.vibemod.llm.PlatformProfile;
+import com.gijsm.vibemod.llm.PlatformProfiles;
 
 /**
  * Exports a stored mod as a standalone Paper plugin jar that can run on any
@@ -43,6 +45,15 @@ import com.gijsm.vibemod.gen.GeneratedProject.ConfigKnob;
  * Mod actions ({@code ctx.action}) work standalone through a generated umbrella
  * command {@code /<modname> <action> [args]}, the wrapper's stand-in for VibeMod's
  * {@code /vibe do <mod> <action>}.
+ *
+ * <p>v2 change (ARCHITECTURE-V2 §6.3): the descriptor comes from the host's
+ * {@link PlatformProfile}, so the {@code api-version} an exported plugin
+ * declares is data rather than a constant — and it is the 1.20 floor, which is
+ * what lets an export travel down to the oldest server VibeMod itself supports
+ * ({@code api-version} governs legacy data conversion, not which API exists,
+ * and declaring a floor above the running server makes Paper refuse the plugin).
+ * A profile with no Bukkit wrapper template (fabric, neoforge) refuses the
+ * export outright rather than emitting a plugin jar that could never load.
  */
 public final class JarExporter {
 
@@ -58,10 +69,30 @@ public final class JarExporter {
         "client/KeyLease", "client/ClientTickHandler", "client/ClientCommandHandler",
     };
 
-    private final InMemoryCompiler compiler;
+    /** Profiles whose {@code pluginDescriptor} is a Bukkit {@code api-version} and whose wrapper we can emit. */
+    private static final java.util.Set<String> PAPER_PROFILE_IDS =
+            java.util.Set.of(PlatformProfiles.PAPER_MODERN_ID, PlatformProfiles.PAPER_LEGACY_ID);
 
-    public JarExporter(InMemoryCompiler compiler) {
+    private final InMemoryCompiler compiler;
+    private final PlatformProfile profile;
+
+    public JarExporter(InMemoryCompiler compiler, PlatformProfile profile) {
         this.compiler = compiler;
+        this.profile = profile;
+    }
+
+    /** Convenience for the self-tests: the Paper 1.21.7+ profile. */
+    public JarExporter(InMemoryCompiler compiler) {
+        this(compiler, PlatformProfiles.PAPER_MODERN);
+    }
+
+    /**
+     * Whether {@code /vibe export} can produce a standalone jar on this
+     * platform at all. Callers surface the negative as a friendly message
+     * instead of a stack trace.
+     */
+    public boolean supported() {
+        return PAPER_PROFILE_IDS.contains(profile.id());
     }
 
     /**
@@ -71,6 +102,11 @@ public final class JarExporter {
      * source tree next to it as {@code <Name>-src/}. Returns the jar path.
      */
     public Path export(ModStore.StoredMod mod, Map<String, String> sources, Path outDir) throws Exception {
+        if (!supported()) {
+            throw new UnsupportedOperationException("Standalone jar export is not supported on "
+                    + profile.displayName() + " yet: exporting a loader mod means bundling loader "
+                    + "boilerplate (tracked for v1.1).");
+        }
         String name = mod.name();
         String packageName = "vibemod." + name.toLowerCase(java.util.Locale.ROOT);
         String wrapperSimpleName = name + "ExportPlugin";
@@ -99,7 +135,7 @@ public final class JarExporter {
 
         Files.createDirectories(outDir);
         Path jarPath = outDir.resolve(name + "-" + mod.currentVersion() + ".jar");
-        String pluginYml = buildPluginYml(name, mod, wrapperFqcn);
+        String pluginYml = buildPluginYml(name, mod, wrapperFqcn, profile.pluginDescriptor());
         String configYml = knobs.isEmpty() ? null : buildConfigYml(knobs, resolvedValues(mod));
 
         Manifest manifest = new Manifest();
@@ -133,12 +169,13 @@ public final class JarExporter {
         jos.closeEntry();
     }
 
-    private static String buildPluginYml(String name, ModStore.StoredMod mod, String wrapperFqcn) {
+    private static String buildPluginYml(String name, ModStore.StoredMod mod, String wrapperFqcn,
+                                          String apiVersion) {
         StringBuilder sb = new StringBuilder();
         sb.append("name: ").append(name).append('\n');
         sb.append("version: ").append(mod.currentVersion()).append(".0\n");
         sb.append("main: ").append(wrapperFqcn).append('\n');
-        sb.append("api-version: '1.21'\n");
+        sb.append("api-version: '").append(apiVersion).append("'\n");
         sb.append("description: ").append(yamlQuote(mod.description())).append('\n');
         sb.append("author: ").append(yamlQuote(mod.creator())).append('\n');
         return sb.toString();
@@ -442,7 +479,15 @@ public final class JarExporter {
                 + "                        return true;\n"
                 + "                    }\n"
                 + "                };\n"
-                + "                Bukkit.getCommandMap().register(\"" + prefix + "\", cmd);\n"
+                // The command map is the one host capability an exported jar cannot assume
+                // (ARCHITECTURE-V2 §6.3): probe it, never dereference it blind.
+                + "                org.bukkit.command.CommandMap map = Bukkit.getCommandMap();\n"
+                + "                if (map == null) {\n"
+                + "                    plugin.getLogger().warning(\"This server exposes no command map: /\"\n"
+                + "                            + name + \" is unavailable.\");\n"
+                + "                    return;\n"
+                + "                }\n"
+                + "                map.register(\"" + prefix + "\", cmd);\n"
                 + "                plugin.commands.add(cmd);\n"
                 + "            } catch (Throwable t) {\n"
                 + "                plugin.getLogger().warning(\"Failed to register command \" + name + \": \" + t);\n"
@@ -479,7 +524,13 @@ public final class JarExporter {
                 + "                        return true;\n"
                 + "                    }\n"
                 + "                };\n"
-                + "                Bukkit.getCommandMap().register(\"" + prefix + "\", cmd);\n"
+                + "                org.bukkit.command.CommandMap map = Bukkit.getCommandMap();\n"
+                + "                if (map == null) {\n"
+                + "                    plugin.getLogger().warning(\"This server exposes no command map: mod actions\"\n"
+                + "                            + \" for " + modName + " are unavailable.\");\n"
+                + "                    return;\n"
+                + "                }\n"
+                + "                map.register(\"" + prefix + "\", cmd);\n"
                 + "                plugin.commands.add(cmd);\n"
                 + "                plugin.getLogger().info(\"Mod actions available as /\" + cmd.getLabel()\n"
                 + "                        + \" <action> (standalone stand-in for /vibe do " + modName + " <action>).\");\n"

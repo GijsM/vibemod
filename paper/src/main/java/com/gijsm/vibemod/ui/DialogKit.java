@@ -15,7 +15,6 @@ import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickCallback;
-import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 
@@ -27,26 +26,29 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.Plugin;
 
 /**
- * The dialog design language in code: every native dialog class
- * ({@link Dialogs}, {@link SettingsDialog}, {@link InfoDialogs},
- * {@link ModHubDialog}) builds its screens from these shared pieces so the
- * whole UI stays one visual system.
+ * The dialog design language in code — the visual vocabulary and the plumbing
+ * that {@link PaperDialogRenderer} renders every {@code Screen} with, so the
+ * whole UI stays one visual system no matter which screen builder produced it.
+ *
+ * <p>Before Phase C this was shared by four hand-written dialog classes
+ * (retired: {@code Dialogs}, {@code SettingsDialog}, {@code InfoDialogs},
+ * {@code ModHubDialog}). Screens are data now (ARCHITECTURE-V2 §3) and the
+ * renderer is the only caller — but the vocabulary itself did not change, and
+ * that is deliberate: the migration must be pixel-for-pixel invisible to
+ * players. Everything here is exactly what those classes used.
  *
  * <ul>
  *   <li><b>Titles</b>: {@link #title} — an aqua {@code ⬡ } prefix plus the
- *       screen name in white, matching {@link Style#prefix()} branding.</li>
+ *       screen name in white, matching {@link Style#prefix()} branding. Screen
+ *       builders in core own their titles now; this stays the one place the
+ *       grammar is written down (and the loader renderers' reference).</li>
  *   <li><b>Widths</b>: the four-step scale {@link #BODY} (prose),
  *       {@link #WIDE} (source code), {@link #INPUT} (form inputs),
  *       {@link #ROW} (list-row buttons) — no dialog line rides the 200px
- *       vanilla default.</li>
- *   <li><b>Navigation</b>: {@link #navButton} routes through real
- *       {@code /vibe} subcommands so permissions are re-checked and data is
- *       re-fetched per click; the canonical cross-nav quartet
- *       ({@link #manualButton}, {@link #sourceButton}, {@link #errorsButton},
- *       {@link #historyButton}) and the exits ({@link #backToHubButton},
- *       {@link #backToListButton}, {@link #doneButton},
- *       {@link #cancelButton}) live here so wording and tooltips never
- *       drift. Every button carries a tooltip.</li>
+ *       vanilla default. {@code WidthHint} maps 1:1 onto these four.</li>
+ *   <li><b>Exits</b>: {@link #doneButton} (top of a hierarchy) and
+ *       {@link #cancelButton} (forms and confirmations) — the fallbacks the
+ *       renderer supplies when a {@code Screen} carries no {@code exit}.</li>
  *   <li><b>Item bodies</b>: {@link #iconBody} (decorative, tooltip
  *       suppressed) and {@link #iconItem} / {@link #resolveIcon} for mod
  *       icons, with the enchant glint marking a running mod.</li>
@@ -54,6 +56,11 @@ import org.bukkit.plugin.Plugin;
  *       {@link #mainThreadClick} (main-thread hop + one shared error
  *       string).</li>
  * </ul>
+ *
+ * <p>The dialog API is {@code @Experimental} on this Paper version; those
+ * warnings are suppressed file-wide (there is no {@code -Werror} anywhere in
+ * this build, so they are purely informational) rather than annotated on every
+ * method individually.
  */
 @SuppressWarnings("UnstableApiUsage")
 final class DialogKit {
@@ -82,52 +89,6 @@ final class DialogKit {
     }
 
     // ---- buttons ----
-
-    /**
-     * A button that runs a {@code /vibe} subcommand, which re-checks permissions
-     * and reopens the target screen with freshly assembled data.
-     */
-    static ActionButton navButton(String label, String command, String tooltip) {
-        return navButton(Component.text(label), command, tooltip);
-    }
-
-    /** {@link #navButton(String, String, String)} with a pre-styled label component. */
-    static ActionButton navButton(Component label, String command, String tooltip) {
-        return ActionButton.builder(label)
-                .tooltip(Component.text(tooltip, Style.INFO))
-                .action(DialogAction.staticAction(ClickEvent.runCommand(command)))
-                .build();
-    }
-
-    /** The canonical manual cross-nav button. */
-    static ActionButton manualButton(String mod) {
-        return navButton("📖 Manual", "/vibe manual " + mod, "Open the player manual");
-    }
-
-    /** The canonical source cross-nav button. */
-    static ActionButton sourceButton(String mod) {
-        return navButton("⌨ Source", "/vibe source " + mod, "Read the generated source");
-    }
-
-    /** The canonical errors cross-nav button. */
-    static ActionButton errorsButton(String mod) {
-        return navButton("⚠ Errors", "/vibe errors " + mod, "View recent error records");
-    }
-
-    /** The canonical history cross-nav button. */
-    static ActionButton historyButton(String mod) {
-        return navButton("⏳ History", "/vibe history " + mod, "Browse and activate previous versions");
-    }
-
-    /** Viewer exit: {@code ← Back} to {@code mod}'s hub — every viewer climbs the hierarchy, never dead-ends. */
-    static ActionButton backToHubButton(String mod) {
-        return navButton("← Back", "/vibe info " + mod, "Back to the " + mod + " hub");
-    }
-
-    /** Hub exit: {@code ← Back to list} to the mod browser. */
-    static ActionButton backToListButton() {
-        return navButton("← Back to list", "/vibe list", "Back to the mod browser");
-    }
 
     /** Top-of-hierarchy exit (browser, costs): a no-op {@code Done} that just closes. */
     static ActionButton doneButton() {
@@ -169,10 +130,18 @@ final class DialogKit {
     /**
      * A mod's icon as an ItemStack; {@code glint} adds the enchant shimmer
      * (the retired chest list's "running" cue, resurrected).
+     *
+     * <p>{@code glintSupported} is the capability gate:
+     * {@code ItemMeta#setEnchantmentGlintOverride} only exists from MC 1.20.5,
+     * and the Paper floor is 1.20.6 with the era probe
+     * {@code PlatformInfo.hasItemGlintOverride()} (ARCHITECTURE-V2 §0#8 —
+     * probes, never version comparisons). When the probe says no we render the
+     * plain item: the glint is a cue, never load-bearing information (the
+     * state also reads out in the body text and the button labels).
      */
-    static ItemStack iconItem(String icon, boolean glint) {
+    static ItemStack iconItem(String icon, boolean glint, boolean glintSupported) {
         ItemStack item = new ItemStack(resolveIcon(icon));
-        if (glint) {
+        if (glint && glintSupported) {
             ItemMeta meta = item.getItemMeta();
             if (meta != null) {
                 meta.setEnchantmentGlintOverride(Boolean.TRUE);
@@ -188,11 +157,6 @@ final class DialogKit {
                 .description(DialogBody.plainMessage(beside, BODY))
                 .showTooltip(false)
                 .build();
-    }
-
-    /** {@link #iconBody(ItemStack, Component)} for a plain decorative material (form/dashboard headers). */
-    static DialogBody iconBody(Material material, Component beside) {
-        return iconBody(new ItemStack(material), beside);
     }
 
     // ---- text helpers ----
@@ -214,7 +178,8 @@ final class DialogKit {
     /**
      * Show next tick (never inside an inventory-click handler). Deliberately no
      * closeInventory(): showDialog replaces the client screen on its own, and a
-     * close-container packet from here has stalled the main thread before.
+     * close-container packet from here has stalled the main thread before
+     * (regression: commits 639dd32/3666bf0 — do not "helpfully" add it back).
      */
     static void show(Plugin plugin, Player p, Dialog dialog) {
         Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
@@ -229,7 +194,8 @@ final class DialogKit {
     /**
      * Wraps a dialog callback so it always hops to the main thread before running, and never lets
      * an exception escape into Bukkit — it is logged to {@code log} and reported to the player
-     * instead.
+     * instead. {@code uses(1)} makes it one-shot: a second click on the same button is a no-op
+     * (a renderer obligation, ARCHITECTURE-V2 §3).
      */
     static DialogAction mainThreadClick(Plugin plugin, Logger log,
                                         BiConsumer<DialogResponseView, Audience> body) {

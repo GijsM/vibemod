@@ -1,11 +1,15 @@
-package com.gijsm.vibemod.runtime;
+package com.gijsm.vibemod.paper;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
+
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
@@ -15,30 +19,39 @@ import org.bukkit.command.SimpleCommandMap;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
+import com.gijsm.vibemod.platform.CommandBridge;
+import com.gijsm.vibemod.platform.PlatformInfo;
+import com.gijsm.vibemod.platform.Registration;
+import com.gijsm.vibemod.runtime.ModDispatch;
 
 /**
- * Registers and unregisters real top-level {@code /name} commands at runtime
- * via Paper's {@link CommandMap}. Never overrides a command it did not itself
- * register, and never throws — callers fall back to a mod action on failure.
+ * {@link CommandBridge} over Paper's {@link CommandMap}: v1's
+ * {@code runtime/DynamicCommands}, now the one place in the codebase that knows
+ * command-map reflection exists (ARCHITECTURE-V2 §1.1).
+ *
+ * <p>Never overrides a command it did not itself register, and never throws —
+ * callers fall back to a {@code /vibe do} action on failure.
  *
  * <p>Paper offers no supported way to remove a command from the map (and its
- * {@code getKnownCommands()} may return an immutable view), so correctness
- * does not depend on map surgery: every command we register is a
+ * {@code getKnownCommands()} may return an immutable view), so correctness does
+ * not depend on map surgery: every command we register is a
  * {@link VibeModCommand} whose handler can be swapped or nulled. Unregister
  * neuters the handler (the command then reports itself as removed) and only
  * best-effort-removes the map entry; re-registering the same name revives the
  * existing instance in place.
  */
-public final class DynamicCommands {
+public final class PaperCommandBridge implements CommandBridge {
 
     private final Plugin plugin;
+    private final PlatformInfo platform;
+    private final ModDispatch dispatch;
     private volatile boolean allowTopLevel;
     private final Map<String, VibeModCommand> ours = new ConcurrentHashMap<>();
 
-    public DynamicCommands(Plugin plugin, boolean allowTopLevel) {
+    public PaperCommandBridge(Plugin plugin, PlatformInfo platform, ModDispatch dispatch, boolean allowTopLevel) {
         this.plugin = plugin;
+        this.platform = platform;
+        this.dispatch = dispatch;
         this.allowTopLevel = allowTopLevel;
     }
 
@@ -47,49 +60,48 @@ public final class DynamicCommands {
         this.allowTopLevel = allow;
     }
 
-    /**
-     * Register {@code /name} at runtime. Returns true if a real top-level command
-     * was registered, false if unavailable/failed (caller then falls back to an
-     * action). Never throws.
-     */
-    public boolean register(String name, String description, CommandSender feedbackTarget, CommandExecutorLike handler) {
-        if (!allowTopLevel) {
-            return false;
+    @Override
+    public Registration register(String name, String description, String modName, CommandHandler handler) {
+        if (!allowTopLevel || !platform.hasNativeCommandMap()) {
+            return Registration.inactive();
         }
+        String key = name.toLowerCase(Locale.ROOT);
+        // Every invocation of a generated command goes through ModDispatch: timed by
+        // the watchdog, guarded, and journalled against the mod (§2).
+        CommandExecutorLike wrapped = (sender, label, args) -> dispatch.run(modName,
+                PaperSender.of(sender), "command:" + name, () -> handler.run(PaperSender.of(sender), args));
         try {
-            String key = name.toLowerCase(java.util.Locale.ROOT);
             CommandMap map = Bukkit.getCommandMap();
             if (map == null) {
-                return false;
+                return Registration.inactive();
             }
             Command existing = map.getCommand(key);
             VibeModCommand mine = ours.get(key);
             if (existing instanceof VibeModCommand zombie && (mine == null || mine == zombie)) {
                 // A previously-unregistered instance is still in the map: revive it.
-                zombie.handler = handler;
+                zombie.handler = wrapped;
                 zombie.setDescription(description == null ? "" : description);
                 ours.put(key, zombie);
-                resync();
-                return true;
+                resyncAll();
+                return Registration.of(() -> unregister(key));
             }
             if (existing != null && existing != mine) {
-                return false;
+                return Registration.inactive();
             }
-            VibeModCommand cmd = new VibeModCommand(plugin, key, description == null ? "" : description, handler);
+            VibeModCommand cmd = new VibeModCommand(plugin, key, description == null ? "" : description, wrapped);
             map.register("vibemod", cmd);
             ours.put(key, cmd);
-            resync();
-            return true;
+            resyncAll();
+            return Registration.of(() -> unregister(key));
         } catch (Throwable t) {
             plugin.getLogger().log(Level.WARNING, "Failed to register dynamic command /" + name, t);
-            return false;
+            return Registration.inactive();
         }
     }
 
     /** Remove {@code /name} + resync clients. Never throws. */
-    public void unregister(String name) {
+    private void unregister(String key) {
         try {
-            String key = name.toLowerCase(java.util.Locale.ROOT);
             VibeModCommand cmd = ours.remove(key);
             if (cmd == null) {
                 return;
@@ -116,9 +128,9 @@ public final class DynamicCommands {
             } catch (Throwable ignored) {
                 // best-effort
             }
-            resync();
+            resyncAll();
         } catch (Throwable t) {
-            plugin.getLogger().log(Level.WARNING, "Failed to unregister dynamic command /" + name, t);
+            plugin.getLogger().log(Level.WARNING, "Failed to unregister dynamic command /" + key, t);
         }
     }
 
@@ -151,7 +163,17 @@ public final class DynamicCommands {
         return null;
     }
 
-    private void resync() {
+    /**
+     * Pushes the command tree to every online player so a freshly registered
+     * command tab-completes without a rejoin. Capability-gated: a fork without
+     * {@code Player#updateCommands} simply does not get the refresh, which costs
+     * a rejoin rather than a crash.
+     */
+    @Override
+    public void resyncAll() {
+        if (!platform.hasCommandResync()) {
+            return;
+        }
         for (Player p : Bukkit.getOnlinePlayers()) {
             try {
                 p.updateCommands();
@@ -194,7 +216,7 @@ public final class DynamicCommands {
 
     /** A mod command handler bound to a runtime command registration. */
     @FunctionalInterface
-    public interface CommandExecutorLike {
+    private interface CommandExecutorLike {
         void run(CommandSender sender, String label, String[] args);
     }
 }

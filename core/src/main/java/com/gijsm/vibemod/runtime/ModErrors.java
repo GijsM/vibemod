@@ -17,11 +17,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
-import org.bukkit.Bukkit;
-import org.bukkit.plugin.Plugin;
-
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+
+import com.gijsm.vibemod.platform.TickScheduler;
 
 /**
  * Per-mod error journal. Deduplicates repeated exceptions by root-cause class
@@ -53,14 +52,14 @@ public final class ModErrors {
     private volatile int stackFrames = 10;
     private volatile Consumer<String> onStorm;
 
-    /** Wires the real Bukkit main-thread scheduler and a ~100-tick-debounced async flush. */
-    public ModErrors(Plugin plugin, Path modsDir) {
+    /** Wires the host's main-thread hop and a ~100-tick-debounced async flush. */
+    public ModErrors(TickScheduler scheduler, Path modsDir) {
         this(modsDir,
-                r -> Bukkit.getScheduler().runTask(plugin, r),
-                r -> Bukkit.getScheduler().runTaskLaterAsynchronously(plugin, r, 100L));
+                scheduler::runOnMain,
+                r -> scheduler.later(100L, () -> scheduler.async(r)));
     }
 
-    /** Test-only: no Bukkit involved; both schedulers run their {@link Runnable} inline. */
+    /** Test-only: no scheduler involved; both hooks run their {@link Runnable} inline. */
     ModErrors(Path modsDir, Consumer<Runnable> mainThread, Consumer<Runnable> async) {
         this.modsDir = modsDir;
         this.mainThread = mainThread;

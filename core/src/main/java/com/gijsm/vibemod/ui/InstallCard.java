@@ -80,12 +80,12 @@ public final class InstallCard {
     }
 
     /**
-     * Plain-text lines behind {@link #verifiedFooter}, reused by {@link InfoDialogs} for the
-     * manual dialog's "Verified facts" section. When {@code live} is {@code null} (mod not currently
+     * Plain-text lines behind {@link #verifiedFooter}, reused by the manual screen's
+     * "Verified facts" section. When {@code live} is {@code null} (mod not currently
      * loaded), introspected counts aren't available from stored data alone, so that's said plainly
      * rather than guessed.
      */
-    static List<String> verifiedFactLines(ModStore.StoredMod mod, ModHandle live, Map<String, String> values) {
+    public static List<String> verifiedFactLines(ModStore.StoredMod mod, ModHandle live, Map<String, String> values) {
         List<String> lines = new ArrayList<>();
         if (live != null) {
             lines.add("commands: " + joinOrNone(live.commandNames()));

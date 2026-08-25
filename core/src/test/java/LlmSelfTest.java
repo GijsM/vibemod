@@ -12,6 +12,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.llm.StreamScanner;
 
@@ -38,6 +39,7 @@ public class LlmSelfTest {
         testParseIconMapping();
         testParseChangelogMapping();
         testSystemPromptContent();
+        testPlatformProfiles();
         testPromptBuilders();
         testFewShotPlansMatchFiles();
         testStreamScannerFullShapeWithDecoy();
@@ -360,6 +362,75 @@ public class LlmSelfTest {
         } catch (Exception e) {
             fail("icon mapping (edit shape) threw: " + e);
         }
+    }
+
+    /**
+     * The two Paper prompt profiles (ARCHITECTURE-V2 §6.2). What matters here is
+     * not that the strings exist but that the era table actually diverges: the
+     * legacy profile has to teach the {@code GENERIC_} attribute names and forbid
+     * the 1.20.5+ item-data setters, because a modern-only prompt produces code
+     * that cannot compile on 1.20.6 and each such miss costs a self-heal round of
+     * real money.
+     */
+    private static void testPlatformProfiles() {
+        String modern = PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN);
+        String legacy = PromptLibrary.systemPrompt(PlatformProfiles.PAPER_LEGACY);
+
+        check("default systemPrompt() is the paper-modern one",
+                PromptLibrary.systemPrompt().equals(modern));
+        check("the two Paper profiles produce different prompts", !modern.equals(legacy));
+
+        check("modern teaches the short 1.21.3+ attribute names",
+                modern.contains("Attribute.MAX_HEALTH"));
+        check("modern allows setEnchantmentGlintOverride",
+                modern.contains("setEnchantmentGlintOverride") && !legacy.isEmpty());
+
+        check("legacy teaches the GENERIC_ attribute names",
+                legacy.contains("Attribute.GENERIC_MAX_HEALTH"));
+        check("legacy forbids the short 1.21.3+ attribute names",
+                legacy.contains("NEVER the short"));
+        check("legacy forbids setEnchantmentGlintOverride",
+                legacy.contains("Do NOT call `ItemMeta#setEnchantmentGlintOverride"));
+        check("legacy names its era in the role line",
+                legacy.contains("Paper 1.20.6-1.21.6 gameplay-mod author"));
+
+        // Adventure is now an officially allowed import root in both eras (§6.2):
+        // 88+ stored mods already use it, and banning it in the prompt was a
+        // standing source of avoidable repair rounds.
+        for (String prompt : java.util.List.of(modern, legacy)) {
+            check("adventure is an allowed import root", prompt.contains("net.kyori.adventure.*"));
+            check("net.minecraft is still banned", prompt.contains("NEVER import `net.minecraft.*`"));
+            check("the api sources are still embedded verbatim",
+                    prompt.contains("--- com/gijsm/vibemod/api/VibeContext.java ---"));
+            check("both few-shots survive the profile indirection",
+                    prompt.contains("ChickenCreepers") && prompt.contains("SpeedPulse"));
+        }
+
+        // The era boundary is a pure function so the host has one place to get it
+        // right, and 1.21.7 is exactly where the dialog UI becomes usable.
+        check("1.20.6 is legacy",
+                PlatformProfiles.paperProfileIdFor("1.20.6").equals(PlatformProfiles.PAPER_LEGACY_ID));
+        check("1.21.6 is legacy",
+                PlatformProfiles.paperProfileIdFor("1.21.6").equals(PlatformProfiles.PAPER_LEGACY_ID));
+        check("1.21.7 is modern",
+                PlatformProfiles.paperProfileIdFor("1.21.7").equals(PlatformProfiles.PAPER_MODERN_ID));
+        check("1.21.8 is modern",
+                PlatformProfiles.paperProfileIdFor("1.21.8").equals(PlatformProfiles.PAPER_MODERN_ID));
+        check("1.21.11 is modern (double-digit patch, not string-compared)",
+                PlatformProfiles.paperProfileIdFor("1.21.11").equals(PlatformProfiles.PAPER_MODERN_ID));
+        check("26.2 is modern",
+                PlatformProfiles.paperProfileIdFor("26.2").equals(PlatformProfiles.PAPER_MODERN_ID));
+        check("a -R0.1-SNAPSHOT suffix is tolerated",
+                PlatformProfiles.paperProfileIdFor("1.20.6-R0.1-SNAPSHOT")
+                        .equals(PlatformProfiles.PAPER_LEGACY_ID));
+        check("an unparseable version reads as modern, not legacy",
+                PlatformProfiles.paperProfileIdFor("wat").equals(PlatformProfiles.PAPER_MODERN_ID));
+
+        check("both Paper profiles export at the 1.20 floor",
+                PlatformProfiles.PAPER_MODERN.pluginDescriptor().equals("1.20")
+                        && PlatformProfiles.PAPER_LEGACY.pluginDescriptor().equals("1.20"));
+
+        System.out.println("PASS: paper-modern and paper-legacy profiles differ where the era does");
     }
 
     private static void testPromptBuilders() {
