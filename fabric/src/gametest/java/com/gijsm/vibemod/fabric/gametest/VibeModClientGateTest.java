@@ -190,7 +190,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
      *
      * <p>Bare {@code /vibe} needs only {@code vibe.use}, which maps to
      * {@code PermissionLevel.ALL} — so this works without cheats. The player runs
-     * it, the host builds a {@code Screen}, {@code FabricDialogRenderer} turns it
+     * it, the host builds a {@code Screen}, {@code LoaderDialogRenderer} turns it
      * into a vanilla {@code Dialog} and sends {@code ClientboundShowDialogPacket}
      * with the dialog inlined as a direct {@code Holder}, and the client puts a
      * {@code DialogScreen} on screen. Every layer of §8.5, with no packet-level
@@ -327,7 +327,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
 
     /** A console-shaped {@link com.gijsm.vibemod.platform.Sender} for driving the router. */
     private static com.gijsm.vibemod.platform.Sender consoleSender() {
-        return com.gijsm.vibemod.fabric.FabricSender.of(
+        return com.gijsm.vibemod.loader.LoaderSender.of(
                 VibeModFabric.services().server().createCommandSourceStack(),
                 VibeModFabric.services().messenger());
     }

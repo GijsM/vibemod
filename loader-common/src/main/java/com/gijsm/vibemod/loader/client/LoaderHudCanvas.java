@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric.client;
+package com.gijsm.vibemod.loader.client;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -6,7 +6,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 
 import com.gijsm.vibemod.api.client.HudCanvas;
-import com.gijsm.vibemod.fabric.FabricItems;
+import com.gijsm.vibemod.loader.LoaderItems;
 
 /**
  * {@link HudCanvas} over the game's GUI surface.
@@ -25,7 +25,7 @@ import com.gijsm.vibemod.fabric.FabricItems;
  * is swapped in before each dispatch rather than allocated per HUD element, so
  * a HUD costs no garbage per frame.
  */
-final class FabricHudCanvas implements HudCanvas {
+public final class LoaderHudCanvas implements HudCanvas {
 
     private GuiGraphicsExtractor graphics;
 
@@ -99,7 +99,7 @@ final class FabricHudCanvas implements HudCanvas {
         if (graphics == null) {
             return;
         }
-        Item item = FabricItems.itemOrNull(itemId);
+        Item item = LoaderItems.itemOrNull(itemId);
         if (item == null) {
             // "Unknown ids draw nothing" is the documented contract: a HUD is not
             // the place to learn that a mod's item id was a typo.

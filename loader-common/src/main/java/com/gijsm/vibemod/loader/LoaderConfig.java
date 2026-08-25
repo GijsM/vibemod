@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,9 +30,9 @@ import com.google.gson.reflect.TypeToken;
  * keys in an existing file are preserved on save: a config a future version
  * wrote should not be silently truncated by an older one.
  */
-public final class FabricConfig {
+public final class LoaderConfig {
 
-    private static final Logger LOG = Logger.getLogger(FabricConfig.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderConfig.class.getName());
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     /** Every key VibeMod reads, with the same default as Paper's config.yml. */
@@ -62,7 +62,7 @@ public final class FabricConfig {
     private final Path file;
     private volatile Map<String, Object> values = new LinkedHashMap<>(DEFAULTS);
 
-    public FabricConfig(Path file) {
+    public LoaderConfig(Path file) {
         this.file = file;
         reload();
     }

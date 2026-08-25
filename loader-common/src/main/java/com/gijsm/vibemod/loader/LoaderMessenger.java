@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.Map;
 import java.util.UUID;
@@ -22,30 +22,30 @@ import com.gijsm.vibemod.platform.Sender;
  *
  * <p>Unlike Paper — where every {@code CommandSender} already <em>is</em> an
  * {@link Audience} — nothing here is an Audience, so this class owns the
- * per-player {@link FabricAudience} instances. They are cached per UUID rather
+ * per-player {@link LoaderAudience} instances. They are cached per UUID rather
  * than made fresh, because a boss bar has to be the same object across the
  * {@code showBossBar}/{@code hideBossBar} pair that {@code Progress} straddles
  * over several seconds.
  *
- * <p>Permission-scoped broadcasts reuse {@link FabricSender}'s node/level
+ * <p>Permission-scoped broadcasts reuse {@link LoaderSender}'s node/level
  * mapping by asking each player's own command source, so ops and a permission
  * manager both work without this class knowing which is installed.
  */
-public final class FabricMessenger implements Messenger {
+public final class LoaderMessenger implements Messenger {
 
-    private static final Logger LOG = Logger.getLogger(FabricMessenger.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderMessenger.class.getName());
 
     /** The celebration burst: same particle count and spread as the v1 install flourish. */
     private static final int CELEBRATION_PARTICLES = 30;
     private static final double CELEBRATION_SPREAD = 0.5;
 
     private final MinecraftServer server;
-    private final Map<UUID, FabricAudience> audiences = new ConcurrentHashMap<>();
+    private final Map<UUID, LoaderAudience> audiences = new ConcurrentHashMap<>();
     private final Audience console;
 
-    public FabricMessenger(MinecraftServer server) {
+    public LoaderMessenger(MinecraftServer server) {
         this.server = server;
-        this.console = FabricAudience.console();
+        this.console = LoaderAudience.console();
     }
 
     @Override
@@ -56,7 +56,7 @@ public final class FabricMessenger implements Messenger {
         // computeIfAbsent, not compute: the wrapper must be the SAME object across
         // a showBossBar/hideBossBar pair, which Progress straddles over seconds.
         // The wrapper resolves the live ServerPlayer per call, so caching it is safe.
-        return audiences.computeIfAbsent(playerId, id -> new FabricAudience(server, id));
+        return audiences.computeIfAbsent(playerId, id -> new LoaderAudience(server, id));
     }
 
     @Override
@@ -72,7 +72,7 @@ public final class FabricMessenger implements Messenger {
     @Override
     public void broadcast(Component message) {
         console.sendMessage(message);
-        net.minecraft.network.chat.Component vanilla = FabricText.toVanilla(message, server);
+        net.minecraft.network.chat.Component vanilla = LoaderText.toVanilla(message, server);
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             player.sendSystemMessage(vanilla);
         }
@@ -86,9 +86,9 @@ public final class FabricMessenger implements Messenger {
 
     @Override
     public void broadcastToPlayers(Component message, String permission) {
-        net.minecraft.network.chat.Component vanilla = FabricText.toVanilla(message, server);
+        net.minecraft.network.chat.Component vanilla = LoaderText.toVanilla(message, server);
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            Sender as = FabricSender.of(player.createCommandSourceStack(), this);
+            Sender as = LoaderSender.of(player.createCommandSourceStack(), this);
             if (as.hasPermission(permission)) {
                 player.sendSystemMessage(vanilla);
             }
@@ -121,7 +121,7 @@ public final class FabricMessenger implements Messenger {
 
     /** Drops a leaving player's cached audience (and any boss bar it still shows). */
     public void forget(UUID playerId) {
-        FabricAudience audience = audiences.remove(playerId);
+        LoaderAudience audience = audiences.remove(playerId);
         if (audience != null) {
             try {
                 audience.forgetAll();

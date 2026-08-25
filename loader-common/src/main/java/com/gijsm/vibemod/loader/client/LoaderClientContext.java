@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric.client;
+package com.gijsm.vibemod.loader.client;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -33,12 +33,12 @@ import com.gijsm.vibemod.runtime.ModHandle;
  * tick and command callbacks are handed, since their registrations were tracked
  * when they were made, not when they fire.
  */
-final class FabricClientContext implements ClientContext {
+public final class LoaderClientContext implements ClientContext {
 
     private final ClientEventBridge bridge;
     private final ModHandle handle;
 
-    FabricClientContext(ClientEventBridge bridge, ModHandle handle) {
+    public LoaderClientContext(ClientEventBridge bridge, ModHandle handle) {
         this.bridge = bridge;
         this.handle = handle;
     }

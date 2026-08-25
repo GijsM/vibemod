@@ -15,6 +15,12 @@ paper/run/
 fabric/run/
 fabric/smoke/
 
+# --- MDG run directories + the throwaway NeoForge server the Phase E gate builds ---
+neoforge/run/
+neoforge/runs/
+neoforge/smoke/
+neoforge/smoke-cache/
+
 # --- Node tooling for scripts/ ---
 scripts/node_modules/
 scripts/.rcon-password

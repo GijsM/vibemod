@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.Locale;
 import java.util.Optional;
@@ -27,14 +27,14 @@ import net.minecraft.world.item.ItemStackTemplate;
  * name an item that never existed here — and every caller treats failure as
  * "draw nothing", never as an error. An icon is never the point of a screen.
  */
-public final class FabricItems {
+public final class LoaderItems {
 
-    private FabricItems() {
+    private LoaderItems() {
     }
 
     /** The item for {@code "CHICKEN"} / {@code "minecraft:chicken"}, or null. */
     public static Item itemOrNull(String rawId) {
-        Identifier id = FabricText.idOrNull(rawId == null ? null : rawId.toLowerCase(Locale.ROOT));
+        Identifier id = LoaderText.idOrNull(rawId == null ? null : rawId.toLowerCase(Locale.ROOT));
         if (id == null) {
             return null;
         }

@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -54,9 +54,9 @@ import com.gijsm.vibemod.runtime.ModDispatch;
  * generated-mod command, so {@link #reinstallInto} re-adds all live ones each
  * time the callback runs.
  */
-public final class FabricCommandBridge implements CommandBridge {
+public final class LoaderCommandBridge implements CommandBridge {
 
-    private static final Logger LOG = Logger.getLogger(FabricCommandBridge.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderCommandBridge.class.getName());
 
     private final MinecraftServer server;
     private final Messenger messenger;
@@ -65,7 +65,7 @@ public final class FabricCommandBridge implements CommandBridge {
     private final Map<String, Live> ours = new ConcurrentHashMap<>();
     private volatile VibeRouter router;
 
-    public FabricCommandBridge(MinecraftServer server, Messenger messenger, ModDispatch dispatch,
+    public LoaderCommandBridge(MinecraftServer server, Messenger messenger, ModDispatch dispatch,
                                boolean allowTopLevel) {
         this.server = server;
         this.messenger = messenger;
@@ -110,7 +110,7 @@ public final class FabricCommandBridge implements CommandBridge {
         if (live == null) {
             return 0;
         }
-        live.run(FabricSender.of(ctx.getSource(), messenger), args);
+        live.run(LoaderSender.of(ctx.getSource(), messenger), args);
         return 1;
     }
 
@@ -140,7 +140,7 @@ public final class FabricCommandBridge implements CommandBridge {
         int lastWordStart = builder.getStart() + remaining.lastIndexOf(' ') + 1;
         SuggestionsBuilder offset = builder.createOffset(lastWordStart);
         try {
-            for (String option : live.complete(FabricSender.of(ctx.getSource(), messenger), typed)) {
+            for (String option : live.complete(LoaderSender.of(ctx.getSource(), messenger), typed)) {
                 offset.suggest(option);
             }
         } catch (Throwable t) {
@@ -173,8 +173,8 @@ public final class FabricCommandBridge implements CommandBridge {
         // Every invocation of a generated command goes through ModDispatch: timed
         // by the watchdog, guarded, and journalled against the mod (§2).
         Runner wrapped = (source, args) -> dispatch.run(modName,
-                FabricSender.of(source, messenger), "command:" + name,
-                () -> handler.run(FabricSender.of(source, messenger), args));
+                LoaderSender.of(source, messenger), "command:" + name,
+                () -> handler.run(LoaderSender.of(source, messenger), args));
         try {
             CommandDispatcher<CommandSourceStack> dispatcher = server.getCommands().getDispatcher();
             Live existing = ours.get(key);

@@ -5,6 +5,8 @@ import java.util.logging.Logger;
 import net.fabricmc.api.ClientModInitializer;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
+import com.gijsm.vibemod.loader.client.DeferredTickScheduler;
+import com.gijsm.vibemod.loader.client.LoaderClientContext;
 import com.gijsm.vibemod.platform.ModFailure;
 import com.gijsm.vibemod.runtime.Watchdog;
 
@@ -52,7 +54,10 @@ public final class VibeModFabricClient implements ClientModInitializer {
         // thread, so the hop is not optional. A deferred scheduler resolves the
         // live one at call time, because a trip cannot happen before a server
         // exists (it takes a loaded mod to trip a watchdog).
-        Watchdog renderWatchdog = new Watchdog(new DeferredTickScheduler(), "render",
+        Watchdog renderWatchdog = new Watchdog(new DeferredTickScheduler(() -> {
+            VibeModFabric.Services live = VibeModFabric.services();
+            return live == null ? null : live.scheduler();
+        }), "render",
                 DEFAULT_SINGLE_MS, DEFAULT_BUDGET_MS);
 
         // Failures route to the live lifecycle when there is one, so a HUD
@@ -74,7 +79,7 @@ public final class VibeModFabricClient implements ClientModInitializer {
 
         VibeModFabric.setClientHooks(new VibeModFabric.ClientHooks(
                 created,
-                handle -> new FabricClientContext(created, handle),
+                handle -> new LoaderClientContext(created, handle),
                 renderWatchdog));
         LOG.info("VibeMod client hooks installed (" + created.describeState() + ")");
     }

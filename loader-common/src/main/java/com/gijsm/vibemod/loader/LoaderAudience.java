@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.Map;
 import java.util.Optional;
@@ -44,9 +44,9 @@ import net.minecraft.world.BossEvent;
  * same Adventure bar (they do not today, but a shared bar that silently
  * unregistered the first viewer's listener would be a fine bug to never find).
  */
-final class FabricAudience implements Audience {
+public final class LoaderAudience implements Audience {
 
-    private static final Logger LOG = Logger.getLogger(FabricAudience.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderAudience.class.getName());
 
     /** Whatever a sound with no recognizable id becomes: nothing, silently. */
     private static final long RANDOM_SEED_UNUSED = 0L;
@@ -55,7 +55,7 @@ final class FabricAudience implements Audience {
     private final UUID playerId;
     private final Map<BossBar, Bound> bars = new ConcurrentHashMap<>();
 
-    FabricAudience(MinecraftServer server, UUID playerId) {
+    LoaderAudience(MinecraftServer server, UUID playerId) {
         this.server = server;
         this.playerId = playerId;
     }
@@ -85,7 +85,7 @@ final class FabricAudience implements Audience {
             return;
         }
         try {
-            player.sendSystemMessage(FabricText.toVanilla(message, server));
+            player.sendSystemMessage(LoaderText.toVanilla(message, server));
         } catch (Throwable t) {
             LOG.log(Level.FINE, "Could not deliver a message to " + playerId, t);
         }
@@ -97,7 +97,7 @@ final class FabricAudience implements Audience {
         if (player == null) {
             return;
         }
-        Identifier id = FabricText.idOrNull(sound.name().asString());
+        Identifier id = LoaderText.idOrNull(sound.name().asString());
         if (id == null) {
             return;
         }
@@ -124,14 +124,14 @@ final class FabricAudience implements Audience {
         }
         bars.computeIfAbsent(bar, key -> {
             ServerBossEvent event = new ServerBossEvent(UUID.randomUUID(),
-                    FabricText.toVanilla(key.name(), server),
+                    LoaderText.toVanilla(key.name(), server),
                     colorOf(key), overlayOf(key));
             event.setProgress(clamp01(key.progress()));
             event.addPlayer(player);
             BossBar.Listener listener = new BossBar.Listener() {
                 @Override
                 public void bossBarNameChanged(BossBar self, Component old, Component now) {
-                    event.setName(FabricText.toVanilla(now, server));
+                    event.setName(LoaderText.toVanilla(now, server));
                 }
 
                 @Override
@@ -223,7 +223,7 @@ final class FabricAudience implements Audience {
         return new Audience() {
             @Override
             public void sendMessage(Component message) {
-                log.info(FabricText.plain(message));
+                log.info(LoaderText.plain(message));
             }
         };
     }

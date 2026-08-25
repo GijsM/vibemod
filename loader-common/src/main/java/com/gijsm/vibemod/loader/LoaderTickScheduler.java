@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -27,16 +27,16 @@ import com.gijsm.vibemod.platform.TickScheduler;
  * iterates a snapshot: a task that schedules another task — which the generation
  * pipeline does constantly — would otherwise mutate the list mid-iteration.
  */
-public final class FabricTickScheduler implements TickScheduler {
+public final class LoaderTickScheduler implements TickScheduler {
 
-    private static final Logger LOG = Logger.getLogger(FabricTickScheduler.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderTickScheduler.class.getName());
 
     private final MinecraftServer server;
     private final ExecutorService async;
     private final List<Scheduled> tasks = new ArrayList<>();
     private volatile long tickCount;
 
-    public FabricTickScheduler(MinecraftServer server) {
+    public LoaderTickScheduler(MinecraftServer server) {
         this.server = server;
         this.async = Executors.newCachedThreadPool(runnable -> {
             Thread t = new Thread(runnable, "VibeMod-async");

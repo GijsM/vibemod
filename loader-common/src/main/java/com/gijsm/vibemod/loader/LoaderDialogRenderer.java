@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -86,9 +86,9 @@ import com.gijsm.vibemod.ui.Style;
  * re-validated by the callback, not here — this class guarantees type shape
  * only.
  */
-public final class FabricDialogRenderer implements UiRenderer {
+public final class LoaderDialogRenderer implements UiRenderer {
 
-    private static final Logger LOG = Logger.getLogger(FabricDialogRenderer.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderDialogRenderer.class.getName());
 
     // The v1 pixel scale, lifted from DialogKit so both renderers agree.
     private static final int BODY_WIDTH = 320;
@@ -118,9 +118,9 @@ public final class FabricDialogRenderer implements UiRenderer {
 
     private final MinecraftServer server;
     private final TickScheduler scheduler;
-    private final FabricMessenger messenger;
+    private final LoaderMessenger messenger;
 
-    public FabricDialogRenderer(MinecraftServer server, TickScheduler scheduler, FabricMessenger messenger) {
+    public LoaderDialogRenderer(MinecraftServer server, TickScheduler scheduler, LoaderMessenger messenger) {
         this.server = server;
         this.scheduler = scheduler;
         this.messenger = messenger;
@@ -205,7 +205,7 @@ public final class FabricDialogRenderer implements UiRenderer {
                     // The decorative item plus its caption. An unknown or
                     // unresolvable item id degrades to the caption alone rather
                     // than to an exception: an icon is never the point.
-                    var stack = FabricItems.template(icon.iconId(), icon.glint());
+                    var stack = LoaderItems.template(icon.iconId(), icon.glint());
                     if (stack == null) {
                         out.add(new PlainMessage(vanilla(icon.beside()), BODY_WIDTH));
                     } else {
@@ -357,7 +357,7 @@ public final class FabricDialogRenderer implements UiRenderer {
     }
 
     private net.minecraft.network.chat.Component vanilla(net.kyori.adventure.text.Component adventure) {
-        return FabricText.toVanilla(adventure, server);
+        return LoaderText.toVanilla(adventure, server);
     }
 
     /** A plain-label button with no action — the implicit Cancel/Done. */

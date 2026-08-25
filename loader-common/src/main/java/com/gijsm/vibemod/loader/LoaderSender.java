@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.Locale;
 import java.util.UUID;
@@ -22,7 +22,7 @@ import com.gijsm.vibemod.platform.Sender;
  * (§4.1), so the host has to be able to unwrap what core handed it. Nothing in
  * core ever calls it.
  */
-public final class FabricSender implements Sender {
+public final class LoaderSender implements Sender {
 
     /**
      * VibeMod's permission strings mapped onto MC 26.x permissions.
@@ -44,23 +44,23 @@ public final class FabricSender implements Sender {
     private final CommandSourceStack source;
     private final Messenger messenger;
 
-    private FabricSender(CommandSourceStack source, Messenger messenger) {
+    private LoaderSender(CommandSourceStack source, Messenger messenger) {
         this.source = source;
         this.messenger = messenger;
     }
 
     public static Sender of(CommandSourceStack source, Messenger messenger) {
-        return new FabricSender(source, messenger);
+        return new LoaderSender(source, messenger);
     }
 
     /**
-     * The wrapped Brigadier source. Used by {@code FabricModHost} to satisfy the
+     * The wrapped Brigadier source. Used by {@code LoaderModHost} to satisfy the
      * {@code CommandSourceStack}-typed {@code ModCommandHandler} the mod-flavor
      * sdk declares; throws when handed a {@link Sender} from another platform,
      * which would be a wiring bug.
      */
     public static CommandSourceStack unwrap(Sender sender) {
-        if (sender instanceof FabricSender fabric) {
+        if (sender instanceof LoaderSender fabric) {
             return fabric.source;
         }
         throw new IllegalArgumentException("Not a Fabric sender: "
@@ -95,7 +95,7 @@ public final class FabricSender implements Sender {
         return new Audience() {
             @Override
             public void sendMessage(net.kyori.adventure.text.Component message) {
-                source.sendSystemMessage(FabricText.toVanilla(message, source.getServer()));
+                source.sendSystemMessage(LoaderText.toVanilla(message, source.getServer()));
             }
         };
     }

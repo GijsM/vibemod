@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,11 +35,11 @@ import net.minecraft.server.MinecraftServer;
  * components can reference registry data (item hovers, for one). That is the
  * only reason a {@link MinecraftServer} has to be in scope to render text.
  */
-public final class FabricText {
+public final class LoaderText {
 
-    private static final Logger LOG = Logger.getLogger(FabricText.class.getName());
+    private static final Logger LOG = Logger.getLogger(LoaderText.class.getName());
 
-    private FabricText() {
+    private LoaderText() {
     }
 
     /**

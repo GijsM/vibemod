@@ -57,9 +57,30 @@ val copySharedSdkSources = tasks.register<Copy>("copySharedSdkSources") {
     into(sharedSdkSources)
 }
 
+// ---------------------------------------------------------------------------
+// loader-common (§10.4): the Mojang-typed host code Fabric and NeoForge share.
+//
+// A shared SOURCE directory, not a Gradle module. Both loaders run official
+// Mojang names on 26.1+, so ~2700 lines of this host — the dialog renderer, the
+// mod host, the command bridge, the Adventure/vanilla text and audience
+// adapters, the whole client surface below the loader's own hooks — name no
+// loader type at all and are byte-for-byte the same work twice.
+//
+// It is not a module because a module needs a plugin, and the two candidates
+// are Loom and ModDevGradle: whichever one it applied, the OTHER loader would
+// then compile its host against a game jar produced by its rival's toolchain.
+// As a source directory each loader compiles the shared code against ITS own
+// patched game jar, so a NeoForge patch that changes a vanilla signature is a
+// compile error in `neoforge` rather than a runtime surprise on a user's
+// server. The sdk mod flavor above is wired exactly the same way, for the same
+// reason.
+// ---------------------------------------------------------------------------
+val loaderCommonSources = rootProject.layout.projectDirectory.dir("loader-common/src/main/java")
+
 sourceSets.main {
     java.srcDir(sdkModSources)
     java.srcDir(sharedSdkSources)
+    java.srcDir(loaderCommonSources)
 }
 
 tasks.named("compileJava") { dependsOn(copySharedSdkSources) }

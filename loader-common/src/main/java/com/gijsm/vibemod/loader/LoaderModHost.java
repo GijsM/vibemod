@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.loader;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -46,15 +46,15 @@ import com.gijsm.vibemod.store.ModConfigs;
  * server it does nothing at all, which is what lets one generated mod run on
  * both.
  */
-public final class FabricModHost implements ModHost {
+public final class LoaderModHost implements ModHost {
 
     private final MinecraftServer server;
     private final Path dataFolder;
-    private final FabricEventBridge events;
-    private final FabricCommandBridge commands;
+    private final LoaderEventBridge events;
+    private final LoaderCommandBridge commands;
     private final ModConfigs configs;
     private final ModDispatch dispatch;
-    private final FabricTickScheduler scheduler;
+    private final LoaderTickScheduler scheduler;
     /**
      * Builds a mod's {@link ClientContext}, or null on a dedicated server.
      *
@@ -66,9 +66,9 @@ public final class FabricModHost implements ModHost {
      */
     private final Function<ModHandle, ClientContext> clientContexts;
 
-    public FabricModHost(MinecraftServer server, Path dataFolder, FabricEventBridge events,
-                         FabricCommandBridge commands, ModConfigs configs, ModDispatch dispatch,
-                         FabricTickScheduler scheduler, Function<ModHandle, ClientContext> clientContexts) {
+    public LoaderModHost(MinecraftServer server, Path dataFolder, LoaderEventBridge events,
+                         LoaderCommandBridge commands, ModConfigs configs, ModDispatch dispatch,
+                         LoaderTickScheduler scheduler, Function<ModHandle, ClientContext> clientContexts) {
         this.server = server;
         this.dataFolder = dataFolder;
         this.events = events;
@@ -195,7 +195,7 @@ public final class FabricModHost implements ModHost {
         public void command(String name, String description, ModCommandHandler handler) {
             assertMainThread();
             Registration registration = commands.register(name, description, handle.name(),
-                    (sender, args) -> handler.run(FabricSender.unwrap(sender), args));
+                    (sender, args) -> handler.run(LoaderSender.unwrap(sender), args));
             if (registration.active()) {
                 handle.track(ModHandle.Kind.COMMAND, registration);
                 handle.trackCommandName(name);
@@ -209,7 +209,7 @@ public final class FabricModHost implements ModHost {
         public void action(String name, ModCommandHandler handler) {
             assertMainThread();
             handle.trackAction(name.toLowerCase(Locale.ROOT),
-                    (sender, args) -> handler.run(FabricSender.unwrap(sender), args));
+                    (sender, args) -> handler.run(LoaderSender.unwrap(sender), args));
         }
 
         // ---- live config ----

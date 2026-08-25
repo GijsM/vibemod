@@ -31,6 +31,14 @@ import com.gijsm.vibemod.llm.ModelCatalog;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PlatformProfiles;
+import com.gijsm.vibemod.loader.DialogClicks;
+import com.gijsm.vibemod.loader.LoaderCommandBridge;
+import com.gijsm.vibemod.loader.LoaderConfig;
+import com.gijsm.vibemod.loader.LoaderDialogRenderer;
+import com.gijsm.vibemod.loader.LoaderMessenger;
+import com.gijsm.vibemod.loader.LoaderModHost;
+import com.gijsm.vibemod.loader.LoaderSender;
+import com.gijsm.vibemod.loader.LoaderTickScheduler;
 import com.gijsm.vibemod.platform.ClientEventBridge;
 import com.gijsm.vibemod.platform.CompilerProvider;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -92,7 +100,7 @@ public final class VibeModFabric implements ModInitializer {
      */
     private static volatile FabricEventBridge eventBridge;
     private static volatile FabricChatBridge chatBridge;
-    private static volatile FabricCommandBridge commandBridge;
+    private static volatile LoaderCommandBridge commandBridge;
 
     /**
      * What the client entrypoint contributes: the bridge, its watchdog wiring,
@@ -115,8 +123,8 @@ public final class VibeModFabric implements ModInitializer {
      * is no per-player form state to forget.
      */
     public record Services(MinecraftServer server, FabricPlatformInfo platform, ModLifecycle lifecycle,
-                           ModStore store, ModErrors errors, FabricMessenger messenger,
-                           FabricTickScheduler scheduler, UiRenderer ui, VibeRouter router,
+                           ModStore store, ModErrors errors, LoaderMessenger messenger,
+                           LoaderTickScheduler scheduler, UiRenderer ui, VibeRouter router,
                            ChatRenderer chatRenderer) {
     }
 
@@ -164,7 +172,7 @@ public final class VibeModFabric implements ModInitializer {
         // dispatcher — which would silently drop every generated-mod command if
         // the bridge did not re-add them.
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) -> {
-            FabricCommandBridge live = commandBridge;
+            LoaderCommandBridge live = commandBridge;
             if (live != null) {
                 live.reinstallInto(dispatcher);
             }
@@ -196,15 +204,15 @@ public final class VibeModFabric implements ModInitializer {
             LOG.severe("Could not create " + dataFolder + ": " + e);
             return;
         }
-        FabricConfig config = new FabricConfig(
+        LoaderConfig config = new LoaderConfig(
                 FabricLoader.getInstance().getConfigDir().resolve("vibemod.json"));
 
         FabricPlatformInfo platform = new FabricPlatformInfo(server.isDedicatedServer());
         PlatformProfile profile = PlatformProfiles.forPlatform(platform);
         LOG.info("Platform: " + platform.describe() + " → prompt profile " + profile.displayName());
 
-        FabricTickScheduler scheduler = new FabricTickScheduler(server);
-        FabricMessenger messenger = new FabricMessenger(server);
+        LoaderTickScheduler scheduler = new LoaderTickScheduler(server);
+        LoaderMessenger messenger = new LoaderMessenger(server);
 
         Optional<CompilerProvider> compilerProvider = CompilerProvider.resolve();
         if (compilerProvider.isEmpty()) {
@@ -271,7 +279,7 @@ public final class VibeModFabric implements ModInitializer {
         LOG.info("VibeMod stopped");
     }
 
-    private static long watchdogSingleMs(FabricConfig config) {
+    private static long watchdogSingleMs(LoaderConfig config) {
         return config.getBoolean("watchdog.enabled", true)
                 ? config.getLong("watchdog.single-invocation-ms", 250) : 0;
     }
@@ -280,7 +288,7 @@ public final class VibeModFabric implements ModInitializer {
      * The key lookup, in the same order as Paper's: config, then environment,
      * then {@code ~/.config/vibemod/openrouter.key}. Never hardcoded anywhere.
      */
-    private static String resolveApiKey(FabricConfig config) {
+    private static String resolveApiKey(LoaderConfig config) {
         String fromConfig = config.getString("openrouter.api-key", "");
         if (fromConfig != null && !fromConfig.isBlank()) {
             return fromConfig.trim();
@@ -310,11 +318,11 @@ public final class VibeModFabric implements ModInitializer {
 
         private final MinecraftServer server;
         private final Path dataFolder;
-        private final FabricConfig config;
+        private final LoaderConfig config;
         private final FabricPlatformInfo platform;
         private final PlatformProfile profile;
-        private final FabricTickScheduler scheduler;
-        private final FabricMessenger messenger;
+        private final LoaderTickScheduler scheduler;
+        private final LoaderMessenger messenger;
         private final InMemoryCompiler compiler;
         private final OpenRouterClient client;
         private final ModelCatalog catalog;
@@ -325,7 +333,7 @@ public final class VibeModFabric implements ModInitializer {
         private final DebugEcho debugEcho;
 
         private ModLifecycle lifecycle;
-        private FabricCommandBridge commandBridge;
+        private LoaderCommandBridge commandBridge;
         private FabricChatBridge chatBridge;
         private ChatRenderer chatRenderer;
         private UiRenderer ui;
@@ -336,8 +344,8 @@ public final class VibeModFabric implements ModInitializer {
         private SettingsScreens settingsScreens;
         private Services services;
 
-        Boot(MinecraftServer server, Path dataFolder, FabricConfig config, FabricPlatformInfo platform,
-             PlatformProfile profile, FabricTickScheduler scheduler, FabricMessenger messenger,
+        Boot(MinecraftServer server, Path dataFolder, LoaderConfig config, FabricPlatformInfo platform,
+             PlatformProfile profile, LoaderTickScheduler scheduler, LoaderMessenger messenger,
              InMemoryCompiler compiler, OpenRouterClient client, ModelCatalog catalog, Watchdog watchdog,
              ModStore store, ModConfigs configs, ModErrors modErrors, DebugEcho debugEcho) {
             this.server = server;
@@ -372,13 +380,13 @@ public final class VibeModFabric implements ModInitializer {
 
             // Published to the statics the process-lived subscriptions read; the
             // subscriptions themselves were made once, in onInitialize().
-            commandBridge = new FabricCommandBridge(server, messenger, dispatch,
+            commandBridge = new LoaderCommandBridge(server, messenger, dispatch,
                     config.getBoolean("commands.allow-top-level", true));
             eventBridge = new FabricEventBridge(dispatch);
             chatBridge = new FabricChatBridge(scheduler);
 
             ClientHooks hooks = clientHooks;
-            FabricModHost modHost = new FabricModHost(server, dataFolder, eventBridge, commandBridge,
+            LoaderModHost modHost = new LoaderModHost(server, dataFolder, eventBridge, commandBridge,
                     configs, dispatch, scheduler, hooks == null ? null : hooks.contexts());
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
 
@@ -453,7 +461,7 @@ public final class VibeModFabric implements ModInitializer {
             boolean forceChat = config.getBoolean("ui.force-chat", false);
             if (platform.hasDialogs() && !forceChat) {
                 LOG.info("UI: native dialogs");
-                return new FabricDialogRenderer(server, scheduler, messenger);
+                return new LoaderDialogRenderer(server, scheduler, messenger);
             }
             LOG.info("UI: chat" + (forceChat ? " (forced by ui.force-chat)"
                     : " (this game has no dialog API)"));
@@ -463,11 +471,11 @@ public final class VibeModFabric implements ModInitializer {
 
         private Sender senderFor(UUID playerId) {
             var player = playerId == null ? null : server.getPlayerList().getPlayer(playerId);
-            return player == null ? null : FabricSender.of(player.createCommandSourceStack(), messenger);
+            return player == null ? null : LoaderSender.of(player.createCommandSourceStack(), messenger);
         }
 
         private Sender console() {
-            return FabricSender.of(server.createCommandSourceStack(), messenger);
+            return LoaderSender.of(server.createCommandSourceStack(), messenger);
         }
 
         // ---- config plumbing ----

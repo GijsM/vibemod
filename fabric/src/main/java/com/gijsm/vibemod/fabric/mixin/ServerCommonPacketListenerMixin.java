@@ -12,7 +12,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerCommonPacketListenerImpl;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 
-import com.gijsm.vibemod.fabric.DialogClicks;
+import com.gijsm.vibemod.loader.DialogClicks;
 
 /**
  * The one mixin (ARCHITECTURE-V2 §8.5), and the reason it has to exist.

@@ -1,8 +1,8 @@
-package com.gijsm.vibemod.fabric.client;
+package com.gijsm.vibemod.loader.client;
 
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
-import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.platform.TaskHandle;
 import com.gijsm.vibemod.platform.TickScheduler;
 
@@ -20,48 +20,53 @@ import com.gijsm.vibemod.platform.TickScheduler;
  * simply looks the scheduler up when asked. Before that, {@code onMain()} is
  * false (the render thread is not a server thread) and work is dropped with a
  * log line rather than queued for a server that may never start.
+ *
+ * <p>The supplier — rather than a direct reference to the host — is what keeps
+ * this class loader-independent: each loader's entrypoint knows how to find its
+ * own live services.
  */
-final class DeferredTickScheduler implements TickScheduler {
+public final class DeferredTickScheduler implements TickScheduler {
 
     private static final Logger LOG = Logger.getLogger(DeferredTickScheduler.class.getName());
 
-    private static TickScheduler live() {
-        VibeModFabric.Services services = VibeModFabric.services();
-        return services == null ? null : services.scheduler();
+    private final Supplier<TickScheduler> live;
+
+    public DeferredTickScheduler(Supplier<TickScheduler> live) {
+        this.live = live;
     }
 
     @Override
     public TaskHandle repeat(long delayTicks, long periodTicks, Runnable task) {
-        TickScheduler live = live();
-        return live == null ? inactive() : live.repeat(delayTicks, periodTicks, task);
+        TickScheduler now = live.get();
+        return now == null ? inactive() : now.repeat(delayTicks, periodTicks, task);
     }
 
     @Override
     public TaskHandle later(long delayTicks, Runnable task) {
-        TickScheduler live = live();
-        return live == null ? inactive() : live.later(delayTicks, task);
+        TickScheduler now = live.get();
+        return now == null ? inactive() : now.later(delayTicks, task);
     }
 
     @Override
     public TaskHandle async(Runnable task) {
-        TickScheduler live = live();
-        return live == null ? inactive() : live.async(task);
+        TickScheduler now = live.get();
+        return now == null ? inactive() : now.async(task);
     }
 
     @Override
     public void runOnMain(Runnable task) {
-        TickScheduler live = live();
-        if (live == null) {
+        TickScheduler now = live.get();
+        if (now == null) {
             LOG.fine("Dropped a main-thread hop: no server is running");
             return;
         }
-        live.runOnMain(task);
+        now.runOnMain(task);
     }
 
     @Override
     public boolean onMain() {
-        TickScheduler live = live();
-        return live != null && live.onMain();
+        TickScheduler now = live.get();
+        return now != null && now.onMain();
     }
 
     private static TaskHandle inactive() {
