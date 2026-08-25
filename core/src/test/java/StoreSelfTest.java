@@ -42,6 +42,7 @@ public class StoreSelfTest {
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
         testNullFieldMetaJsonNormalized();
+        testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
         testIconRoundTripAndNormalization();
         testDebugEchoPersistence();
@@ -214,6 +215,13 @@ public class StoreSelfTest {
         check("v1 meta.json debugEcho stays null (tri-state: no override, NOT defaulted)",
                 mod.debugEcho() == null);
 
+        // meta.json v3 (ARCHITECTURE-V2 5): a file with no schema/platform/mcVersion/side
+        // is every one of the 49 stored mods, and reads back as paper/1.21.8/server.
+        check("pre-v3 meta.json reads as schema 3", mod.schema() == ModStore.SCHEMA_VERSION);
+        check("pre-v3 meta.json platform normalized to paper", "paper".equals(mod.platform()));
+        check("pre-v3 meta.json mcVersion normalized to 1.21.8", "1.21.8".equals(mod.mcVersion()));
+        check("pre-v3 meta.json side normalized to server", "server".equals(mod.side()));
+
         // Version entries written before changelog/kind/costUsd/requester existed
         // (the 21 live mods) must read back with ""/0.0 defaults, never null.
         ModStore.StoredVersion oldVersion = mod.versions().get(0);
@@ -231,6 +239,71 @@ public class StoreSelfTest {
                 && fromAll.config().isEmpty() && fromAll.configValues().isEmpty());
 
         System.out.println("PASS: v1-shaped meta.json degrades to normalized empty fields");
+    }
+
+    /**
+     * meta.json v3 (ARCHITECTURE-V2 §5): a pre-v3 file is normalized on read AND
+     * written back stamped on the next save; a store told which host it is
+     * running on stamps new mods with that; {@code side} is derived from whether
+     * the generated code calls {@code ctx.client(...)}; and {@code runsOn}
+     * refuses a mod belonging to another platform.
+     */
+    private static void testMetaSchemaV3Normalization() throws Exception {
+        Path modsDir = tempDir("modstore-v3-meta");
+
+        // (a) a fabric store stamps what it generates, and derives side from the source.
+        ModStore fabric = new ModStore(modsDir, "fabric", "26.1");
+        GeneratedProject serverOnly = new GeneratedProject("ServerSide", "server only", "", "", null, "STONE",
+                "ServerSide", List.of(new GeneratedProject.GeneratedFile("ServerSide.java",
+                        "package v;\npublic class ServerSide { void go(Object ctx) {} }\n")),
+                List.of(), null);
+        ModStore.StoredMod s1 = fabric.saveNewVersion("ServerSide", "server only", "ServerSide", "gijs",
+                "p", "m", null, null, 0.0, null, serverOnly);
+        check("new mod stamps schema 3", s1.schema() == ModStore.SCHEMA_VERSION);
+        check("new mod stamps the host platform", "fabric".equals(s1.platform()));
+        check("new mod stamps the host mc version", "26.1".equals(s1.mcVersion()));
+        check("server-only source derives side=server", "server".equals(s1.side()));
+
+        GeneratedProject clientToo = new GeneratedProject("HudSide", "has a hud", "", "", null, "CLOCK",
+                "HudSide", List.of(new GeneratedProject.GeneratedFile("HudSide.java",
+                        "package v;\npublic class HudSide { void go(Object c) { ctx.client(x -> {}); } }\n")),
+                List.of(), null);
+        ModStore.StoredMod s2 = fabric.saveNewVersion("HudSide", "has a hud", "HudSide", "gijs",
+                "p", "m", null, null, 0.0, null, clientToo);
+        check("ctx.client(...) source derives side=both", "both".equals(s2.side()));
+
+        // (b) the v3 fields survive a disk round trip untouched.
+        ModStore reread = new ModStore(modsDir, "fabric", "26.1");
+        ModStore.StoredMod back = reread.get("HudSide");
+        check("v3 fields round-trip through disk",
+                "fabric".equals(back.platform()) && "26.1".equals(back.mcVersion())
+                        && "both".equals(back.side()) && back.schema() == ModStore.SCHEMA_VERSION);
+
+        // (c) runsOn gates a foreign mod and passes a native one.
+        check("runsOn accepts a same-platform mod", reread.runsOn("HudSide", "fabric"));
+        check("runsOn refuses a foreign mod", !reread.runsOn("HudSide", "paper"));
+        check("runsOn is case-insensitive", reread.runsOn("HudSide", "FABRIC"));
+        check("runsOn passes unknown mods through (the caller reports those)",
+                reread.runsOn("NoSuchMod", "paper"));
+
+        // (d) a pre-v3 file is written back stamped: normalize-on-read + the next save.
+        Path legacyDir = modsDir.resolve("Legacy");
+        Files.createDirectories(legacyDir);
+        Files.writeString(legacyDir.resolve("meta.json"),
+                "{\"name\":\"Legacy\",\"description\":\"d\",\"mainClass\":\"L\","
+                        + "\"currentVersion\":1,\"enabled\":true,\"creator\":\"g\",\"versions\":[]}\n",
+                StandardCharsets.UTF_8);
+        ModStore legacyStore = new ModStore(modsDir, "fabric", "26.1");
+        legacyStore.setEnabled("Legacy", false);
+        String written = Files.readString(legacyDir.resolve("meta.json"), StandardCharsets.UTF_8);
+        check("a pre-v3 file gets the v3 fields written back on next save",
+                written.contains("\"schema\": 3") && written.contains("\"platform\": \"paper\"")
+                        && written.contains("\"mcVersion\": \"1.21.8\"")
+                        && written.contains("\"side\": \"server\""));
+        check("write-back keeps the retro-stamp, not the running host",
+                "paper".equals(legacyStore.get("Legacy").platform()));
+
+        System.out.println("PASS: meta.json v3 stamps new mods, normalizes old ones, and gates foreign platforms");
     }
 
     /**
@@ -502,7 +575,8 @@ public class StoreSelfTest {
                 + "}\n";
         Map<String, String> sources = Map.of("vibemod.trivial.TrivialMod", modSource);
 
-        ModStore.StoredMod mod = new ModStore.StoredMod("Trivial", "A trivial export test mod", "", "", "",
+        ModStore.StoredMod mod = new ModStore.StoredMod(ModStore.SCHEMA_VERSION, "paper", "1.21.8", "server",
+                "Trivial", "A trivial export test mod", "", "", "",
                 "TrivialMod", 1, true, "gijs", List.of(new ModStore.StoredVersion(1, "make a trivial mod", "model-x",
                         System.currentTimeMillis(), "", "", 0.0, "")), List.of(), Map.of(), null);
 
@@ -587,7 +661,8 @@ public class StoreSelfTest {
         Map<String, String> configValues = new LinkedHashMap<>();
         configValues.put("count", "9"); // override the schema default of 5
 
-        ModStore.StoredMod mod = new ModStore.StoredMod("Knobby", "A configurable export test mod", "", "", "",
+        ModStore.StoredMod mod = new ModStore.StoredMod(ModStore.SCHEMA_VERSION, "paper", "1.21.8", "server",
+                "Knobby", "A configurable export test mod", "", "", "",
                 "KnobbyMod", 1, true, "gijs",
                 List.of(new ModStore.StoredVersion(1, "make a knobby mod", "model-x", System.currentTimeMillis(),
                         "", "", 0.0, "")),

@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.paper;
+package com.gijsm.vibemod.runtime;
 
 import java.util.Map;
 import java.util.UUID;
@@ -20,8 +20,12 @@ import com.gijsm.vibemod.platform.Registration;
  * per player, opening a chat-rendered form ends chat mode; that is the honest
  * outcome when two flows both want the player's next line, and it can only
  * happen on a server with no dialog support.
+ *
+ * <p>Phase D moved this out of {@code paper} unchanged: it never named a Bukkit
+ * type in the first place — only {@link ChatBridge} — and the Fabric host needs
+ * exactly the same toggle behind exactly the same subcommand.
  */
-public final class PaperChatMode {
+public final class ChatMode {
 
     /** The word that ends chat mode, matching v1. */
     private static final String OFF_WORD = "off";
@@ -30,7 +34,7 @@ public final class PaperChatMode {
     private final BiConsumer<UUID, String> onPrompt;
     private final Map<UUID, Registration> active = new ConcurrentHashMap<>();
 
-    public PaperChatMode(ChatBridge chat, BiConsumer<UUID, String> onPrompt) {
+    public ChatMode(ChatBridge chat, BiConsumer<UUID, String> onPrompt) {
         this.chat = chat;
         this.onPrompt = onPrompt;
     }

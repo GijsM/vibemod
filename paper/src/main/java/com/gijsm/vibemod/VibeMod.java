@@ -15,7 +15,6 @@ import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
-import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -24,6 +23,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import com.gijsm.vibemod.command.VibeCommand;
+import com.gijsm.vibemod.command.VibeRouter;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.gen.ModGenerator;
@@ -32,17 +32,19 @@ import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.paper.PaperChatBridge;
-import com.gijsm.vibemod.paper.PaperChatMode;
 import com.gijsm.vibemod.paper.PaperClasspathProvider;
 import com.gijsm.vibemod.paper.PaperCommandBridge;
 import com.gijsm.vibemod.paper.PaperEventBridge;
 import com.gijsm.vibemod.paper.PaperMessenger;
 import com.gijsm.vibemod.paper.PaperModHost;
 import com.gijsm.vibemod.paper.PaperPlatformInfo;
+import com.gijsm.vibemod.paper.PaperSender;
 import com.gijsm.vibemod.paper.PaperTickScheduler;
 import com.gijsm.vibemod.platform.CompilerProvider;
 import com.gijsm.vibemod.platform.ModFailure;
+import com.gijsm.vibemod.platform.Sender;
 import com.gijsm.vibemod.platform.ui.UiRenderer;
+import com.gijsm.vibemod.runtime.ChatMode;
 import com.gijsm.vibemod.runtime.DebugEcho;
 import com.gijsm.vibemod.runtime.ModDispatch;
 import com.gijsm.vibemod.runtime.ModErrors;
@@ -96,7 +98,7 @@ public final class VibeMod extends JavaPlugin {
     private PaperMessenger messenger;
     private PaperChatBridge chatBridge;
     private PaperCommandBridge commandBridge;
-    private PaperChatMode chatMode;
+    private ChatMode chatMode;
     private ModLifecycle lifecycle;
     private ModStore store;
     private ModConfigs configs;
@@ -154,7 +156,8 @@ public final class VibeMod extends JavaPlugin {
         catalog.refreshAsync();
 
         watchdog = new Watchdog(scheduler, "main", watchdogSingleMs(), perSecondBudgetMs());
-        store = new ModStore(getDataFolder().toPath().resolve("mods"));
+        store = new ModStore(getDataFolder().toPath().resolve("mods"),
+                platform.platformName(), platform.mcVersion());
         configs = new ModConfigs(store);
         modErrors = new ModErrors(scheduler, getDataFolder().toPath().resolve("mods"));
         applyErrorLimits();
@@ -197,11 +200,11 @@ public final class VibeMod extends JavaPlugin {
         });
 
         chatBridge = new PaperChatBridge(this, scheduler);
-        chatMode = new PaperChatMode(chatBridge, this::generateFromPrompt);
+        chatMode = new ChatMode(chatBridge, this::generateFromPrompt);
         ui = chooseRenderer();
 
         forms = new FormScreens(messenger, ui);
-        hub = new HubScreens(lifecycle, store, modErrors, debugEcho);
+        hub = new HubScreens(lifecycle, store, modErrors, debugEcho, platform.platformName());
         info = new InfoScreens(ui);
         settingsScreens = new SettingsScreens(messenger, ui, this::settingsSnapshot, this::applySettings,
                 this::openSettingsModelPicker, this::reloadVibeConfig);
@@ -212,13 +215,16 @@ public final class VibeMod extends JavaPlugin {
                 getConfig().getInt("generation.concurrency", 4));
         JarExporter exporter = new JarExporter(compiler, profile);
 
+        VibeRouter router = new VibeRouter(scheduler, messenger, platform, getDataFolder().toPath(),
+                generator, lifecycle, store, configs, modErrors, debugEcho, catalog, exporter,
+                chatMode, ui, chatRenderer, forms, hub, info, settingsScreens,
+                this::senderFor,
+                client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
+                this::reloadVibeConfig);
+
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
-            VibeCommand handler = new VibeCommand(this, scheduler, messenger, platform, generator, lifecycle,
-                    store, configs, modErrors, debugEcho, catalog, exporter, chatMode, ui, chatRenderer,
-                    forms, hub, info, settingsScreens,
-                    client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
-                    this::reloadVibeConfig);
+            VibeCommand handler = new VibeCommand(router);
             vibe.setExecutor(handler);
             vibe.setTabCompleter(handler);
         }
@@ -336,10 +342,10 @@ public final class VibeMod extends JavaPlugin {
      * thread after the version is actually live — the compile is async, so this
      * is the only correct place for follow-ups like reopening the mod hub.
      */
-    private void applyStoredVersion(CommandSender feedback, String modName, Runnable onLive) {
+    private void applyStoredVersion(Sender feedback, String modName, Runnable onLive) {
         ModStore.StoredMod mod = store.get(modName);
         if (mod == null) {
-            feedback.sendMessage(Style.err("Unknown mod: " + modName));
+            feedback.audience().sendMessage(Style.err("Unknown mod: " + modName));
             return;
         }
         Map<String, String> sources = store.sources(mod.name(), mod.currentVersion());
@@ -347,7 +353,7 @@ public final class VibeMod extends JavaPlugin {
             CompileResult compiled = compiler.compile(sources);
             scheduler.runOnMain(() -> {
                 if (!compiled.success()) {
-                    feedback.sendMessage(Style.err("Stored version failed to compile: "
+                    feedback.audience().sendMessage(Style.err("Stored version failed to compile: "
                             + firstLine(compiled.diagnostics())));
                     return;
                 }
@@ -356,25 +362,46 @@ public final class VibeMod extends JavaPlugin {
                             mod.mainClass(), compiled.classes(),
                             mod.config(), store.resolvedConfigValues(mod.name()), mod.debugEcho());
                     store.setEnabled(mod.name(), true);
-                    feedback.sendMessage(Style.ok(mod.name() + " v" + mod.currentVersion() + " is live"));
+                    feedback.audience().sendMessage(
+                            Style.ok(mod.name() + " v" + mod.currentVersion() + " is live"));
                     if (onLive != null) {
                         onLive.run();
                     }
                 } catch (ModLoadException e) {
-                    feedback.sendMessage(Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
+                    feedback.audience().sendMessage(
+                            Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
                 }
             });
         });
     }
 
-    /** Boot restore: recompile every mod that was enabled when the server last ran. */
+    /**
+     * Boot restore: recompile every mod that was enabled when the server last ran.
+     *
+     * <p>Mods stamped for another platform (meta.json v3, §5) are skipped with a
+     * log line rather than attempted: their sources compile against a different
+     * sdk flavor, so the only thing trying would produce is a wall of compile
+     * diagnostics for a mod the admin never asked this server to run.
+     */
     private void restoreModsFromDisk() {
         for (ModStore.StoredMod mod : store.all()) {
-            if (mod.enabled()) {
-                getLogger().info("Restoring mod " + mod.name() + " v" + mod.currentVersion());
-                applyStoredVersion(getServer().getConsoleSender(), mod.name(), null);
+            if (!mod.enabled()) {
+                continue;
             }
+            if (!mod.platform().equalsIgnoreCase(platform.platformName())) {
+                getLogger().info("Skipping mod " + mod.name() + ": generated for " + mod.platform()
+                        + ", this server is " + platform.platformName());
+                continue;
+            }
+            getLogger().info("Restoring mod " + mod.name() + " v" + mod.currentVersion());
+            applyStoredVersion(PaperSender.of(getServer().getConsoleSender()), mod.name(), null);
         }
+    }
+
+    /** The {@link Sender} for an online player, or null — the router's screen-callback bridge. */
+    private Sender senderFor(UUID playerId) {
+        Player player = playerId == null ? null : getServer().getPlayer(playerId);
+        return player == null ? null : PaperSender.of(player);
     }
 
     // ---- generation entry points shared by chat mode and the screens ----

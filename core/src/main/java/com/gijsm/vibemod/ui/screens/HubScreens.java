@@ -37,12 +37,21 @@ public final class HubScreens {
     private final ModStore store;
     private final ModErrors errors;
     private final DebugEcho debug;
+    /** The running host's platform name, for the meta.json v3 "(other platform)" badge (§5). */
+    private final String platformName;
 
-    public HubScreens(ModLifecycle lifecycle, ModStore store, ModErrors errors, DebugEcho debug) {
+    public HubScreens(ModLifecycle lifecycle, ModStore store, ModErrors errors, DebugEcho debug,
+                      String platformName) {
         this.lifecycle = lifecycle;
         this.store = store;
         this.errors = errors;
         this.debug = debug;
+        this.platformName = platformName == null ? "" : platformName;
+    }
+
+    /** True when {@code mod} was generated somewhere this host cannot run it (§5). */
+    private boolean foreign(ModStore.StoredMod mod) {
+        return !mod.platform().equalsIgnoreCase(platformName);
     }
 
     // ---- 8. mod hub ----
@@ -105,9 +114,11 @@ public final class HubScreens {
         if (admin) {
             buttons.add(ScreenKit.nav("⚙ Configure…", "/vibe config " + m, "Open the config screen"));
             buttons.add(ScreenKit.nav("✎ Edit…", "/vibe edit " + m, "Open the edit-request screen"));
-            buttons.add(enabled
-                    ? ScreenKit.nav("■ Disable", "/vibe disable " + m, "Disable this mod")
-                    : ScreenKit.nav("▶ Enable", "/vibe enable " + m, "Enable this mod"));
+            if (enabled) {
+                buttons.add(ScreenKit.nav("■ Disable", "/vibe disable " + m, "Disable this mod"));
+            } else if (!foreign(mod)) {
+                buttons.add(ScreenKit.nav("▶ Enable", "/vibe enable " + m, "Enable this mod"));
+            }
             boolean debugOn = debug.enabled(m);
             buttons.add(ScreenKit.nav(
                     Style.dot(debugOn, false).append(Component.text(" Debug " + (debugOn ? "on" : "off"))),
@@ -128,6 +139,11 @@ public final class HubScreens {
     /** {@code "● running" / "● degraded (n errors)" / "● off"} — same wording as the list items. */
     private Component stateLine(ModStore.StoredMod mod, boolean enabled, boolean degraded) {
         Component dot = Style.dot(enabled, degraded);
+        if (foreign(mod)) {
+            return Style.dot(false, false).append(Component.text(
+                    " (other platform: " + mod.platform() + ") — /vibe make it again to run it here",
+                    Style.META));
+        }
         if (degraded) {
             int n = errors.distinctCount(mod.name());
             return dot.append(Component.text(" degraded (" + n + " errors)", Style.WARN));
@@ -225,6 +241,9 @@ public final class HubScreens {
         Component label = Style.dot(enabled, degraded)
                 .append(Component.text(" " + mod.name(), Style.stateColor(enabled, degraded)))
                 .append(Component.text(" v" + mod.currentVersion(), Style.META));
+        if (foreign(mod)) {
+            label = label.append(Component.text(" (other platform)", Style.META));
+        }
         return ScreenKit.row(label, modTooltip(mod, enabled, degraded),
                 new UiAction.RunCommand("/vibe info " + mod.name()));
     }
