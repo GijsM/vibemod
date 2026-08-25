@@ -60,9 +60,18 @@ val copySharedSdkSources = tasks.register<Copy>("copySharedSdkSources") {
     into(sharedSdkSources)
 }
 
+// ---------------------------------------------------------------------------
+// loader-common (§10.4): the Mojang-typed host code Fabric and NeoForge share.
+// A shared SOURCE directory rather than a module — see fabric/build.gradle.kts
+// for why. Each loader compiles it against its OWN patched game jar, so a
+// NeoForge patch that moves a vanilla signature is a compile error here.
+// ---------------------------------------------------------------------------
+val loaderCommonSources = rootProject.layout.projectDirectory.dir("loader-common/src/main/java")
+
 sourceSets.main {
     java.srcDir(sdkModSources)
     java.srcDir(sharedSdkSources)
+    java.srcDir(loaderCommonSources)
 }
 
 tasks.named("compileJava") { dependsOn(copySharedSdkSources) }
@@ -127,6 +136,105 @@ dependencies {
     // and the META-INF/services entry are both load-bearing.
     implementation("org.eclipse.jdt:ecj:${property("ecjVersion")}")
 }
+
+/**
+ * Jar-in-Jar (§7.3).
+ *
+ * Two traps here, and Phase D hit the second one on Loom already (§10.3).
+ *
+ * `jarJar` insists on a version RANGE per nested module, because a nested jar's
+ * metadata is a dependency declaration FML resolves against every OTHER mod's
+ * nested jars: two mods shipping the same library have to be able to agree on
+ * one copy. `strictly` pins the range, `prefer` names the build we tested with.
+ *
+ * And **`jarJar` nests exactly the modules it is handed, not their
+ * transitives** — the same trap as Loom's `include`, reached from the other
+ * direction (`jarJar(implementation(...))` resolves a graph for the COMPILE
+ * classpath; the nesting still only sees the named coordinates). Adventure is a
+ * seven-jar graph: every `Component` implements `Examinable` from
+ * `examination-api`, and the gson serializer pulls
+ * `adventure-text-serializer-json` and `option`. Nesting only the four named
+ * modules produces a mod that loads, boots, and dies with a
+ * NoClassDefFoundError the first time it builds a message. So the nesting is
+ * driven off the RESOLVED ARTIFACTS, which is the version of this that cannot
+ * rot: a new Adventure transitive arrives already handled.
+ *
+ * Gson is not nested, exactly as on Fabric: Minecraft depends on it and
+ * NeoForge puts game libraries on the mod class loader.
+ */
+val ecjVersion = property("ecjVersion") as String
+val adventureVersion = property("adventureVersion") as String
+
+val nestedLibraries: Configuration = configurations.detachedConfiguration(
+    dependencies.create("org.eclipse.jdt:ecj:$ecjVersion"),
+    dependencies.create("net.kyori:adventure-api:$adventureVersion"),
+    dependencies.create("net.kyori:adventure-key:$adventureVersion"),
+    dependencies.create("net.kyori:adventure-text-serializer-gson:$adventureVersion"),
+    dependencies.create("net.kyori:adventure-text-serializer-plain:$adventureVersion"),
+).apply {
+    exclude(group = "com.google.code.gson")
+}
+
+dependencies {
+    nestedLibraries.incoming.artifacts.artifacts.forEach { artifact ->
+        val id = artifact.id.componentIdentifier
+        if (id is ModuleComponentIdentifier) {
+            // The upper bound is the next major: these are the compatibility
+            // promises the libraries themselves make, and a nested jar whose
+            // range is a single version can never be deduplicated with another
+            // mod's copy.
+            val upper = id.version.substringBefore('.').toInt() + 1
+            jarJar("${id.group}:${id.module}") {
+                version {
+                    strictly("[${id.version},$upper.0.0)")
+                    prefer(id.version)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The artifact
+// ---------------------------------------------------------------------------
+
+// `jarJar` handles the nested libraries; this merges our own modules flat, the
+// same way the Fabric and Paper jars do, so the sdk classes generated code
+// compiles against are visible on the mod's class loader without a nested-jar
+// lookup — and so `core` and the host share one loader.
+val bundledModules: Configuration = configurations.detachedConfiguration(
+    dependencies.project(":core"),
+    dependencies.project(":platform-api"),
+    dependencies.project(":sdk-client"),
+)
+
+tasks.jar {
+    archiveBaseName = "vibemod-neoforge"
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(bundledModules.elements.map { jars -> jars.map { zipTree(it) } }) {
+        exclude("META-INF/MANIFEST.MF", "META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-tests
+//
+// Plain `main()` classes wired as JavaExec, like every other VibeMod self-test
+// (the project has no test framework on purpose). This one is §9's "union: URL
+// translation unit-tested" item.
+// ---------------------------------------------------------------------------
+
+tasks.register<JavaExec>("selfTestUris") {
+    group = "verification"
+    description = "Checks the loader-URI translation (ARCHITECTURE-V2 §7.1, §9)."
+    mainClass = "UriSelfTest"
+    classpath = sourceSets["test"].runtimeClasspath
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(neoJava)
+    }
+}
+
+tasks.named("check") { dependsOn("selfTestUris") }
 
 /**
  * Prints the resolved compile classpath, one `:`-joined line.

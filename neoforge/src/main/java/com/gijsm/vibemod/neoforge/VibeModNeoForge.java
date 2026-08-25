@@ -1,4 +1,4 @@
-package com.gijsm.vibemod.fabric;
+package com.gijsm.vibemod.neoforge;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -10,18 +10,30 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.logging.Logger;
 
-import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
-import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
-import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.fabricmc.loader.api.FabricLoader;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.loading.FMLPaths;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.player.CustomClickActionEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.server.permission.PermissionAPI;
+import net.neoforged.neoforge.server.permission.events.PermissionGatherEvent;
+import net.neoforged.neoforge.server.permission.nodes.PermissionNode;
+import net.neoforged.neoforge.server.permission.nodes.PermissionTypes;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.PermissionLevel;
+import net.minecraft.server.permissions.Permissions;
 
 import com.gijsm.vibemod.api.client.ClientContext;
 import com.gijsm.vibemod.command.VibeRouter;
@@ -66,24 +78,30 @@ import com.gijsm.vibemod.ui.screens.InfoScreens;
 import com.gijsm.vibemod.ui.screens.SettingsScreens;
 
 /**
- * VibeMod on Fabric: the {@code main} entrypoint, and nothing but a bootstrap.
+ * VibeMod on NeoForge: the {@code @Mod} entrypoint, and nothing but a bootstrap.
  *
- * <p>The shape mirrors Paper's {@code VibeMod} plugin class exactly — probe what
- * the platform can do, build the SPI implementations, hand them to the
- * platform-free engine in {@code core}, pick a renderer — because that is the
- * whole point of the v2 architecture. Everything below the SPI is shared; the
- * only thing a host writes is the wiring.
+ * <p>The shape mirrors {@code VibeModFabric} — and Paper's plugin class before
+ * it — because that is the whole point of the v2 architecture: probe what the
+ * platform can do, build the SPI implementations, hand them to the
+ * platform-free engine in {@code core}, pick a renderer. Everything below the
+ * SPI is shared, and on the two loaders most of the SPI implementations are
+ * shared too (§10.4, {@code loader-common}). The only thing a host writes is the
+ * wiring.
  *
- * <p>One structural difference the loader forces: a Fabric mod initializes
- * before a server exists, and on a client no server may ever exist. So this
- * class registers exactly one thing at init — a {@code SERVER_STARTING} hook —
- * and everything else is built inside it, torn down at {@code SERVER_STOPPED},
- * and built again if the player loads another world in the same JVM.
+ * <p>One structural rule the loader forces, and it is the §10.3 trap restated:
+ * <b>a mod initialises once per process, but a VibeMod host lives with a
+ * server</b> — and on a client that is one host per world loaded. So the
+ * constructor registers exactly one thing per surface, permanently, on
+ * {@code NeoForge.EVENT_BUS}; each of those resolves the live per-server object
+ * when it fires (null between worlds). NeoForge's bus can unregister, unlike
+ * Fabric's, and it still would not help: the asymmetry is about lifetimes, not
+ * about the bus.
  *
- * <p>{@link #services()} is how the client entrypoint reaches the live host
- * without either half depending on the other's classes.
+ * <p>{@link #services()} is how the client half reaches the live host without
+ * either half depending on the other's classes.
  */
-public final class VibeModFabric implements ModInitializer {
+@Mod("vibemod")
+public final class VibeModNeoForge {
 
     private static final Logger LOG = Logger.getLogger("VibeMod");
 
@@ -95,12 +113,11 @@ public final class VibeModFabric implements ModInitializer {
      * The live bridges, or null between worlds.
      *
      * <p>Separate from {@link #services} because the process-lived subscriptions
-     * in {@link #onInitialize()} need them, and because they exist slightly
-     * earlier in {@code wire()} than the fully-built {@link Services} record
-     * does.
+     * in the constructor need them, and because they exist slightly earlier in
+     * {@code wire()} than the fully-built {@link Services} record does.
      */
-    private static volatile FabricEventBridge eventBridge;
-    private static volatile FabricChatBridge chatBridge;
+    private static volatile NeoForgeEventBridge eventBridge;
+    private static volatile NeoForgeChatBridge chatBridge;
     private static volatile LoaderCommandBridge commandBridge;
 
     /**
@@ -123,7 +140,7 @@ public final class VibeModFabric implements ModInitializer {
      * <p>{@code chatRenderer} is null when native dialogs are in use — then there
      * is no per-player form state to forget.
      */
-    public record Services(MinecraftServer server, FabricPlatformInfo platform, ModLifecycle lifecycle,
+    public record Services(MinecraftServer server, NeoForgePlatformInfo platform, ModLifecycle lifecycle,
                            ModStore store, ModErrors errors, LoaderMessenger messenger,
                            LoaderTickScheduler scheduler, UiRenderer ui, VibeRouter router,
                            ChatRenderer chatRenderer) {
@@ -134,40 +151,45 @@ public final class VibeModFabric implements ModInitializer {
         return services;
     }
 
-    /** Called by the client entrypoint at its own init, before any server starts. */
+    /** Called by the client entrypoint at its own construction, before a server exists. */
     public static void setClientHooks(ClientHooks hooks) {
         clientHooks = hooks;
     }
 
+    // ------------------------------------------------------- permission nodes
+
     /**
-     * Every Fabric subscription VibeMod makes on the server side, made exactly
-     * once, here.
+     * The two permission nodes VibeMod models, registered with NeoForge's
+     * {@code PermissionAPI} so an installed permission manager (LuckPerms and
+     * friends) can grant them by name.
      *
-     * <p>This is not tidiness — it is the same rule §8.1 states for the client,
-     * and it applies just as hard to the host. A Fabric {@code Event} cannot be
-     * unregistered. A client can load world A, quit to the menu, and load world
-     * B in the same process, and each of those starts and stops a whole VibeMod
-     * host. Registering from that per-server bootstrap therefore leaves one
-     * subscription per world ever loaded, all but the last dispatching into a
-     * dead scheduler and a dead bridge. So the subscriptions live for the
-     * process and resolve the live per-server objects when they fire, which is
-     * null between worlds.
+     * <p>Their default resolvers answer by op level, which is the same contract
+     * fabric-permission-api gives Fabric: node first, op level when nothing
+     * answers. That is why {@code LoaderSender} takes an oracle rather than
+     * branching — the question is identical on both loaders, only the plumbing
+     * differs (§10.4).
      */
-    @Override
-    public void onInitialize() {
+    private static final PermissionNode<Boolean> USE = new PermissionNode<>(
+            LoaderSender.USE_NODE, PermissionTypes.BOOLEAN, (player, uuid, context) -> true);
+    private static final PermissionNode<Boolean> ADMIN = new PermissionNode<>(
+            LoaderSender.ADMIN_NODE, PermissionTypes.BOOLEAN,
+            (player, uuid, context) -> player != null && atLeast(player, PermissionLevel.GAMEMASTERS));
+
+    public VibeModNeoForge() {
         LOG.info("VibeMod loading — waiting for a server");
-        ServerLifecycleEvents.SERVER_STARTING.register(VibeModFabric::start);
-        ServerLifecycleEvents.SERVER_STOPPED.register(server -> stop());
 
-        FabricEventBridge.installDispatchers(() -> eventBridge);
-        FabricChatBridge.installDispatcher(() -> chatBridge);
+        LoaderSender.setPermissionOracle(VibeModNeoForge::checkPermission);
 
-        // fabric-permission-api-v1 injects checkPermission onto CommandSourceStack;
-        // NeoForge answers the same question through PermissionAPI, so which one
-        // LoaderSender asks is installed here rather than branched on (§10.4).
-        LoaderSender.setPermissionOracle(CommandSourceStack::checkPermission);
+        NeoForge.EVENT_BUS.addListener(PermissionGatherEvent.Nodes.class,
+                event -> event.addNodes(USE, ADMIN));
 
-        ServerTickEvents.END_SERVER_TICK.register(server -> {
+        NeoForge.EVENT_BUS.addListener(ServerStartingEvent.class, event -> start(event.getServer()));
+        NeoForge.EVENT_BUS.addListener(ServerStoppedEvent.class, event -> stop());
+
+        NeoForgeEventBridge.installDispatchers(NeoForge.EVENT_BUS, () -> eventBridge);
+        NeoForgeChatBridge.installDispatcher(NeoForge.EVENT_BUS, () -> chatBridge);
+
+        NeoForge.EVENT_BUS.addListener(ServerTickEvent.Post.class, event -> {
             Services live = services;
             if (live != null) {
                 live.scheduler().tick();
@@ -177,14 +199,73 @@ public final class VibeModFabric implements ModInitializer {
         // Fires at startup AND after every /reload, each time with a fresh
         // dispatcher — which would silently drop every generated-mod command if
         // the bridge did not re-add them.
-        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) -> {
+        NeoForge.EVENT_BUS.addListener(RegisterCommandsEvent.class, event -> {
             LoaderCommandBridge live = commandBridge;
             if (live != null) {
-                live.reinstallInto(dispatcher);
+                live.reinstallInto(event.getDispatcher());
             }
         });
 
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> forget(handler.player.getUUID()));
+        NeoForge.EVENT_BUS.addListener(PlayerEvent.PlayerLoggedOutEvent.class, event -> {
+            if (event.getEntity() instanceof ServerPlayer player) {
+                forget(player.getUUID());
+            }
+        });
+
+        // ARCHITECTURE-V2 §8.5 asked whether the loader exposes an event for
+        // custom click actions, so the Fabric mixin could be skipped. NeoForge
+        // does: it patches ServerCommonPacketListenerImpl to pass the PLAYER
+        // through to MinecraftServer#handleCustomClickAction, where CommonHooks
+        // posts this event — after ensureRunningOnSameThread, so already on the
+        // server thread. Fabric needs a mixin for exactly the information this
+        // event hands over for free. HIGHEST so a dialog VibeMod opened is
+        // answered before any other mod's click handling sees it.
+        NeoForge.EVENT_BUS.addListener(EventPriority.HIGHEST, CustomClickActionEvent.class, event -> {
+            if (DialogClicks.handle(event.getPlayer(), event.getIdentifier(),
+                    Optional.ofNullable(event.getPayload()))) {
+                // It was ours: vanilla's debug no-op has nothing to add.
+                event.setCanceled(true);
+            }
+        });
+    }
+
+    /**
+     * The {@code LoaderSender} oracle: node first, op level when nothing answers.
+     *
+     * <p>Only the two nodes above are registered, because {@code PermissionAPI}
+     * requires registration at gather time and a mod can ask about any string.
+     * Anything else falls straight through to the op-level check, which is what
+     * the Fabric side's unregistered-node path does too.
+     */
+    private static boolean checkPermission(CommandSourceStack source, Identifier node,
+                                           PermissionLevel fallback) {
+        ServerPlayer player = source.getPlayer();
+        if (player != null) {
+            PermissionNode<Boolean> known = node.equals(LoaderSender.USE_NODE) ? USE
+                    : node.equals(LoaderSender.ADMIN_NODE) ? ADMIN : null;
+            if (known != null) {
+                try {
+                    return Boolean.TRUE.equals(PermissionAPI.getPermission(player, known));
+                } catch (Throwable notInitialised) {
+                    // Before the permission handler exists (very early, or in a
+                    // test harness) the op level is the honest answer.
+                }
+            }
+            return atLeast(player, fallback);
+        }
+        // The console and RCON are the server itself: everything, always.
+        return true;
+    }
+
+    /** Vanilla 26.x has no {@code hasPermission(int)}; op levels are typed Permissions now. */
+    private static boolean atLeast(ServerPlayer player, PermissionLevel level) {
+        return switch (level) {
+            case ALL -> true;
+            case MODERATORS -> player.permissions().hasPermission(Permissions.COMMANDS_MODERATOR);
+            case GAMEMASTERS -> player.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER);
+            case ADMINS -> player.permissions().hasPermission(Permissions.COMMANDS_ADMIN);
+            case OWNERS -> player.permissions().hasPermission(Permissions.COMMANDS_OWNER);
+        };
     }
 
     /** Drops everything a leaving player left behind: click tokens, form state, their audience. */
@@ -203,19 +284,19 @@ public final class VibeModFabric implements ModInitializer {
     // ------------------------------------------------------------------ boot
 
     private static void start(MinecraftServer server) {
-        Path dataFolder = FabricLoader.getInstance().getGameDir().resolve("vibemod");
+        Path dataFolder = FMLPaths.GAMEDIR.get().resolve("vibemod");
         try {
             Files.createDirectories(dataFolder);
         } catch (IOException e) {
             LOG.severe("Could not create " + dataFolder + ": " + e);
             return;
         }
-        LoaderConfig config = new LoaderConfig(
-                FabricLoader.getInstance().getConfigDir().resolve("vibemod.json"));
+        LoaderConfig config = new LoaderConfig(FMLPaths.CONFIGDIR.get().resolve("vibemod.json"));
 
-        FabricPlatformInfo platform = new FabricPlatformInfo(server.isDedicatedServer());
+        NeoForgePlatformInfo platform = new NeoForgePlatformInfo(server.isDedicatedServer());
         PlatformProfile profile = PlatformProfiles.forPlatform(platform);
         LOG.info("Platform: " + platform.describe() + " → prompt profile " + profile.displayName());
+        LOG.info("Hot-load class-file ceiling: " + ClassFileCeiling.describe());
 
         LoaderTickScheduler scheduler = new LoaderTickScheduler(server);
         LoaderMessenger messenger = new LoaderMessenger(server);
@@ -230,7 +311,7 @@ public final class VibeModFabric implements ModInitializer {
                     + ", generated mods target java" + platform.maxTargetRelease() + ")");
         }
         InMemoryCompiler compiler = new InMemoryCompiler(compilerProvider.orElse(null),
-                new FabricClasspathProvider(dataFolder), platform.maxTargetRelease());
+                new NeoForgeClasspathProvider(dataFolder), platform.maxTargetRelease());
 
         String apiKey = resolveApiKey(config);
         if (apiKey == null) {
@@ -291,8 +372,9 @@ public final class VibeModFabric implements ModInitializer {
     }
 
     /**
-     * The key lookup, in the same order as Paper's: config, then environment,
-     * then {@code ~/.config/vibemod/openrouter.key}. Never hardcoded anywhere.
+     * The key lookup, in the same order as Paper's and Fabric's: config, then
+     * environment, then {@code ~/.config/vibemod/openrouter.key}. Never
+     * hardcoded anywhere.
      */
     private static String resolveApiKey(LoaderConfig config) {
         String fromConfig = config.getString("openrouter.api-key", "");
@@ -325,7 +407,7 @@ public final class VibeModFabric implements ModInitializer {
         private final MinecraftServer server;
         private final Path dataFolder;
         private final LoaderConfig config;
-        private final FabricPlatformInfo platform;
+        private final NeoForgePlatformInfo platform;
         private final PlatformProfile profile;
         private final LoaderTickScheduler scheduler;
         private final LoaderMessenger messenger;
@@ -339,8 +421,6 @@ public final class VibeModFabric implements ModInitializer {
         private final DebugEcho debugEcho;
 
         private ModLifecycle lifecycle;
-        private LoaderCommandBridge commandBridge;
-        private FabricChatBridge chatBridge;
         private ChatRenderer chatRenderer;
         private UiRenderer ui;
         private ModGenerator generator;
@@ -350,7 +430,7 @@ public final class VibeModFabric implements ModInitializer {
         private SettingsScreens settingsScreens;
         private Services services;
 
-        Boot(MinecraftServer server, Path dataFolder, LoaderConfig config, FabricPlatformInfo platform,
+        Boot(MinecraftServer server, Path dataFolder, LoaderConfig config, NeoForgePlatformInfo platform,
              PlatformProfile profile, LoaderTickScheduler scheduler, LoaderMessenger messenger,
              InMemoryCompiler compiler, OpenRouterClient client, ModelCatalog catalog, Watchdog watchdog,
              ModStore store, ModConfigs configs, ModErrors modErrors, DebugEcho debugEcho) {
@@ -385,11 +465,11 @@ public final class VibeModFabric implements ModInitializer {
             ModDispatch dispatch = new ModDispatch(watchdog, failureSink);
 
             // Published to the statics the process-lived subscriptions read; the
-            // subscriptions themselves were made once, in onInitialize().
+            // subscriptions themselves were made once, in the constructor.
             commandBridge = new LoaderCommandBridge(server, messenger, dispatch,
                     config.getBoolean("commands.allow-top-level", true));
-            eventBridge = new FabricEventBridge(dispatch);
-            chatBridge = new FabricChatBridge(scheduler);
+            eventBridge = new NeoForgeEventBridge(dispatch);
+            chatBridge = new NeoForgeChatBridge(scheduler);
 
             ClientHooks hooks = clientHooks;
             LoaderModHost modHost = new LoaderModHost(server, dataFolder, eventBridge, commandBridge,
@@ -438,9 +518,9 @@ public final class VibeModFabric implements ModInitializer {
                     client::model, this::setModel, client::sessionCostUsd, this::applyStoredVersion,
                     this::reloadConfig);
             commandBridge.setRouter(router);
-            // CommandRegistrationCallback already fired for THIS server's
-            // dispatcher, before the bridge existed, so install into it directly.
-            // The process-lived callback covers every later /reload.
+            // RegisterCommandsEvent already fired for THIS server's dispatcher,
+            // before the bridge existed, so install into it directly. The
+            // process-lived listener covers every later /reload.
             commandBridge.reinstallInto(server.getCommands().getDispatcher());
 
             services = new Services(server, platform, lifecycle, store, modErrors, messenger,

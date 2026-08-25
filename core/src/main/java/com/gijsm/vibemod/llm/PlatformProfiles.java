@@ -178,9 +178,18 @@ public final class PlatformProfiles {
             PAPER_ICON_INSTRUCTION);
 
     // ------------------------------------------------------------------
-    // Fabric (MC 26.1+). Shared verbatim with NeoForge in Phase E: both run
-    // official Mojang names on 26.1+, so both consume the same sdk mod flavor
-    // and the same worked examples. Only the import bans differ.
+    // The two loaders (MC 26.1+). Phase D wrote this half expecting NeoForge to
+    // reuse it, and Phase E confirmed the expectation: everything below is
+    // shared verbatim EXCEPT the role line's one word.
+    //
+    // That is a property of the design rather than a convenience. The sdk mod
+    // flavor (§4.1) is loader-NEUTRAL — nothing under `sdk/src/mod` names a
+    // Fabric or a NeoForge type, because every registration a generated mod
+    // makes goes through the VibeContext it is handed. So the api source block,
+    // the import bans, the threading contract, the cheat sheet and all three
+    // worked examples are the same text on both loaders, and a mod generated
+    // for one compiles unchanged on the other. Only the stored `platform` stamp
+    // (§5) keeps them apart, and that is a UX decision, not a technical one.
     // ------------------------------------------------------------------
 
     private static final String LOADER_API_SOURCE_BLOCK =
@@ -197,19 +206,30 @@ public final class PlatformProfiles {
                     + "--- com/gijsm/vibemod/api/client/HudCanvas.java ---\n"
                     + GeneratedApiSources.HUD_CANVAS + "\n";
 
-    private static final String FABRIC_ROLE = """
+    /**
+     * The role line — the ONLY loader-dependent text in either loader profile.
+     *
+     * @param loader   {@code "Fabric"} or {@code "NeoForge"}
+     * @param manifest that loader's mod manifest, named so the model recognises
+     *                 the thing it must not write
+     */
+    private static String loaderRole(String loader, String manifest) {
+        return """
             You are an expert Minecraft 26.1+ gameplay-mod author working against the
             official (unobfuscated) Mojang names. You write small, delightful,
             self-contained mods entirely in Java, targeting exactly one API: the
             Mod/VibeContext contract shown below. You never touch anything else.
 
             Your mods run hot-loaded inside a host mod called VibeMod. A mod is NOT a
-            Fabric mod: it has no fabric.mod.json, no entrypoint, no mixins and no
+            LOADER mod: it has no MANIFEST, no entrypoint, no mixins and no
             registrations of its own. It is one or more plain Java classes, exactly one of
             which implements Mod, compiled in-process and loaded into a child class
             loader. Everything your mod does must be routed through the VibeContext
             instance you are handed in onEnable, so the host can cleanly tear your mod
-            down later - including while the game is running.""";
+            down later - including while the game is running."""
+                .replace("LOADER", loader)
+                .replace("MANIFEST", manifest);
+    }
 
     /**
      * The import rules loader mods live under. The {@code net.fabricmc.*} ban is
@@ -255,7 +275,7 @@ public final class PlatformProfiles {
               `AtomicInteger`/`ConcurrentHashMap`). `ctx.config*` reads are thread-safe
               everywhere and can be called from either side.""";
 
-    private static final String FABRIC_CHEAT_SHEET = """
+    private static final String LOADER_CHEAT_SHEET = """
             - THE ctx.on* HOOKS ARE THE ENTIRE EVENT SURFACE. There is no listener object
               and no event bus. They are: onPlayerJoin, onPlayerQuit, onServerTick, onChat,
               onBlockBreak, onUseBlock, onUseItem, onEntityDeath, onPlayerDeath, onRespawn.
@@ -309,10 +329,34 @@ public final class PlatformProfiles {
     public static final PlatformProfile FABRIC = new PlatformProfile(
             FABRIC_ID,
             "Fabric 26.1+",
-            FABRIC_ROLE,
+            loaderRole("Fabric", "fabric.mod.json"),
             LOADER_API_SOURCE_BLOCK,
             LOADER_IMPORT_RULES,
-            FABRIC_CHEAT_SHEET,
+            LOADER_CHEAT_SHEET,
+            LOADER_THREADING,
+            LoaderExamples.LOADER_FEW_SHOTS,
+            "",
+            LOADER_ICON_INSTRUCTION);
+
+    /**
+     * NeoForge on MC 26.1+ (§6.2, Phase E).
+     *
+     * <p>Identical to {@link #FABRIC} but for the role line's one word, and
+     * that is the finding rather than a shortcut — see the section comment
+     * above. In particular the cheat sheet deliberately does NOT list NeoForge
+     * event names, though §6.2 left room for them: a generated mod never sees
+     * one. The ten curated {@code ctx.on*} hooks ARE its entire event surface,
+     * and which loader event the host subscribed to on its behalf is the host's
+     * business. Teaching the model {@code PlayerLoggedInEvent} would be
+     * teaching it a name it is forbidden to write.
+     */
+    public static final PlatformProfile NEOFORGE = new PlatformProfile(
+            NEOFORGE_ID,
+            "NeoForge 26.1+",
+            loaderRole("NeoForge", "neoforge.mods.toml"),
+            LOADER_API_SOURCE_BLOCK,
+            LOADER_IMPORT_RULES,
+            LOADER_CHEAT_SHEET,
             LOADER_THREADING,
             LoaderExamples.LOADER_FEW_SHOTS,
             "",
@@ -320,7 +364,7 @@ public final class PlatformProfiles {
 
     /** Every profile this build knows. */
     public static List<PlatformProfile> all() {
-        return List.of(PAPER_MODERN, PAPER_LEGACY, FABRIC);
+        return List.of(PAPER_MODERN, PAPER_LEGACY, FABRIC, NEOFORGE);
     }
 
     /** The profile for an id, falling back to {@link #PAPER_MODERN} with a logged warning. */
@@ -336,7 +380,7 @@ public final class PlatformProfiles {
         }
         java.util.logging.Logger.getLogger(PlatformProfiles.class.getName()).warning(
                 "Unknown platform profile '" + id + "' (this build ships " + known
-                        + "; " + NEOFORGE_ID + " arrives in Phase E) - falling back to " + PAPER_MODERN_ID);
+                        + ") - falling back to " + PAPER_MODERN_ID);
         return PAPER_MODERN;
     }
 

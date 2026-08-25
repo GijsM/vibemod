@@ -389,9 +389,52 @@ public class LlmSelfTest {
         check("fabric prompt has no Bukkit vocabulary at all",
                 !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
 
+        testNeoForgeProfilePrompt(prompt);
+
         if (failures == 0) {
             System.out.println("PASS: the fabric profile's prompt teaches the mod flavor, "
                     + "the curated hooks, the loader bans and the render-thread contract");
+        }
+    }
+
+    /**
+     * The neoforge profile (ARCHITECTURE-V2 6.2, Phase E) — asserted as being
+     * the fabric one with a different role line, because that is the claim
+     * 10.4 makes and it is worth guarding.
+     *
+     * <p>The sdk mod flavor is loader-neutral, so the two prompts SHOULD be
+     * identical apart from the loader's name and its manifest file. If someone
+     * later adds NeoForge-specific vocabulary to one of them, generated mods
+     * stop being portable between the loaders and nothing else would notice.
+     * Hence the diff-shaped assertion rather than a second copy of the fabric
+     * checks.
+     */
+    private static void testNeoForgeProfilePrompt(String fabricPrompt) {
+        PlatformProfile neoforge = PlatformProfiles.byId(PlatformProfiles.NEOFORGE_ID);
+        check("byId('neoforge') resolves the neoforge profile, not the paper fallback",
+                PlatformProfiles.NEOFORGE_ID.equals(neoforge.id()));
+
+        String prompt = PromptLibrary.systemPrompt(neoforge);
+        check("neoforge prompt says a mod is not a NeoForge mod",
+                prompt.contains("A mod is NOT a\nNeoForge mod")
+                        && prompt.contains("no neoforge.mods.toml"));
+        check("neoforge prompt never calls a mod a Fabric mod",
+                !prompt.contains("A mod is NOT a\nFabric mod"));
+        check("neoforge prompt bans net.neoforged.*", prompt.contains("`net.neoforged.*`"));
+        check("neoforge prompt has no Bukkit vocabulary at all",
+                !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
+
+        // The load-bearing one: everything except the role line is the same
+        // text, which is what makes a stored mod portable between loaders.
+        String neutralised = prompt
+                .replace("NeoForge mod", "Fabric mod")
+                .replace("no neoforge.mods.toml", "no fabric.mod.json");
+        check("the neoforge and fabric prompts differ ONLY in the loader's name "
+                        + "and manifest (the sdk mod flavor is loader-neutral)",
+                neutralised.equals(fabricPrompt));
+        if (failures == 0) {
+            System.out.println("PASS: the neoforge profile is the fabric one with a NeoForge role line"
+                    + " (" + prompt.length() + " chars, diff = loader name + manifest)");
         }
     }
 

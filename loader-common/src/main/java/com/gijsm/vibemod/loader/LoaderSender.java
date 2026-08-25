@@ -30,16 +30,41 @@ public final class LoaderSender implements Sender {
      * <p>Two things changed under this method in 26.x and both matter.
      * {@code CommandSourceStack#hasPermission(int)} is gone — permissions are a
      * {@code PermissionSet} of typed {@code Permission}s now, not an op level.
-     * And fabric-api ships {@code fabric-permission-api-v1}, whose
-     * {@code checkPermission(Identifier, PermissionLevel)} asks any installed
-     * permission manager about a real node first and only falls back to the
-     * level when nothing answers. So {@code vibe.admin} becomes the node
+     * And both loaders ship a node-based permission API that asks any installed
+     * permission manager about a real node first and only falls back to an op
+     * level when nothing answers — {@code fabric-permission-api-v1} on Fabric,
+     * {@code PermissionAPI} on NeoForge. So {@code vibe.admin} becomes the node
      * {@code vibemod:admin} with a GAMEMASTERS (op level 2) fallback: a server
      * with LuckPerms grants it by node, a vanilla-ish server by op, and neither
-     * needs VibeMod to know which.
+     * needs VibeMod to know which. Which of the two APIs answers is the
+     * {@link PermissionOracle} the host installs at boot.
      */
-    private static final Identifier USE_NODE = Identifier.fromNamespaceAndPath("vibemod", "use");
-    private static final Identifier ADMIN_NODE = Identifier.fromNamespaceAndPath("vibemod", "admin");
+    public static final Identifier USE_NODE = Identifier.fromNamespaceAndPath("vibemod", "use");
+    public static final Identifier ADMIN_NODE = Identifier.fromNamespaceAndPath("vibemod", "admin");
+
+    /**
+     * How this loader answers "may this source do X".
+     *
+     * <p>The one place the two loaders genuinely disagree about permissions, so
+     * it is a parameter rather than a branch. Both answer the same QUESTION —
+     * "does an installed permission manager grant this node, and if none does,
+     * is this source at least at this op level" — they just have different
+     * plumbing for it: fabric-permission-api injects
+     * {@code CommandSourceStack#checkPermission}, NeoForge has
+     * {@code PermissionAPI} plus pre-registered {@code PermissionNode}s.
+     */
+    @FunctionalInterface
+    public interface PermissionOracle {
+        boolean check(CommandSourceStack source, Identifier node, PermissionLevel fallback);
+    }
+
+    private static volatile PermissionOracle oracle = (source, node, fallback) ->
+            fallback == PermissionLevel.ALL;
+
+    /** Installed once at boot by the loader host, before any command can run. */
+    public static void setPermissionOracle(PermissionOracle installed) {
+        oracle = installed;
+    }
 
     private final CommandSourceStack source;
     private final Messenger messenger;
@@ -60,10 +85,10 @@ public final class LoaderSender implements Sender {
      * which would be a wiring bug.
      */
     public static CommandSourceStack unwrap(Sender sender) {
-        if (sender instanceof LoaderSender fabric) {
-            return fabric.source;
+        if (sender instanceof LoaderSender loader) {
+            return loader.source;
         }
-        throw new IllegalArgumentException("Not a Fabric sender: "
+        throw new IllegalArgumentException("Not a loader sender: "
                 + (sender == null ? "null" : sender.getClass().getName()));
     }
 
@@ -110,11 +135,11 @@ public final class LoaderSender implements Sender {
         String want = permission == null ? "" : permission.toLowerCase(Locale.ROOT);
         return switch (want) {
             // Every player may look; the read-only half of /vibe is deliberately open.
-            case "vibe.use" -> source.checkPermission(USE_NODE, PermissionLevel.ALL);
-            case "vibe.admin" -> source.checkPermission(ADMIN_NODE, PermissionLevel.GAMEMASTERS);
+            case "vibe.use" -> oracle.check(source, USE_NODE, PermissionLevel.ALL);
+            case "vibe.admin" -> oracle.check(source, ADMIN_NODE, PermissionLevel.GAMEMASTERS);
             // An unknown permission string is a mod asking about something we do
             // not model. Op level 2 is the conservative answer.
-            default -> source.checkPermission(
+            default -> oracle.check(source,
                     Identifier.fromNamespaceAndPath("vibemod", sanitize(want)), PermissionLevel.GAMEMASTERS);
         };
     }
