@@ -27,6 +27,9 @@ import com.gijsm.vibemod.api.client.ClientContext;
 import com.gijsm.vibemod.command.VibeRouter;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
+import com.gijsm.vibemod.compile.SymbolOracle;
+import com.gijsm.vibemod.fabric.shim.EventFanout;
+import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.gen.ModGenerator;
 import com.gijsm.vibemod.llm.ModelCatalog;
 import com.gijsm.vibemod.llm.OpenRouterClient;
@@ -102,6 +105,18 @@ public final class VibeModFabric implements ModInitializer {
     private static volatile FabricEventBridge eventBridge;
     private static volatile FabricChatBridge chatBridge;
     private static volatile LoaderCommandBridge commandBridge;
+    /**
+     * The guarded-entry helper for the current server, or null between worlds.
+     *
+     * <p>Published for the same reason the bridges above are: the V3 event
+     * fanout (§B) is PROCESS-lived — it owns permanent {@code Event.register}
+     * calls that cannot be undone — while {@code ModDispatch} is per-server. So
+     * the fanout resolves it at dispatch time and finds null between worlds,
+     * exactly like every other process-lived subscription in this file.
+     */
+    private static volatile ModDispatch modDispatch;
+    /** The process-lived event fanout (V3 Phase 0 §B); built once, in {@link #onInitialize()}. */
+    private static volatile EventFanout eventFanout;
 
     /**
      * What the client entrypoint contributes: the bridge, its watchdog wiring,
@@ -134,6 +149,16 @@ public final class VibeModFabric implements ModInitializer {
         return services;
     }
 
+    /**
+     * The process-lived event fanout (V3 Phase 0 §B), for the acceptance gates.
+     *
+     * <p>Never null after {@link #onInitialize()}, and deliberately not part of
+     * {@link Services}: it outlives every server in this JVM.
+     */
+    public static EventFanout eventFanout() {
+        return eventFanout;
+    }
+
     /** Called by the client entrypoint at its own init, before any server starts. */
     public static void setClientHooks(ClientHooks hooks) {
         clientHooks = hooks;
@@ -156,6 +181,18 @@ public final class VibeModFabric implements ModInitializer {
     @Override
     public void onInitialize() {
         LOG.info("VibeMod loading — waiting for a server");
+
+        // V3 Phase 0 §B, and it belongs in this method for exactly the reason
+        // stated above: the fanout registers one permanent listener per event a
+        // mod ever subscribes to, and those cannot be undone. A per-server
+        // fanout would leave one dead proxy per world behind. It reads the live
+        // dispatch and server through suppliers and finds null between worlds.
+        eventFanout = new EventFanout(() -> modDispatch, () -> {
+            Services live = services;
+            return live == null ? null : live.server();
+        });
+        Shims.install(eventFanout);
+
         ServerLifecycleEvents.SERVER_STARTING.register(VibeModFabric::start);
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> stop());
 
@@ -242,6 +279,12 @@ public final class VibeModFabric implements ModInitializer {
         }
         InMemoryCompiler compiler = new InMemoryCompiler(compilerProvider.orElse(null),
                 new FabricClasspathProvider(dataFolder), platform.maxTargetRelease());
+        // V3 Phase 0 §A. Installed on the COMPILER rather than on any one code
+        // path, because every route from source to live classes goes through
+        // it: generation, repair rounds, /vibe edit, rollback, restore-on-boot.
+        compiler.setSurgeon(FabricSeams.surgeon());
+        LOG.info("Bytecode seams: " + FabricSeams.table().size()
+                + " call site(s) rewritten, policy enforced before defineClass");
 
         String apiKey = resolveApiKey(config);
         if (apiKey == null) {
@@ -282,6 +325,9 @@ public final class VibeModFabric implements ModInitializer {
         eventBridge = null;
         chatBridge = null;
         commandBridge = null;
+        // The fanout itself survives (its subscriptions are permanent); what it
+        // must stop finding is a dead dispatch.
+        modDispatch = null;
         if (live == null) {
             return;
         }
@@ -401,10 +447,12 @@ public final class VibeModFabric implements ModInitializer {
                     config.getBoolean("commands.allow-top-level", true));
             eventBridge = new FabricEventBridge(dispatch);
             chatBridge = new FabricChatBridge(scheduler);
+            modDispatch = dispatch;
 
             ClientHooks hooks = clientHooks;
             LoaderModHost modHost = new LoaderModHost(server, dataFolder, eventBridge, commandBridge,
-                    configs, dispatch, scheduler, hooks == null ? null : hooks.contexts());
+                    configs, dispatch, scheduler, hooks == null ? null : hooks.contexts(),
+                    new FabricEntrypointAdapter());
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
 
             // The render-thread watchdog reports to the same lifecycle and shares
@@ -439,6 +487,10 @@ public final class VibeModFabric implements ModInitializer {
                     () -> config.getInt("generation.max-retries", 3),
                     () -> config.getBoolean("openrouter.streaming", true),
                     config.getInt("generation.concurrency", 4));
+            // V3 Phase 0 §D: the repair round gets to look up what the type
+            // REALLY offers. The host's own loader is the right one to ask —
+            // it is the one that has the game and the Fabric API on it.
+            generator.setSymbolOracle(SymbolOracle.forLoader(VibeModFabric.class.getClassLoader()));
             JarExporter exporter = new JarExporter(compiler, profile);
 
             ChatMode chatMode = new ChatMode(chatBridge, this::generateFromPrompt);

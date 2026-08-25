@@ -23,8 +23,25 @@ public final class PlatformProfiles {
     public static final String PAPER_MODERN_ID = "paper-modern";
     /** {@code PlatformInfo.profileId()} value for Paper 1.20.6 through 1.21.6. */
     public static final String PAPER_LEGACY_ID = "paper-legacy";
-    /** {@code PlatformInfo.profileId()} value for the Fabric host (MC 26.1+). */
+    /**
+     * {@code PlatformInfo.profileId()} value for the Fabric host (MC 26.1+).
+     *
+     * <p>Since V3 this resolves to the <b>native</b> profile: generated Fabric
+     * mods are ordinary Fabric mods now (Phase 0 §E). The v2 loader profile is
+     * still here under {@link #FABRIC_LEGACY_ID}.
+     */
     public static final String FABRIC_ID = "fabric";
+    /**
+     * The pre-V3 Fabric profile: {@code Mod}/{@code VibeContext}, curated
+     * {@code ctx.on*} hooks.
+     *
+     * <p>Kept, and kept reachable, because the stored corpus was written
+     * against it. Nothing selects it automatically — a host asks for
+     * {@code "fabric"} and gets the native profile — but an edit or a fix round
+     * on a legacy mod has somewhere honest to point, and the self-test uses it
+     * to keep proving the loader-neutrality claim against NeoForge.
+     */
+    public static final String FABRIC_LEGACY_ID = "fabric-legacy";
     /** {@code PlatformInfo.profileId()} value for the NeoForge host (MC 26.1+, Phase E). */
     public static final String NEOFORGE_ID = "neoforge";
 
@@ -46,6 +63,24 @@ public final class PlatformProfiles {
                     + GeneratedApiSources.MOD_COMMAND_HANDLER + "\n";
 
     /**
+     * The registration contract, moved here from the shared prompt skeleton in
+     * V3 Phase 0 §D.
+     *
+     * <p>It had been sitting in {@code PromptLibrary} and therefore went into
+     * <em>every</em> profile's prompt, including the loaders' — where
+     * {@code Bukkit} does not exist and {@code ctx.listen} is not on the api at
+     * all. Text a model cannot act on is not free: it is tokens spent teaching a
+     * vocabulary the compiler will then reject.
+     */
+    private static final String PAPER_REGISTRATION = """
+            - NEVER call `Bukkit.getPluginManager().registerEvents(...)`,
+              `Bukkit.getScheduler()...`, or `Bukkit.getCommandMap()` directly. Registration
+              always goes through the VibeContext you are given: `ctx.listen(...)` for event
+              listeners, `ctx.repeat(...)` / `ctx.later(...)` for scheduled work,
+              `ctx.command(...)` for a real top-level command, `ctx.action(...)` for a named
+              `/vibe do <mod> <name>` action.""";
+
+    /**
      * Adventure is now an officially allowed import root: 88+ of the stored
      * corpus already uses it, it is a standalone library rather than a server
      * internal, and it is the project's own text currency (ARCHITECTURE-V2 §1,
@@ -59,12 +94,50 @@ public final class PlatformProfiles {
               something outside this surface, implement the closest tasteful approximation
               using only those three roots. Adventure is the right way to build any text you
               send a player (`Component.text(...)`), and `Player`/`CommandSender` are
-              Adventure `Audience`s, so `sendMessage(Component)` just works.""";
+              Adventure `Audience`s, so `sendMessage(Component)` just works.
+            """ + PAPER_REGISTRATION;
 
     private static final String PAPER_THREADING = """
             - Event handler methods and Runnables passed to ctx.repeat/ctx.later already run
               on the main server thread — do not spawn your own threads and do not attempt to
               hop threads yourself.""";
+
+    /**
+     * The other half of the V3 §D move: Bukkit-shaped craft advice that was
+     * also being shown to loader mods, which have neither
+     * {@code world.spawnEntity} nor {@code player.getUniqueId}.
+     */
+    private static final String PAPER_CRAFT = """
+            - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
+              construct entity instances directly.
+            - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
+              Mod class or listener, keyed by `player.getUniqueId()`. Do not use static
+              mutable state shared across mod instances beyond that.
+            - Make effects juicy where it fits the request: pair visual feedback
+              (`world.spawnParticle(...)` / `player.spawnParticle(...)`) with a sound
+              (`world.playSound(...)` / `player.playSound(...)`) so the mod feels alive, not
+              silent.""";
+
+    /**
+     * The config-knob contract for every profile that HAS config: expose the
+     * tunables, and read them live rather than caching them.
+     *
+     * <p>Profile data since V3 because a native Fabric mod has no
+     * {@code VibeContext} and so no {@code ctx.configX} to read them with
+     * (§E) — the one place where "the same rules everywhere" stopped being
+     * true.
+     */
+    private static final String CTX_CONFIG_CONTRACT = """
+            - Expose any value a player would obviously want to tweak — counts, durations,
+              radii, chances, on/off toggles, named choices — as a "config" knob instead of a
+              hardcoded constant. Pick the narrowest fitting type (boolean/integer/decimal/
+              text/choice) and sane min/max/step for numeric knobs.
+            - Read config knobs with `ctx.configBool/configInt/configDouble/configString(key)`
+              INSIDE the event handler or task body, at the exact moment you need the value.
+              NEVER read a config value once in onEnable (or a constructor) and cache it in a
+              field — a knob change must take effect on the very next event/tick, not require
+              a reload. Use `configBool` for boolean knobs, `configInt` for integer knobs,
+              `configDouble` for decimal knobs, and `configString` for text or choice knobs.""";
 
     private static final String PAPER_ROLE_MODERN = """
             You are an expert Paper 1.21.8 gameplay-mod author. You write small, delightful,
@@ -100,7 +173,8 @@ public final class PlatformProfiles {
               `Attribute.MOVEMENT_SPEED`, `Attribute.ATTACK_DAMAGE`, `Attribute.SCALE`. The old
               `GENERIC_`/`PLAYER_`/`ZOMBIE_` prefixes were removed - never use them.
             - `ItemMeta#setEnchantmentGlintOverride(Boolean)` and the other 1.20.5+ item-data
-              methods are available.""";
+              methods are available.
+            """ + PAPER_CRAFT;
 
     /**
      * The era table §6.2 asks for. Everything here is a compile error on
@@ -131,7 +205,8 @@ public final class PlatformProfiles {
               `ItemMeta#setTooltipStyle` or any other data-component setter introduced after
               1.20.6. For a "shiny" item, apply a real (hidden) enchantment or skip the effect.
             - Do NOT use `Registry`-based lookups for Sound/Particle/Enchantment; use the
-              plain constants.""";
+              plain constants.
+            """ + PAPER_CRAFT;
 
     private static final String PAPER_ICON_INSTRUCTION = """
             - "icon" is ONE thematic, obtainable ITEM Material name from vanilla Minecraft,
@@ -158,7 +233,9 @@ public final class PlatformProfiles {
             PAPER_THREADING,
             PromptExamples.PAPER_FEW_SHOTS,
             "1.20",
-            PAPER_ICON_INSTRUCTION);
+            PAPER_ICON_INSTRUCTION,
+            "Mod",
+            CTX_CONFIG_CONTRACT);
 
     /**
      * Paper 1.20.6-1.21.6. {@code api-version: '1.20'} — the floor VibeMod
@@ -175,7 +252,9 @@ public final class PlatformProfiles {
             PAPER_THREADING,
             PromptExamples.PAPER_FEW_SHOTS,
             "1.20",
-            PAPER_ICON_INSTRUCTION);
+            PAPER_ICON_INSTRUCTION,
+            "Mod",
+            CTX_CONFIG_CONTRACT);
 
     // ------------------------------------------------------------------
     // The two loaders (MC 26.1+). Phase D wrote this half expecting NeoForge to
@@ -320,15 +399,19 @@ public final class PlatformProfiles {
               (never "BEDROCK", "COMMAND_BLOCK", "AIR", "STRUCTURE_VOID"), and NEVER "AIR".""";
 
     /**
-     * Fabric on MC 26.1+. The {@code pluginDescriptor} is deliberately empty:
-     * {@code /vibe export} is not supported on the loaders in v1 (§6.3), and
+     * Fabric on MC 26.1+, the v2 way: {@code Mod} + {@code VibeContext} and the
+     * ten curated hooks. Superseded for new generations by {@link #FABRIC}
+     * (V3 Phase 0 §E) and kept because the stored corpus speaks it.
+     *
+     * <p>The {@code pluginDescriptor} is deliberately empty: {@code /vibe export}
+     * is not supported on the loaders in v1 (§6.3), and
      * {@link com.gijsm.vibemod.store.JarExporter#supported()} gates on the
      * profile id rather than on this field, so there is nothing honest to put
      * here.
      */
-    public static final PlatformProfile FABRIC = new PlatformProfile(
-            FABRIC_ID,
-            "Fabric 26.1+",
+    public static final PlatformProfile FABRIC_LEGACY = new PlatformProfile(
+            FABRIC_LEGACY_ID,
+            "Fabric 26.1+ (VibeContext)",
             loaderRole("Fabric", "fabric.mod.json"),
             LOADER_API_SOURCE_BLOCK,
             LOADER_IMPORT_RULES,
@@ -336,14 +419,19 @@ public final class PlatformProfiles {
             LOADER_THREADING,
             LoaderExamples.LOADER_FEW_SHOTS,
             "",
-            LOADER_ICON_INSTRUCTION);
+            LOADER_ICON_INSTRUCTION,
+            "Mod",
+            CTX_CONFIG_CONTRACT);
 
     /**
      * NeoForge on MC 26.1+ (§6.2, Phase E).
      *
-     * <p>Identical to {@link #FABRIC} but for the role line's one word, and
-     * that is the finding rather than a shortcut — see the section comment
-     * above. In particular the cheat sheet deliberately does NOT list NeoForge
+     * <p>Identical to {@link #FABRIC_LEGACY} but for the role line's one word,
+     * and that is the finding rather than a shortcut — see the section comment
+     * above. (V3 Phase 0 gave Fabric a native profile and NeoForge no seams
+     * yet, so NeoForge stays on the v2 contract and the pairing that is worth
+     * guarding is now with {@code FABRIC_LEGACY}.)
+     * In particular the cheat sheet deliberately does NOT list NeoForge
      * event names, though §6.2 left room for them: a generated mod never sees
      * one. The ten curated {@code ctx.on*} hooks ARE its entire event surface,
      * and which loader event the host subscribed to on its behalf is the host's
@@ -360,11 +448,139 @@ public final class PlatformProfiles {
             LOADER_THREADING,
             LoaderExamples.LOADER_FEW_SHOTS,
             "",
-            LOADER_ICON_INSTRUCTION);
+            LOADER_ICON_INSTRUCTION,
+            "Mod",
+            CTX_CONFIG_CONTRACT);
+
+    // ------------------------------------------------------------------
+    // V3: the native Fabric profile (Phase 0 §E)
+    //
+    // The thesis, as a prompt. Everything above teaches a model VibeMod's own
+    // API; this teaches it nothing at all, because a generated mod is an
+    // ordinary Fabric mod now — a `ModInitializer` registering to real Fabric
+    // events, with zero VibeMod imports. That is worth far more than any api
+    // block: the model already knows Fabric, and the frontier of what a
+    // generated mod can do stops being "whatever VibeMod wrapped" and becomes
+    // "whatever Fabric exposes".
+    //
+    // The host makes that safe rather than the prompt. Every Event.register
+    // call site is rewritten into a host shim before defineClass, so the
+    // subscription is revocable even though a Fabric Event is not; and the
+    // bytecode is policy-checked, so the bans below are enforced rather than
+    // merely requested. The prompt still states them, because a violation
+    // caught at compile time costs a self-heal round, and a violation never
+    // written costs nothing.
+    // ------------------------------------------------------------------
+
+    private static final String NATIVE_FABRIC_ROLE = """
+            You are an expert Fabric mod author for Minecraft 26.2, working against the
+            official (unobfuscated) Mojang names on Java 25. You write small, delightful,
+            self-contained gameplay mods in plain Java.
+
+            You write a NORMAL FABRIC MOD. Your main class implements
+            `net.fabricmc.api.ModInitializer` and registers everything from
+            `onInitialize()` through the ordinary Fabric API, exactly as you would in any
+            other Fabric mod. There is no VibeMod API, and you must not import one.
+
+            Two things are different from a mod on disk, and only two. There is no
+            `fabric.mod.json` and there are no mixins: the host compiles your source in
+            memory and loads it into the running game. And the host can UNLOAD you at any
+            moment - so everything you register through the Fabric API is tracked for you
+            and revoked when you are disabled. You do not write teardown code and you must
+            not try to; just register normally and it is handled.""";
+
+    private static final String NATIVE_FABRIC_IMPORT_RULES = """
+            - Imports are limited to `java.*`, `net.minecraft.*`, `net.fabricmc.api.*`,
+              `net.fabricmc.fabric.api.*`, `com.mojang.*` and `org.joml.*`. Anything else is
+              refused by the host before your mod is loaded.
+            - NEVER use reflection (`java.lang.reflect.*`, `MethodHandles`), threads
+              (`new Thread`, `Executors`, `CompletableFuture.*Async`), processes
+              (`Runtime`, `ProcessBuilder`, `System.exit`) or networking (`java.net.*`
+              except `java.net.URI`). Your mod shares the server's thread and the server's
+              process; all of these outlive a `/vibe disable` and none of them can be
+              revoked.
+            - NEVER write a mixin (`org.spongepowered.*`), and NEVER touch loader internals
+              (`net.fabricmc.loader.*`, `net.fabricmc.fabric.impl.*`,
+              `net.fabricmc.fabric.mixin.*`).
+            - NEVER call `Event.addPhaseOrdering(...)`. Phase order is global and permanent,
+              so it cannot be undone when your mod is disabled.
+            - NEVER register content: no items, no blocks, no entity types, no recipes, no
+              `Registry.register` of any kind. Registries are frozen long before your mod
+              loads.""";
+
+    private static final String NATIVE_FABRIC_THREADING = """
+            - `onInitialize()` and every callback you register run on the MAIN SERVER
+              THREAD. Do not spawn threads and do not hop threads yourself.
+            - Keep per-mod state in fields on your own classes. A `ConcurrentHashMap` keyed
+              by `player.getUUID()` is the normal way to hold per-player state.""";
+
+    private static final String NATIVE_FABRIC_CHEAT_SHEET = """
+            - Register from `onInitialize()`, e.g.
+              `ServerTickEvents.END_SERVER_TICK.register(server -> ...)`,
+              `AttackBlockCallback.EVENT.register((player, level, hand, pos, dir) -> ...)`,
+              `PlayerBlockBreakEvents.BEFORE.register(...)`,
+              `ServerPlayConnectionEvents.JOIN.register(...)`,
+              `ServerLivingEntityEvents.AFTER_DEATH.register(...)`.
+            - SERVER EVENTS ONLY in this version. Do not use `CommandRegistrationCallback`,
+              `KeyBindingHelper`, `HudElementRegistry`, any `net.fabricmc.fabric.api.client.*`
+              event, or `Registry.register` - commands, keybinds, HUD and registries arrive in
+              a later version and the host refuses them today.
+            - If your mod does its setup when the server starts, register
+              `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
+              replays it for you if the server is already running when you are loaded.
+            - There is no per-tick scheduler. Count ticks in an `END_SERVER_TICK` handler
+              (`if (++ticks % 200 == 0) { ... }` is once every ten seconds).
+            - MOJANG NAMES, 26.x SPELLINGS. You may remember some of these differently:
+              * `World` is `Level`, `PlayerEntity` is `Player`, `ServerPlayerEntity` is
+                `ServerPlayer`, `Text` is `Component`, `ItemStack`/`BlockPos`/`BlockState`/
+                `MinecraftServer` keep their names.
+              * `ResourceLocation` is now `net.minecraft.resources.Identifier`
+                (`Identifier.withDefaultNamespace("stone")`).
+              * Text is `net.minecraft.network.chat.Component`: `Component.literal("hi")`,
+                `Component.translatable("key")`. Send it with
+                `player.sendSystemMessage(component)`.
+              * Interaction callbacks return `net.minecraft.world.InteractionResult`:
+                `InteractionResult.PASS` lets vanilla carry on, `InteractionResult.FAIL`
+                cancels. `PlayerBlockBreakEvents.BEFORE` returns `boolean` instead
+                (`false` cancels).
+              * The player list is `server.getPlayerList().getPlayers()`.
+            - Use `net.minecraft.*` types as the game hands them to you: inspect them and act
+              on them, do not extend or replace them.""";
+
+    /**
+     * There is no {@code ctx} in a native mod, so there is nowhere to read a
+     * knob from. Saying so plainly beats letting the model emit a
+     * {@code config[]} the mod cannot honour and a manual that promises
+     * settings that do not exist.
+     */
+    private static final String NATIVE_FABRIC_CONFIG_CONTRACT = """
+            - THIS MODE HAS NO CONFIG KNOBS. A native Fabric mod has no VibeMod context to
+              read them from, so ALWAYS omit "config" from your JSON (or send an empty
+              array), and do not describe any settings in the "manual". Put tunable values
+              in named `private static final` constants instead, so they are easy to find
+              and easy to edit later.""";
+
+    /**
+     * Fabric on MC 26.2, natively (V3 Phase 0 §E). What
+     * {@link #byId byId("fabric")} resolves to.
+     */
+    public static final PlatformProfile FABRIC = new PlatformProfile(
+            FABRIC_ID,
+            "Fabric 26.2 (native)",
+            NATIVE_FABRIC_ROLE,
+            "(This mode has no VibeMod API. You write a normal Fabric mod.)\n\n",
+            NATIVE_FABRIC_IMPORT_RULES,
+            NATIVE_FABRIC_CHEAT_SHEET,
+            NATIVE_FABRIC_THREADING,
+            NativeFabricExamples.NATIVE_FABRIC_FEW_SHOTS,
+            "",
+            LOADER_ICON_INSTRUCTION,
+            "net.fabricmc.api.ModInitializer",
+            NATIVE_FABRIC_CONFIG_CONTRACT);
 
     /** Every profile this build knows. */
     public static List<PlatformProfile> all() {
-        return List.of(PAPER_MODERN, PAPER_LEGACY, FABRIC, NEOFORGE);
+        return List.of(PAPER_MODERN, PAPER_LEGACY, FABRIC, FABRIC_LEGACY, NEOFORGE);
     }
 
     /** The profile for an id, falling back to {@link #PAPER_MODERN} with a logged warning. */

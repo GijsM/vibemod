@@ -211,6 +211,68 @@ meta = {
 open(sys.argv[1], "w").write(json.dumps(meta, indent=2))
 META
 
+# ------------------------------------------------------- the V3 native canary
+# The thesis test (V3 Phase 0). A PLAIN FABRIC MOD: it implements
+# net.fabricmc.api.ModInitializer, registers to real Fabric events, and contains
+# ZERO VibeMod imports — grep it, there is not one. It only runs here because
+# the host rewrote its `Event.register` call sites into a shim before
+# defineClass, and it only DISABLES because that shim keeps a revocable per-mod
+# list behind one permanent subscription.
+#
+# The tick counter is the observable, and it is the right one: a Fabric Event
+# cannot be unsubscribed, so "the log stopped growing after /vibe disable" is
+# exactly the claim that would be false if the seam did not work.
+mkdir -p "$RUN/vibemod/mods/NativeCanary/v1"
+cat > "$RUN/vibemod/mods/NativeCanary/v1/NativeCanary.java" <<'NATIVE'
+package vibemod.nativecanary;
+
+import java.util.logging.Logger;
+
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+
+import net.minecraft.world.InteractionResult;
+
+/** An ordinary Fabric mod. No VibeMod import appears anywhere in this file. */
+public final class NativeCanary implements ModInitializer {
+
+    private static final Logger LOG = Logger.getLogger("VibeMod.NativeCanary");
+
+    private int ticks;
+
+    @Override
+    public void onInitialize() {
+        LOG.info("NativeCanary onInitialize");
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            if (++ticks % 40 == 0) {
+                LOG.info("native-tick " + ticks);
+            }
+        });
+        AttackBlockCallback.EVENT.register((player, level, hand, pos, direction) -> {
+            LOG.info("native-attack");
+            return InteractionResult.PASS;
+        });
+    }
+}
+NATIVE
+
+python3 - "$RUN/vibemod/mods/NativeCanary/meta.json" <<'META3'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
+    "name": "NativeCanary",
+    "description": "A plain Fabric ModInitializer, hot-loaded through the bytecode seam.",
+    "usage": "", "manual": "", "icon": "FEATHER",
+    "mainClass": "vibemod.nativecanary.NativeCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V3 native canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First native canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META3
+
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
 cat > "$RUN/vibemod/mods/WrongPlatform/v1/WrongPlatform.java" <<'WRONG'
@@ -281,6 +343,18 @@ for i in $(seq 1 180); do
   grep -q 'SmokeCanary v1 is live' "$LOG" 2>/dev/null && { note "canary live after ${i}s"; break; }
   sleep 1
 done
+for i in $(seq 1 180); do
+  grep -q 'NativeCanary v1 is live' "$LOG" 2>/dev/null && { note "native canary live after ${i}s"; break; }
+  sleep 1
+done
+# "Live" is not "dispatching": restore-on-boot runs inside SERVER_STARTING, so
+# the mod is loaded a beat before the server begins ticking at all. Wait for the
+# first tick through the fanout, or the disable half of the gate below has no
+# baseline to compare against.
+for i in $(seq 1 60); do
+  grep -q 'native-tick' "$LOG" 2>/dev/null && { note "native tick fired after ${i}s"; break; }
+  sleep 1
+done
 
 # ------------------------------------------------------------------ asserts
 note "asserting on the boot log"
@@ -295,6 +369,17 @@ assert "the foreign-platform mod was skipped, not compiled" \
   in_file "$LOG" 'Skipping mod WrongPlatform: generated for paper'
 assert "no mixin failed to apply" not_in_file "$LOG" 'Mixin apply failed'
 assert "nothing threw during boot" not_in_file "$LOG" 'Exception in thread'
+
+note "asserting on the V3 native canary (the thesis test)"
+assert "the bytecode seam was installed" in_file "$LOG" 'Bytecode seams:'
+assert "a plain Fabric mod compiled and hot-loaded" in_file "$LOG" 'NativeCanary v1 is live'
+assert "its ModInitializer entrypoint ran" in_file "$LOG" 'NativeCanary onInitialize'
+assert "the host fanned out the event it subscribed to" \
+  in_file "$LOG" 'Fanning out ServerTickEvents.EndTick'
+assert "its END_SERVER_TICK subscription dispatches" in_file "$LOG" 'native-tick'
+assert "nothing it registered was refused" not_in_file "$LOG" 'UnsupportedOperationException'
+assert "the mod source really has no VibeMod import" \
+  not_in_file "$RUN/vibemod/mods/NativeCanary/v1/NativeCanary.java" 'com.gijsm.vibemod'
 
 note "driving over RCON"
 RCON="$RUN/rcon.log"
@@ -343,6 +428,35 @@ assert "re-enabling re-registered the command in the live dispatcher" \
 
 note "asserting the teardown actually ran"
 assert "onDisable ran on disable" in_file "$LOG" 'SmokeCanary disabled after'
+
+# -------------------------------------------------- the native disable/enable
+# The half that cannot be faked. A Fabric Event cannot be unsubscribed, so if
+# `/vibe disable` really drains the mod, the tick log stops growing — and if the
+# seam were a no-op it would keep growing forever. Measured over wall time
+# rather than asserted on a reply, because the reply proves a command ran and
+# this proves the subscription is gone.
+note "round-tripping the native canary through disable/enable"
+NRCON="$RUN/native-rcon.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe disable NativeCanary" \
+  | tee "$NRCON"
+sleep 3
+BEFORE="$(grep -c 'native-tick' "$LOG" || true)"
+sleep 4
+AFTER_DISABLE="$(grep -c 'native-tick' "$LOG" || true)"
+assert "disabling a native mod drained its Fabric event subscription (ticks $BEFORE -> $AFTER_DISABLE)" \
+  test "$BEFORE" -eq "$AFTER_DISABLE"
+
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe enable NativeCanary" \
+  | tee -a "$NRCON"
+sleep 6
+AFTER_ENABLE="$(grep -c 'native-tick' "$LOG" || true)"
+assert "re-enabling reports success" in_file "$NRCON" 'NativeCanary enabled.'
+assert "re-enabling brought the subscription back (ticks $AFTER_DISABLE -> $AFTER_ENABLE)" \
+  test "$AFTER_ENABLE" -gt "$AFTER_DISABLE"
+assert "the entrypoint ran a second time" \
+  test "$(grep -c 'NativeCanary onInitialize' "$LOG")" -ge 2
+assert "no registration was silently refused across the round trip" \
+  not_in_file "$LOG" 'UnsupportedOperationException'
 
 cleanup
 trap - EXIT

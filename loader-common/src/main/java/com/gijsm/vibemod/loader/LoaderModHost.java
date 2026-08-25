@@ -45,6 +45,14 @@ import com.gijsm.vibemod.store.ModConfigs;
  * key leases and client commands exactly like its listeners. On a dedicated
  * server it does nothing at all, which is what lets one generated mod run on
  * both.
+ *
+ * <p>V3 Phase 0 (§C) adds a second kind of mod entirely: a <em>native</em> one,
+ * whose main class implements the loader's own entrypoint interface and which
+ * gets no {@link VibeContext} at all. {@link #activate} asks the injected
+ * {@link EntrypointAdapter} first and falls through to the {@code Mod} path
+ * unchanged when it says no, so the two flavors coexist with no meta.json
+ * change — detection is by interface, which is a fact about the bytes rather
+ * than a claim in a file that could disagree with them.
  */
 public final class LoaderModHost implements ModHost {
 
@@ -65,10 +73,17 @@ public final class LoaderModHost implements ModHost {
      * run on both sides.
      */
     private final Function<ModHandle, ClientContext> clientContexts;
+    /**
+     * Recognises a native loader entrypoint (V3 Phase 0 §C), injected because
+     * this class may not name {@code net.fabricmc.*} (§10.4). Never null;
+     * {@link EntrypointAdapter#NONE} is the "this loader has none" value.
+     */
+    private final EntrypointAdapter entrypoints;
 
     public LoaderModHost(MinecraftServer server, Path dataFolder, LoaderEventBridge events,
                          LoaderCommandBridge commands, ModConfigs configs, ModDispatch dispatch,
-                         LoaderTickScheduler scheduler, Function<ModHandle, ClientContext> clientContexts) {
+                         LoaderTickScheduler scheduler, Function<ModHandle, ClientContext> clientContexts,
+                         EntrypointAdapter entrypoints) {
         this.server = server;
         this.dataFolder = dataFolder;
         this.events = events;
@@ -77,19 +92,21 @@ public final class LoaderModHost implements ModHost {
         this.dispatch = dispatch;
         this.scheduler = scheduler;
         this.clientContexts = clientContexts;
+        this.entrypoints = entrypoints == null ? EntrypointAdapter.NONE : entrypoints;
     }
 
     @Override
     public Object activate(ModHandle handle, ClassLoader loader, String mainClassFqcn) throws ModLoadException {
-        Mod instance;
+        Object obj;
+        Runnable nativeInit;
         try {
             Class<?> mainClass = loader.loadClass(mainClassFqcn);
-            Object obj = mainClass.getDeclaredConstructor().newInstance();
-            if (!(obj instanceof Mod)) {
-                throw new ModLoadException(
-                        mainClassFqcn + " does not implement " + Mod.class.getName(), null);
+            obj = mainClass.getDeclaredConstructor().newInstance();
+            nativeInit = entrypoints.adapt(obj);
+            if (nativeInit == null && !(obj instanceof Mod)) {
+                throw new ModLoadException(mainClassFqcn + " implements neither "
+                        + Mod.class.getName() + " nor " + entrypoints.describe(), null);
             }
-            instance = (Mod) obj;
         } catch (ModLoadException e) {
             throw e;
         } catch (Exception e) {
@@ -97,6 +114,11 @@ public final class LoaderModHost implements ModHost {
                     "Failed to instantiate " + mainClassFqcn + " for mod " + handle.name(), e);
         }
 
+        if (nativeInit != null) {
+            return activateNative(handle, nativeInit);
+        }
+
+        Mod instance = (Mod) obj;
         Activation activation = new Activation(instance, new Context(handle));
         try {
             instance.onEnable(activation.context);
@@ -107,13 +129,53 @@ public final class LoaderModHost implements ModHost {
         return activation;
     }
 
+    /**
+     * The V3 path (§C): a plain loader mod's {@code onInitialize()}.
+     *
+     * <p>{@link ModAttribution#runAs} is what makes the rest of V3 work.
+     * Everything the mod registers inside this call reaches a host shim with no
+     * mod identity of its own (§B), and the thread-local is where that identity
+     * comes from — so every {@code Event.register} the entrypoint makes lands
+     * on <em>this</em> handle and is drained with it.
+     *
+     * <p>Deliberately NOT routed through {@link ModDispatch}, unlike every later
+     * dispatch into this mod: the failure has to come back as a
+     * {@link ModLoadException} so the caller rolls the activation back and the
+     * generator gets its repair round, and {@code ModDispatch} swallows by
+     * contract. This mirrors the {@code onEnable} path directly above it, which
+     * is journalled the same way for the same reason.
+     */
+    private Object activateNative(ModHandle handle, Runnable init) throws ModLoadException {
+        Throwable[] failure = new Throwable[1];
+        ModAttribution.runAs(handle, () -> {
+            try {
+                init.run();
+            } catch (Throwable t) {
+                failure[0] = t;
+            }
+        });
+        if (failure[0] != null) {
+            throw new ModLoadException("onInitialize failed for mod " + handle.name(),
+                    failure[0], "onInitialize");
+        }
+        return new Activation(null, null);
+    }
+
     @Override
     public void deactivate(ModHandle handle, Object activation) throws Exception {
         Activation live = (Activation) activation;
-        live.instance.onDisable(live.context);
+        // A native mod has no onDisable: a Fabric mod's contract is that it is
+        // initialised once and never torn down, so there is nothing to call.
+        // Draining the handle IS the teardown, and the caller does that next.
+        if (live.instance != null) {
+            live.instance.onDisable(live.context);
+        }
     }
 
-    /** What {@link #activate} hands back: the mod instance plus the context it was given. */
+    /**
+     * What {@link #activate} hands back: the mod instance plus the context it
+     * was given, or a pair of nulls for a native mod (§C) that has neither.
+     */
     private record Activation(Mod instance, VibeContext context) {
     }
 

@@ -16,6 +16,7 @@ import java.util.logging.Logger;
 
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
+import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PromptLibrary;
@@ -97,6 +98,12 @@ public final class ModGenerator {
     /** Submitted-but-unfinished runs; anything past {@link #poolSize} is waiting in the pool's queue. */
     private final java.util.concurrent.atomic.AtomicInteger unfinished =
             new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * Turns "cannot find symbol" into the real member list (V3 Phase 0 §D), or
+     * null where no host installed one (the self-tests, which have no game to
+     * ask).
+     */
+    private volatile SymbolOracle oracle;
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
     public ModGenerator(TickScheduler scheduler, PlatformProfile profile, OpenRouterClient client,
@@ -117,6 +124,20 @@ public final class ModGenerator {
         this.lifecycle = lifecycle;
         this.maxRetries = maxRetries;
         this.streamingEnabled = streamingEnabled;
+    }
+
+    /**
+     * Installs the host's {@link SymbolOracle} (V3 Phase 0 §D). Optional: with
+     * none, every repair prompt is exactly the one this generator always sent.
+     */
+    public void setSymbolOracle(SymbolOracle oracle) {
+        this.oracle = oracle;
+    }
+
+    /** The {@code API HINTS} block for a set of diagnostics, or {@code null} when there is no oracle. */
+    private String hintsFor(String diagnostics) {
+        SymbolOracle live = oracle;
+        return live == null ? null : live.hints(diagnostics);
     }
 
     /**
@@ -333,7 +354,8 @@ public final class ModGenerator {
                 l.detail("javac errors, asking the model to fix them…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
                 messages.add(new OpenRouterClient.ChatMessage("user",
-                        PromptLibrary.repairPrompt(compiled.diagnostics())));
+                        PromptLibrary.repairPrompt(compiled.diagnostics(),
+                                hintsFor(compiled.diagnostics()))));
                 current = project; // repairs now apply against this round's sources
                 continue;
             }
@@ -361,9 +383,14 @@ public final class ModGenerator {
                             "Mod failed to start: " + brief(enableFail), costUsd);
                 }
                 l.detail("Mod crashed on enable, asking the model to fix it…");
+                String failure = "The project compiled but threw on enable: " + stackTop(enableFail);
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
-                messages.add(new OpenRouterClient.ChatMessage("user", PromptLibrary.repairPrompt(
-                        "The project compiled but threw on enable: " + stackTop(enableFail))));
+                // The oracle sees a stack trace rather than diagnostics here and
+                // usually finds nothing, which is fine — but a NoSuchMethodError
+                // from a stale API IS a missing symbol, and that is exactly the
+                // case worth a hint.
+                messages.add(new OpenRouterClient.ChatMessage("user",
+                        PromptLibrary.repairPrompt(failure, hintsFor(failure))));
                 current = project;
             }
         }

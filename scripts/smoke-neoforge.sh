@@ -233,6 +233,47 @@ meta = {
 open(sys.argv[1], "w").write(json.dumps(meta, indent=2))
 META
 
+# ------------------------------------------------- the wrong-loader-API canary
+# V3 Phase 0 gave Fabric bytecode seams for `Event.register`; NeoForge has none
+# yet. So a mod written against the Fabric API is a mod this host cannot honour,
+# and the requirement is that it says so CLEARLY rather than crashing or half-
+# loading. Stamped for neoforge on purpose, so restore-on-boot really attempts
+# it and the refusal is measured on the boot log rather than assumed.
+mkdir -p "$RUN/vibemod/mods/FabricOnNeo/v1"
+cat > "$RUN/vibemod/mods/FabricOnNeo/v1/FabricOnNeo.java" <<'FABRICONNEO'
+package vibemod.fabriconneo;
+
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+
+/** A Fabric mod on the wrong loader. Must be refused with a clear diagnostic. */
+public final class FabricOnNeo implements ModInitializer {
+
+    private int ticks;
+
+    @Override
+    public void onInitialize() {
+        ServerTickEvents.END_SERVER_TICK.register(server -> ticks++);
+    }
+}
+FABRICONNEO
+
+python3 - "$RUN/vibemod/mods/FabricOnNeo/meta.json" "$MC_VERSION" <<'META3'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "neoforge", "mcVersion": sys.argv[2], "side": "server",
+    "name": "FabricOnNeo",
+    "description": "A Fabric-API mod on NeoForge: must be refused, not crash.",
+    "usage": "", "manual": "", "icon": "STONE",
+    "mainClass": "vibemod.fabriconneo.FabricOnNeo",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "p", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "", "kind": "create",
+                  "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META3
+
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
 cat > "$RUN/vibemod/mods/WrongPlatform/v1/WrongPlatform.java" <<'WRONG'
@@ -323,6 +364,17 @@ assert "the foreign-platform mod was skipped, not compiled" \
   in_file "$LOG" 'Skipping mod WrongPlatform: generated for paper'
 assert "nothing threw during boot" not_in_file "$LOG" 'Exception in thread'
 assert "no mod-loading issue was reported" not_in_file "$LOG" 'ModLoadingException'
+# V3 Phase 0: a Fabric-API mod on NeoForge is refused at COMPILE time, with a
+# diagnostic that names what is missing — not a crash, not a silent skip, and
+# not a mod that loads and then does nothing. (The surgeon's own
+# "Fabric API seams are not available on NeoForge yet" denial covers the case
+# where those classes ARE on the classpath; on a real server javac gets there
+# first, which is the better error anyway. Both are asserted — this one here,
+# the policy one in :fabric:surgeonSelfTest.)
+assert "a Fabric-API mod on NeoForge is refused with a compile diagnostic" \
+  in_file "$LOG" 'Stored version failed to compile'
+assert "and the diagnostic names the API that is not here" in_file "$LOG" 'net.fabricmc'
+assert "the refusal did not stop the other mods loading" in_file "$LOG" 'SmokeCanary v1 is live'
 
 note "driving over RCON"
 RCON="$RUN/rcon.log"

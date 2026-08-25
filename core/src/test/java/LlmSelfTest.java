@@ -11,9 +11,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.gen.GeneratedProject;
 import com.gijsm.vibemod.llm.PlatformProfile;
-import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.llm.StreamScanner;
@@ -42,6 +42,10 @@ public class LlmSelfTest {
         testParseChangelogMapping();
         testSystemPromptContent();
         testPlatformProfiles();
+        testPromptHygiene();
+        testNativeFabricProfile();
+        testPromptBudgets();
+        testSymbolOracle();
         testPromptBuilders();
         testFewShotPlansMatchFiles();
         testStreamScannerFullShapeWithDecoy();
@@ -343,64 +347,69 @@ public class LlmSelfTest {
      * and above all the absence of any Bukkit vocabulary.
      */
     private static void testFabricProfilePrompt() {
-        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_ID);
-        check("byId('fabric') resolves the fabric profile, not the paper fallback",
-                PlatformProfiles.FABRIC_ID.equals(fabric.id()));
+        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_LEGACY_ID);
+        check("byId('fabric-legacy') resolves the v2 loader profile, not the paper fallback",
+                PlatformProfiles.FABRIC_LEGACY_ID.equals(fabric.id()));
 
         String prompt = PromptLibrary.systemPrompt(fabric);
-        System.out.println("fabric systemPrompt() length = " + prompt.length() + " chars");
+        System.out.println("fabric-legacy systemPrompt() length = " + prompt.length() + " chars");
 
         // The api block is the MOD flavor, generated from sdk/src/mod/java.
-        check("fabric prompt embeds the Mojang-typed VibeContext",
+        check("fabric-legacy prompt embeds the Mojang-typed VibeContext",
                 prompt.contains("MinecraftServer server();"));
-        check("fabric prompt embeds the CommandSourceStack-typed handler",
+        check("fabric-legacy prompt embeds the CommandSourceStack-typed handler",
                 prompt.contains("void run(CommandSourceStack src, String[] args)"));
-        check("fabric prompt embeds the ClientContext", prompt.contains("KeyLease key(String label"));
-        check("fabric prompt embeds the HudCanvas", prompt.contains("int textWidth(String s);"));
-        check("fabric prompt never embeds the Paper flavor",
+        check("fabric-legacy prompt embeds the ClientContext", prompt.contains("KeyLease key(String label"));
+        check("fabric-legacy prompt embeds the HudCanvas", prompt.contains("int textWidth(String s);"));
+        check("fabric-legacy prompt never embeds the Paper flavor",
                 !prompt.contains("void listen(Listener listener)") && !prompt.contains("BukkitTask"));
 
         // The curated hook table is the whole event surface; a missing entry is a
         // hook the model will never use.
         for (String hook : new String[] {"onPlayerJoin", "onPlayerQuit", "onServerTick", "onChat",
                 "onBlockBreak", "onUseBlock", "onUseItem", "onEntityDeath", "onPlayerDeath", "onRespawn"}) {
-            check("fabric prompt teaches ctx." + hook, prompt.contains(hook));
+            check("fabric-legacy prompt teaches ctx." + hook, prompt.contains(hook));
         }
 
-        check("fabric prompt bans net.fabricmc.*", prompt.contains("NEVER import `net.fabricmc.*`"));
-        check("fabric prompt bans registry content", prompt.contains("NEVER register content"));
-        check("fabric prompt bans mixins and Screen", prompt.contains("NEVER write a mixin, subclass `Screen`"));
-        check("fabric prompt teaches the 26.x Identifier rename",
+        check("fabric-legacy prompt bans net.fabricmc.*", prompt.contains("NEVER import `net.fabricmc.*`"));
+        check("fabric-legacy prompt bans registry content", prompt.contains("NEVER register content"));
+        check("fabric-legacy prompt bans mixins and Screen", prompt.contains("NEVER write a mixin, subclass `Screen`"));
+        check("fabric-legacy prompt teaches the 26.x Identifier rename",
                 prompt.contains("net.minecraft.resources.Identifier"));
-        check("fabric prompt carries the render-thread contract",
+        check("fabric-legacy prompt carries the render-thread contract",
                 prompt.contains("RENDER THREAD") && prompt.contains("silent and unreproducible"));
-        check("fabric prompt says a mod is not a Fabric mod",
+        check("fabric-legacy prompt says a mod is not a Fabric mod",
                 prompt.contains("A mod is NOT a\nFabric mod"));
 
-        check("fabric prompt carries the HUD few-shot", prompt.contains("WorldTimer"));
-        check("fabric prompt carries the keybind few-shot", prompt.contains("CoordToggle"));
-        check("fabric prompt carries the gameplay few-shot", prompt.contains("BlockTally"));
+        check("fabric-legacy prompt carries the HUD few-shot", prompt.contains("WorldTimer"));
+        check("fabric-legacy prompt carries the keybind few-shot", prompt.contains("CoordToggle"));
+        check("fabric-legacy prompt carries the gameplay few-shot", prompt.contains("BlockTally"));
         // By few-shot MARKER, not by mod name: the shared prompt body uses
         // "ChickenCreepers"/"SpeedPulse" as PascalCase naming examples on every
         // platform, so their absence is not the question - the absence of the
         // Paper EXAMPLES is.
-        check("fabric few-shots are the three loader ones, not Paper's",
+        check("fabric-legacy few-shots are the three loader ones, not Paper's",
                 !prompt.contains("\"icon\":\"CHICKEN\"") && !prompt.contains("\"icon\":\"SUGAR\""));
-        check("fabric prompt has no Bukkit vocabulary at all",
+        check("fabric-legacy prompt has no Bukkit vocabulary at all",
                 !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
 
         testNeoForgeProfilePrompt(prompt);
 
         if (failures == 0) {
-            System.out.println("PASS: the fabric profile's prompt teaches the mod flavor, "
+            System.out.println("PASS: the fabric-legacy profile's prompt teaches the mod flavor, "
                     + "the curated hooks, the loader bans and the render-thread contract");
         }
     }
 
     /**
      * The neoforge profile (ARCHITECTURE-V2 6.2, Phase E) — asserted as being
-     * the fabric one with a different role line, because that is the claim
-     * 10.4 makes and it is worth guarding.
+     * the fabric-legacy one with a different role line, because that is the
+     * claim 10.4 makes and it is worth guarding.
+     *
+     * <p>V3 note: the pairing moved from {@code FABRIC} to {@code FABRIC_LEGACY}
+     * when Phase 0 gave Fabric a native profile. NeoForge has no bytecode seams
+     * yet, so it stays on the v2 contract, and the claim still worth guarding is
+     * that the v2 contract is loader-neutral.
      *
      * <p>The sdk mod flavor is loader-neutral, so the two prompts SHOULD be
      * identical apart from the loader's name and its manifest file. If someone
@@ -429,13 +438,226 @@ public class LlmSelfTest {
         String neutralised = prompt
                 .replace("NeoForge mod", "Fabric mod")
                 .replace("no neoforge.mods.toml", "no fabric.mod.json");
-        check("the neoforge and fabric prompts differ ONLY in the loader's name "
+        check("the neoforge and fabric-legacy prompts differ ONLY in the loader's name "
                         + "and manifest (the sdk mod flavor is loader-neutral)",
                 neutralised.equals(fabricPrompt));
         if (failures == 0) {
-            System.out.println("PASS: the neoforge profile is the fabric one with a NeoForge role line"
-                    + " (" + prompt.length() + " chars, diff = loader name + manifest)");
+            System.out.println("PASS: the neoforge profile is the fabric-legacy one with a NeoForge "
+                    + "role line (" + prompt.length() + " chars, diff = loader name + manifest)");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // V3 Phase 0 §D/§E
+    // ------------------------------------------------------------------
+
+    /**
+     * Prompt hygiene (V3 Phase 0 §D): Bukkit vocabulary belongs to the Paper
+     * profiles and nowhere else.
+     *
+     * <p>Three blocks used to live in {@code PromptLibrary}'s shared skeleton
+     * and therefore went into every prompt — teaching a loader mod about
+     * {@code Bukkit.getPluginManager()}, {@code ctx.listen} and
+     * {@code world.spawnEntity(...)}, none of which exist there. Tokens spent
+     * teaching a vocabulary the compiler will reject are not free, so this is
+     * asserted in both directions: gone from the loaders, still present on
+     * Paper.
+     */
+    private static void testPromptHygiene() {
+        String[] bukkitOnly = {"Bukkit.", "ctx.listen", "spawnEntity("};
+
+        for (String id : new String[] {PlatformProfiles.PAPER_MODERN_ID, PlatformProfiles.PAPER_LEGACY_ID}) {
+            String prompt = PromptLibrary.systemPrompt(PlatformProfiles.byId(id));
+            for (String marker : bukkitOnly) {
+                check("the " + id + " prompt still teaches '" + marker + "'", prompt.contains(marker));
+            }
+        }
+
+        for (String id : new String[] {PlatformProfiles.FABRIC_ID, PlatformProfiles.FABRIC_LEGACY_ID,
+                PlatformProfiles.NEOFORGE_ID}) {
+            String prompt = PromptLibrary.systemPrompt(PlatformProfiles.byId(id));
+            for (String marker : bukkitOnly) {
+                check("the " + id + " prompt does NOT carry the Bukkit-only text '" + marker + "'",
+                        !prompt.contains(marker));
+            }
+        }
+
+        // The hardcoded "two examples" said "two" while the loader profiles ship
+        // three and the native profile ships one.
+        check("the paper prompt counts its own few-shots",
+                PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                        .contains("The following two examples show"));
+        check("the fabric-legacy prompt counts its own few-shots (three)",
+                PromptLibrary.systemPrompt(PlatformProfiles.FABRIC_LEGACY)
+                        .contains("The following three examples show"));
+        check("the native fabric prompt counts its own few-shots (one)",
+                PromptLibrary.systemPrompt(PlatformProfiles.FABRIC)
+                        .contains("The following one example shows"));
+
+        if (failures == 0) {
+            System.out.println("PASS: Bukkit vocabulary is confined to the Paper profiles, and every "
+                    + "profile counts its own few-shots");
+        }
+    }
+
+    /**
+     * The native Fabric profile (V3 Phase 0 §E): the thesis, as a prompt.
+     *
+     * <p>What matters here is what is ABSENT. There is no VibeMod API in this
+     * mode — the mod is an ordinary {@code ModInitializer} and the host
+     * intercepts its {@code Event.register} calls in bytecode — so a prompt that
+     * still taught {@code Mod}/{@code VibeContext} would produce mods that do
+     * not compile, and one that still promised {@code ctx.configX} would produce
+     * config knobs no mod could read.
+     */
+    private static void testNativeFabricProfile() {
+        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_ID);
+        check("byId('fabric') now resolves the NATIVE profile",
+                PlatformProfiles.FABRIC_ID.equals(fabric.id())
+                        && fabric.displayName().contains("native"));
+        check("the native profile's entrypoint is ModInitializer",
+                "net.fabricmc.api.ModInitializer".equals(fabric.entrypointName()));
+
+        String prompt = PromptLibrary.systemPrompt(fabric);
+        System.out.println("fabric (native) systemPrompt() length = " + prompt.length() + " chars");
+
+        check("the native prompt says the main class implements ModInitializer",
+                prompt.contains("implements net.fabricmc.api.ModInitializer"));
+        check("the native prompt says there is no fabric.mod.json and no mixins",
+                prompt.contains("no `fabric.mod.json`") || prompt.contains("There is no\n"
+                        + "            `fabric.mod.json`") || prompt.contains("fabric.mod.json"));
+        check("the native prompt promises automatic teardown",
+                prompt.contains("tracked for you"));
+        check("the native prompt bans reflection, threads and sockets",
+                prompt.contains("java.lang.reflect.*") && prompt.contains("Executors")
+                        && prompt.contains("java.net.*"));
+        check("the native prompt bans Event.addPhaseOrdering",
+                prompt.contains("Event.addPhaseOrdering"));
+        check("the native prompt defers commands, keybinds, HUD and registries",
+                prompt.contains("CommandRegistrationCallback") && prompt.contains("KeyBindingHelper")
+                        && prompt.contains("HudElementRegistry") && prompt.contains("Registry.register"));
+        check("the native prompt carries the Yarn -> Mojang rename table",
+                prompt.contains("`World` is `Level`") && prompt.contains("`PlayerEntity` is `Player`")
+                        && prompt.contains("`Text` is `Component`"));
+        check("the native prompt carries the 26.x Identifier rename",
+                prompt.contains("net.minecraft.resources.Identifier"));
+        check("the native prompt says config knobs do not exist yet",
+                prompt.contains("THIS MODE HAS NO CONFIG KNOBS"));
+
+        // Absences: the whole point of the profile.
+        check("the native prompt does NOT embed the VibeContext api block",
+                !prompt.contains("--- com/gijsm/vibemod/api/VibeContext.java ---"));
+        check("the native prompt never teaches ctx.configInt",
+                !prompt.contains("ctx.configInt") && !prompt.contains("configBool"));
+        check("the native prompt never tells the mod to implement Mod",
+                !prompt.contains("implements Mod {"));
+        check("the native prompt has no Bukkit vocabulary at all",
+                !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
+
+        // The one few-shot IS a plain Fabric mod.
+        check("the native few-shot is a plain Fabric mod",
+                prompt.contains("implements ModInitializer")
+                        && prompt.contains("AttackBlockCallback.EVENT.register")
+                        && prompt.contains("ServerTickEvents.END_SERVER_TICK.register"));
+        check("the native few-shot imports no VibeMod api",
+                !prompt.contains("import com.gijsm.vibemod.api"));
+        check("the native few-shot ships no config knobs",
+                !prompt.contains("\"config\":[{\"key\""));
+
+        if (failures == 0) {
+            System.out.println("PASS: the native fabric profile teaches an ordinary Fabric mod, "
+                    + "with no VibeMod api anywhere in it");
+        }
+    }
+
+    /**
+     * A budget print for every profile.
+     *
+     * <p>Not an assertion with a magic number — prompt length is a design
+     * choice, not a bug — but the one number nobody looks at until it is a
+     * problem, and every generation pays for it on every round.
+     */
+    private static void testPromptBudgets() {
+        System.out.println("prompt budgets (chars, ~tokens at 4 chars/token):");
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            String prompt = PromptLibrary.systemPrompt(profile);
+            System.out.printf("  %-14s %7d chars  ~%6d tokens  (%d few-shot%s)%n",
+                    profile.id(), prompt.length(), prompt.length() / 4,
+                    profile.fewShots().size(), profile.fewShots().size() == 1 ? "" : "s");
+            check(profile.id() + " builds a non-trivial prompt", prompt.length() > 2000);
+        }
+    }
+
+    /**
+     * The {@link SymbolOracle} (V3 Phase 0 §D), on both backends' wordings.
+     *
+     * <p>{@code VibeContext} stands in for a game class here: it is the only
+     * "interesting" owner (§D's list) that exists on this module's test runtime,
+     * and what is under test is the parsing and the fuzzy match, not which jar
+     * the class came from.
+     */
+    private static void testSymbolOracle() {
+        SymbolOracle oracle = SymbolOracle.forLoader(LlmSelfTest.class.getClassLoader());
+
+        // javac's three-line shape.
+        String javac = "[ERROR] string:///vibemod/foo/Foo.java:12 - cannot find symbol\n"
+                + "  symbol:   method configIntt(java.lang.String)\n"
+                + "  location: interface com.gijsm.vibemod.api.VibeContext";
+        String javacHints = oracle.hints(javac);
+        check("oracle: javac 'cannot find symbol' produces a hints block",
+                javacHints.contains("API HINTS"));
+        check("oracle: javac hints name the real method (" + firstLineOf(javacHints) + ")",
+                javacHints.contains("configInt"));
+        check("oracle: javac hints name the owner",
+                javacHints.contains("com.gijsm.vibemod.api.VibeContext"));
+
+        // ECJ names the type by its SIMPLE name; the oracle resolves it from a
+        // fully-qualified mention elsewhere in the same diagnostics.
+        String ecj = "[ERROR] Foo.java:5 - The method configIntt(String) is undefined "
+                + "for the type VibeContext\n"
+                + "[ERROR] Foo.java:2 - The import com.gijsm.vibemod.api.VibeContext is fine";
+        String ecjHints = oracle.hints(ecj);
+        check("oracle: ECJ's 'is undefined for the type' produces a hints block",
+                ecjHints.contains("API HINTS"));
+        check("oracle: ECJ hints name the real method (" + firstLineOf(ecjHints) + ")",
+                ecjHints.contains("configInt"));
+
+        // Quiet where it has nothing to say, and never throwing.
+        check("oracle: no hints for an unrelated diagnostic",
+                oracle.hints("[ERROR] Foo.java:3 - ';' expected").isEmpty());
+        check("oracle: no hints for an uninteresting owner (java.util.List)",
+                oracle.hints("cannot find symbol\n  symbol: method sizee()\n"
+                        + "  location: interface java.util.List").isEmpty());
+        check("oracle: empty and null input are safe",
+                oracle.hints("").isEmpty() && oracle.hints(null).isEmpty());
+        check("oracle: a resolver that always fails is safe",
+                new SymbolOracle(name -> null).hints(javac).isEmpty());
+
+        // And the prompt overload actually carries them.
+        String withHints = PromptLibrary.repairPrompt(javac, javacHints);
+        check("repairPrompt(diagnostics, hints) includes the diagnostics",
+                withHints.contains("cannot find symbol"));
+        check("repairPrompt(diagnostics, hints) includes the hints",
+                withHints.contains("API HINTS"));
+        check("repairPrompt(diagnostics, hints) still asks for the corrected project",
+                withHints.contains("\"edits\""));
+        check("repairPrompt(diagnostics, null) is exactly the one-argument form",
+                PromptLibrary.repairPrompt(javac, null).equals(PromptLibrary.repairPrompt(javac))
+                        && PromptLibrary.repairPrompt(javac, "  ")
+                                .equals(PromptLibrary.repairPrompt(javac)));
+
+        if (failures == 0) {
+            System.out.println("PASS: the symbol oracle reads both javac and ECJ diagnostics and "
+                    + "feeds the repair prompt");
+        }
+    }
+
+    private static String firstLineOf(String text) {
+        if (text == null || text.isEmpty()) {
+            return "(empty)";
+        }
+        String[] lines = text.split("\n", -1);
+        return lines.length > 1 ? lines[1] : lines[0];
     }
 
     private static void testParseIconMapping() {

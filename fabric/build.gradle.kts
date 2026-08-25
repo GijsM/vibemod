@@ -232,6 +232,48 @@ tasks.jar {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The surgeon self-test (V3 Phase 0 §F.1)
+//
+// Its own source set, and it has to be, because it needs three things at once
+// that no existing one has together: Java 25 (java.lang.classfile), the
+// loader-common sources (the surgeon itself), and the real Fabric API on the
+// compile classpath — so a fixture can contain a GENUINE `Event.register` call
+// site rather than an imitation of one.
+//
+// `main`'s compile classpath is handed on verbatim rather than re-declared: the
+// point of the test is that the surgeon behaves on bytecode compiled against
+// exactly what the host compiles generated mods against, and re-declaring the
+// dependencies would let the two drift.
+//
+// Not a `gametest`: this proves a pure function of bytes and needs no game.
+// The game-side proof that the same rewrite survives a real client is
+// VibeModClientGateTest's NativeCanary.
+// ---------------------------------------------------------------------------
+val surgeonTest: SourceSet = sourceSets.create("surgeonTest")
+
+surgeonTest.compileClasspath =
+    sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+surgeonTest.runtimeClasspath = surgeonTest.output + surgeonTest.compileClasspath
+
+val surgeonSelfTest = tasks.register<JavaExec>("surgeonSelfTest") {
+    group = "verification"
+    description = "Checks the bytecode policy and the Event.register seam rewrite (V3 Phase 0)."
+    mainClass = "SurgeonSelfTest"
+    classpath = surgeonTest.runtimeClasspath
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(fabricJava)
+    }
+    // The classpath the FIXTURES compile against, passed as a property because
+    // the test builds its own InMemoryCompiler exactly as a host would.
+    val fixtureCp = sourceSets.main.get().output.classesDirs + sourceSets.main.get().compileClasspath
+    doFirst {
+        systemProperty("vibemod.surgeon.cp", fixtureCp.files.joinToString(File.pathSeparator))
+    }
+}
+
+tasks.named("check") { dependsOn(surgeonSelfTest) }
+
 /**
  * Prints the resolved compile classpath, one `:`-joined line.
  *

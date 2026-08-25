@@ -20,9 +20,21 @@ import com.gijsm.vibemod.platform.Registration;
  */
 public final class ModHandle {
 
-    /** What a tracked registration was for; drives the UI's introspected counts. */
+    /**
+     * What a tracked registration was for; drives the UI's introspected counts.
+     *
+     * <p>{@code NATIVE} is V3 Phase 0: a subscription a mod made to a
+     * <em>loader</em> event through its own API, which the host intercepted at
+     * a bytecode seam and turned into an entry in a host-owned fanout. It is a
+     * separate kind from {@code LISTENER} because the two are revoked at
+     * different layers — {@code LISTENER} unhooks from the curated
+     * {@code ctx.on*} registry, {@code NATIVE} unhooks from the fanout standing
+     * behind a real, permanently-registered loader event — and because "3
+     * listeners" meaning two different things in the same UI line would be a
+     * lie.
+     */
     public enum Kind {
-        LISTENER, TASK, COMMAND, CLIENT
+        LISTENER, TASK, COMMAND, CLIENT, NATIVE
     }
 
     private final String name;
@@ -74,6 +86,11 @@ public final class ModHandle {
 
     public int taskCount() {
         return countOf(Kind.TASK);
+    }
+
+    /** Loader-event subscriptions the bytecode seam routed into the host's fanout (V3 Phase 0). */
+    public int nativeCount() {
+        return countOf(Kind.NATIVE);
     }
 
     /** Registrations of every kind currently held on the mod's behalf. */

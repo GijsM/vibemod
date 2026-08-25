@@ -39,12 +39,14 @@ import com.gijsm.vibemod.api.client.ClientContext;
 import com.gijsm.vibemod.command.VibeRouter;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
+import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.gen.ModGenerator;
 import com.gijsm.vibemod.llm.ModelCatalog;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.loader.DialogClicks;
+import com.gijsm.vibemod.loader.EntrypointAdapter;
 import com.gijsm.vibemod.loader.LoaderCommandBridge;
 import com.gijsm.vibemod.loader.LoaderConfig;
 import com.gijsm.vibemod.loader.LoaderDialogRenderer;
@@ -52,6 +54,8 @@ import com.gijsm.vibemod.loader.LoaderMessenger;
 import com.gijsm.vibemod.loader.LoaderModHost;
 import com.gijsm.vibemod.loader.LoaderSender;
 import com.gijsm.vibemod.loader.LoaderTickScheduler;
+import com.gijsm.vibemod.loader.surgeon.BytecodeSurgeon;
+import com.gijsm.vibemod.loader.surgeon.SurgeonPolicy;
 import com.gijsm.vibemod.platform.ClientEventBridge;
 import com.gijsm.vibemod.platform.CompilerProvider;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -312,6 +316,15 @@ public final class VibeModNeoForge {
         }
         InMemoryCompiler compiler = new InMemoryCompiler(compilerProvider.orElse(null),
                 new NeoForgeClasspathProvider(dataFolder), platform.maxTargetRelease());
+        // V3 Phase 0 §A: policy only, with an EMPTY seam table. NeoForge has no
+        // shims yet, so there is nothing to redirect — but the policy still runs,
+        // and the extra denial below is the honest answer to a mod that reaches
+        // for Fabric's API on the wrong loader. (On a real NeoForge server those
+        // classes are not on the compile classpath either, so javac usually gets
+        // there first; the denial is what covers a dev run where they are.)
+        compiler.setSurgeon(new BytecodeSurgeon(SurgeonPolicy.defaultsPlus(
+                new SurgeonPolicy.Denial("net/fabricmc/", null,
+                        "Fabric API seams are not available on NeoForge yet"))));
 
         String apiKey = resolveApiKey(config);
         if (apiKey == null) {
@@ -472,8 +485,12 @@ public final class VibeModNeoForge {
             chatBridge = new NeoForgeChatBridge(scheduler);
 
             ClientHooks hooks = clientHooks;
+            // EntrypointAdapter.NONE: NeoForge has no native-entrypoint path in
+            // Phase 0 (§C), so a main class that is not a VibeMod `Mod` is still
+            // an error here — with a message that says what was looked for.
             LoaderModHost modHost = new LoaderModHost(server, dataFolder, eventBridge, commandBridge,
-                    configs, dispatch, scheduler, hooks == null ? null : hooks.contexts());
+                    configs, dispatch, scheduler, hooks == null ? null : hooks.contexts(),
+                    EntrypointAdapter.NONE);
             lifecycle = new ModLifecycle(modHost, scheduler, messenger, watchdog, configs, modErrors, debugEcho);
 
             // The render-thread watchdog reports to the same lifecycle and shares
@@ -508,6 +525,9 @@ public final class VibeModNeoForge {
                     () -> config.getInt("generation.max-retries", 3),
                     () -> config.getBoolean("openrouter.streaming", true),
                     config.getInt("generation.concurrency", 4));
+            // V3 Phase 0 §D — the oracle is loader-agnostic: it only needs a
+            // class loader that can see the game.
+            generator.setSymbolOracle(SymbolOracle.forLoader(VibeModNeoForge.class.getClassLoader()));
             JarExporter exporter = new JarExporter(compiler, profile);
 
             ChatMode chatMode = new ChatMode(chatBridge, this::generateFromPrompt);

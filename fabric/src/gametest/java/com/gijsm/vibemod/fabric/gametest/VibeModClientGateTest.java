@@ -20,6 +20,7 @@ import net.minecraft.client.gui.screens.dialog.DialogScreen;
 import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.fabric.client.FabricClientEventBridge;
 import com.gijsm.vibemod.fabric.client.VibeModFabricClient;
+import com.gijsm.vibemod.fabric.shim.EventFanout;
 import com.gijsm.vibemod.runtime.ModHandle;
 
 /**
@@ -84,6 +85,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
 
             awaitLoaded(context, "HudCanary");
             awaitLoaded(context, "AngryHud");
+            awaitLoaded(context, "NativeCanary");
 
             // Order matters, and not for convenience. Both canned mods register a
             // HUD renderer, and the angry one un-registers ITSELF the first frame
@@ -95,6 +97,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             testThrowingHudAutoDisables(context, bridge);
             testLeasedKeyFires(context);
             testVibecRoutes(context);
+            testNativeModRoundTrips(context);
             testRegistrationAndTeardown(context, bridge);
             testKeySlotIsReusableAfterReload(context, bridge);
             testDialogOpensForARealPlayer(context);
@@ -266,6 +269,90 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         check("/vibec <mod> <command> routed into the mod's handler", ran);
     }
 
+    // ------------------------------------------------------------- V3 Phase 0
+
+    /**
+     * The V3 thesis, inside a real client (Phase 0 §F.4).
+     *
+     * <p>{@code NativeCanary} is a PLAIN FABRIC MOD — it implements
+     * {@code net.fabricmc.api.ModInitializer}, registers to
+     * {@code ServerTickEvents.END_SERVER_TICK} and {@code AttackBlockCallback},
+     * and imports nothing from VibeMod. It runs at all only because the host
+     * rewrote its {@code Event.register} call sites into a shim before
+     * {@code defineClass}.
+     *
+     * <p>The disable half is the part worth a game test. A Fabric {@code Event}
+     * cannot be unsubscribed, so "it stopped ticking" is a claim that is simply
+     * false unless the seam and the fanout both work — and the marker file is
+     * checked for ABSENCE after a deliberate delete, which no amount of stale
+     * state can fake.
+     */
+    private void testNativeModRoundTrips(ClientGameTestContext context) {
+        Path marker = Path.of("vibemod", "native-canary-ticks");
+        EventFanout fanout = VibeModFabric.eventFanout();
+        check("the process-lived event fanout was installed at mod init", fanout != null);
+        if (fanout == null) {
+            return;
+        }
+
+        check("a plain Fabric mod's END_SERVER_TICK subscription dispatches",
+                awaitMarker(context, marker, true));
+        String live = fanout.describeState();
+        check("the fanout holds its tick subscription (" + live + ")",
+                live.contains("ServerTickEvents.EndTick=1"));
+        check("the fanout holds its attack-block subscription (" + live + ")",
+                live.contains("AttackBlockCallback=1"));
+
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().disable("NativeCanary"));
+        context.waitTicks(20);
+
+        String drained = fanout.describeState();
+        check("disabling drained the tick subscription to zero (" + drained + ")",
+                drained.contains("ServerTickEvents.EndTick=0"));
+        check("disabling drained the attack-block subscription to zero (" + drained + ")",
+                drained.contains("AttackBlockCallback=0"));
+
+        // Absence, not staleness: delete the marker and give it twice as long as
+        // it needs to reappear.
+        deleteMarker(marker);
+        context.waitTicks(60);
+        check("a disabled native mod really stops running", !Files.isRegularFile(marker));
+
+        VibeModFabric.services().scheduler().runOnMain(() -> {
+            try {
+                VibeModFabric.services().lifecycle().enable("NativeCanary");
+            } catch (Exception e) {
+                check("re-enabling the native mod did not throw: " + e, false);
+            }
+        });
+        context.waitTicks(20);
+
+        String back = fanout.describeState();
+        check("re-enabling re-subscribed through the same permanent fanout (" + back + ")",
+                back.contains("ServerTickEvents.EndTick=1"));
+        check("and the mod is dispatching again", awaitMarker(context, marker, true));
+    }
+
+    /** Waits up to {@link #LOAD_TIMEOUT_TICKS} for the marker to reach {@code present}. */
+    private static boolean awaitMarker(ClientGameTestContext context, Path marker, boolean present) {
+        for (int i = 0; i < LOAD_TIMEOUT_TICKS; i++) {
+            if (Files.isRegularFile(marker) == present) {
+                return true;
+            }
+            context.waitTick();
+        }
+        return false;
+    }
+
+    private static void deleteMarker(Path marker) {
+        try {
+            Files.deleteIfExists(marker);
+        } catch (IOException ignored) {
+            // never written yet
+        }
+    }
+
     // ---------------------------------------------------------------------- (7)
 
     /**
@@ -344,6 +431,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         Path mods = FabricLoader.getInstance().getGameDir().resolve("vibemod").resolve("mods");
         write(mods, "HudCanary", HUD_CANARY_SOURCE, HUD_CANARY_META);
         write(mods, "AngryHud", ANGRY_HUD_SOURCE, ANGRY_HUD_META);
+        write(mods, "NativeCanary", NATIVE_CANARY_SOURCE, NATIVE_CANARY_META);
     }
 
     private static void seedOne(String name, String source, String meta) {
@@ -494,6 +582,53 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             }
             """;
 
+    /**
+     * The V3 canary: an ordinary Fabric mod, with no VibeMod import in it.
+     *
+     * <p>The marker is written relative to the process's working directory
+     * rather than through {@code FabricLoader.getGameDir()}, and that is not
+     * laziness: {@code net.fabricmc.loader.*} is denied by the surgeon's policy
+     * (loader internals outlive a disable), so the mod genuinely cannot ask. The
+     * gate reads the same relative path from the same JVM, so the two always
+     * agree.
+     */
+    private static final String NATIVE_CANARY_SOURCE = """
+            package vibemod.nativecanary;
+
+            import java.nio.file.Files;
+            import java.nio.file.Path;
+
+            import net.fabricmc.api.ModInitializer;
+            import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+            import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+
+            import net.minecraft.world.InteractionResult;
+
+            public final class NativeCanary implements ModInitializer {
+
+                private static final Path MARKER = Path.of("vibemod", "native-canary-ticks");
+
+                private int ticks;
+
+                @Override
+                public void onInitialize() {
+                    ServerTickEvents.END_SERVER_TICK.register(server -> {
+                        if (++ticks % 5 != 0) {
+                            return;
+                        }
+                        try {
+                            Files.createDirectories(MARKER.getParent());
+                            Files.writeString(MARKER, Integer.toString(ticks));
+                        } catch (Exception ignored) {
+                            // the marker is for the gate, not for the mod
+                        }
+                    });
+                    AttackBlockCallback.EVENT.register((player, level, hand, pos, direction) ->
+                            InteractionResult.PASS);
+                }
+            }
+            """;
+
     private static String meta(String name, String description) {
         return """
                 {
@@ -524,4 +659,6 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             meta("AngryHud", "A HUD renderer that throws on every frame.");
     private static final String SLOW_HUD_META =
             meta("SlowHud", "A HUD renderer that overruns the render-thread budget.");
+    private static final String NATIVE_CANARY_META =
+            meta("NativeCanary", "A plain Fabric ModInitializer, hot-loaded through the bytecode seam.");
 }

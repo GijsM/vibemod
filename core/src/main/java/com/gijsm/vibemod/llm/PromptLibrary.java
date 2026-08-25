@@ -126,13 +126,13 @@ public final class PromptLibrary {
 
         sb.append("""
                 - "mainClass" is the simple (no package) name of the one public class that
-                  implements Mod, and must have a public no-arg constructor.
+                  implements ENTRYPOINT, and must have a public no-arg constructor.
                 - Every entry in "files" has a "path" ending in ".java" and "content" holding the
                   complete, compilable source of that file (proper escaping of quotes/newlines
                   since this is a JSON string).
                 - ALL files declare `package vibemod.<name lowercased>;` at the top (the mod name
                   from the JSON, lowercased, no dots, no dashes).
-                - Exactly one public class across all files implements Mod.
+                - Exactly one public class across all files implements ENTRYPOINT.
                 - "config" is an array of tunable knobs, one object per knob:
                   {"key", "type", "default", "description", "min"?, "max"?, "step"?, "choices"?}.
                   "type" is one of boolean | integer | decimal | text | choice. "default" is
@@ -146,19 +146,10 @@ public final class PromptLibrary {
 
                 ================ HARD RULES ================
 
-                """);
+                """.replace("ENTRYPOINT", profile.entrypointName()));
 
         sb.append(profile.importRules());
         sb.append('\n');
-
-        sb.append("""
-                - NEVER call `Bukkit.getPluginManager().registerEvents(...)`,
-                  `Bukkit.getScheduler()...`, or `Bukkit.getCommandMap()` directly. Registration
-                  always goes through the VibeContext you are given: `ctx.listen(...)` for event
-                  listeners, `ctx.repeat(...)` / `ctx.later(...)` for scheduled work,
-                  `ctx.command(...)` for a real top-level command, `ctx.action(...)` for a named
-                  `/vibe do <mod> <name>` action.
-                """);
 
         sb.append(profile.threadingContract());
         sb.append('\n');
@@ -173,29 +164,15 @@ public final class PromptLibrary {
         sb.append('\n');
 
         sb.append("""
-                - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
-                  construct entity instances directly.
-                - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
-                  Mod class or listener, keyed by `player.getUniqueId()`. Do not use static
-                  mutable state shared across mod instances beyond that.
                 - Keep each file under roughly 150 lines. Split into a couple of small classes if a
                   single file would run long; every class still lives in the same
                   `vibemod.<name>` package.
-                - Make effects juicy where it fits the request: pair visual feedback
-                  (`world.spawnParticle(...)` / `player.spawnParticle(...)`) with a sound
-                  (`world.playSound(...)` / `player.playSound(...)`) so the mod feels alive, not
-                  silent.
-                - Expose any value a player would obviously want to tweak — counts, durations,
-                  radii, chances, on/off toggles, named choices — as a "config" knob instead of a
-                  hardcoded constant. Pick the narrowest fitting type (boolean/integer/decimal/
-                  text/choice) and sane min/max/step for numeric knobs.
-                - Read config knobs with `ctx.configBool/configInt/configDouble/configString(key)`
-                  INSIDE the event handler or task body, at the exact moment you need the value.
-                  NEVER read a config value once in onEnable (or a constructor) and cache it in a
-                  field — a knob change must take effect on the very next event/tick, not require
-                  a reload. Use `configBool` for boolean knobs, `configInt` for integer knobs,
-                  `configDouble` for decimal knobs, and `configString` for text or choice knobs.
+                """);
 
+        sb.append(profile.configContract());
+        sb.append('\n');
+
+        sb.append("""
                 ================ EDIT RESPONSE SHAPE (edit/repair rounds only) ================
 
                 Initial generation of a brand-new mod always uses the full JSON shape above. On an
@@ -234,13 +211,17 @@ public final class PromptLibrary {
 
                 ================ WORKED EXAMPLES ================
 
-                The following two examples show the exact expected input/output shape, including
-                config knobs read live via ctx.configX. Study the JSON formatting (escaped
-                newlines and quotes inside "content") as closely as the Java itself.
-
                 """);
 
         List<PlatformProfile.FewShot> fewShots = profile.fewShots();
+        // The count was hardcoded as "two" while the loader profiles ship three
+        // and the native Fabric profile ships one — a small lie in the prompt is
+        // still a lie the model has to reconcile with what it can see.
+        sb.append("The following ").append(numberWord(fewShots.size()))
+                .append(fewShots.size() == 1 ? " example shows" : " examples show")
+                .append(" the exact expected input/output shape.\n")
+                .append("Study the JSON formatting (escaped newlines and quotes inside \"content\") ")
+                .append("as closely as the Java itself.\n\n");
         for (int i = 0; i < fewShots.size(); i++) {
             sb.append("--- Example ").append(i + 1).append(" ---\n");
             sb.append("User: ").append(fewShots.get(i).user()).append('\n');
@@ -256,6 +237,19 @@ public final class PromptLibrary {
                 """);
 
         return sb.toString();
+    }
+
+    /** Small numbers as words, so the worked-examples preamble reads like English. */
+    private static String numberWord(int n) {
+        return switch (n) {
+            case 0 -> "no";
+            case 1 -> "one";
+            case 2 -> "two";
+            case 3 -> "three";
+            case 4 -> "four";
+            case 5 -> "five";
+            default -> String.valueOf(n);
+        };
     }
 
     /**
@@ -395,12 +389,31 @@ public final class PromptLibrary {
 
     /** Prompt asking the model to fix a project that failed to compile. */
     public static String repairPrompt(String javacDiagnostics) {
-        return "Your previous JSON response failed to compile. javac says:\n\n"
-                + javacDiagnostics
-                + "\n\nReturn the corrected project as JSON: either the FULL project shape (every file) "
-                + "described in the system prompt, or — if the fix is small and surgical — the EDIT shape "
-                + "({\"edits\":[{\"path\":...,\"find\":...,\"replace\":...}]}) whose \"find\" matches the "
-                + "current source of that file exactly once.";
+        return repairPrompt(javacDiagnostics, null);
+    }
+
+    /**
+     * {@link #repairPrompt(String)} plus an {@code API HINTS} block from the
+     * {@link com.gijsm.vibemod.compile.SymbolOracle} (V3 Phase 0 §D).
+     *
+     * <p>The hints go <em>after</em> the diagnostics and before the instruction,
+     * deliberately: the model has to read the error first or it will patch the
+     * wrong call. {@code hints} being blank collapses this to the one-argument
+     * form exactly, so a host with no oracle installed sends the prompt it
+     * always sent.
+     */
+    public static String repairPrompt(String javacDiagnostics, String hints) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Your previous JSON response failed to compile. javac says:\n\n")
+                .append(javacDiagnostics);
+        if (hints != null && !hints.isBlank()) {
+            sb.append("\n\n").append(hints.strip());
+        }
+        sb.append("\n\nReturn the corrected project as JSON: either the FULL project shape (every file) ")
+                .append("described in the system prompt, or — if the fix is small and surgical — the EDIT shape ")
+                .append("({\"edits\":[{\"path\":...,\"find\":...,\"replace\":...}]}) whose \"find\" matches the ")
+                .append("current source of that file exactly once.");
+        return sb.toString();
     }
 
     /**
