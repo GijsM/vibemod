@@ -1,0 +1,542 @@
+# VibeMod v2 Architecture — Multi-Platform
+
+*Status: authoritative for the platform-expansion migration (Phases B–F). Written by the
+Phase A architecture agent, 2026-08-25. Companion documents: `docs/PLATFORM-EXPANSION.md`
+(research + strategy) and the approved migration plan. Where this document and the plan
+disagree on a detail, this document wins — it is the one implementation agents execute.*
+
+Skeleton sources for every interface named here exist under `platform-api/`, `sdk/` and
+`sdk-client/` at the repo root. They are the contract; this document is the semantics.
+
+---
+
+## 0. Decision log (locked; do not relitigate in Phases B–F)
+
+| # | Decision | Why |
+|---|---|---|
+| 1 | UI fallback is **plain chat**, never chest/anvil GUIs | User decision; keeps one fallback renderer, chat maps cleanly to screen models |
+| 2 | Generated mods get **full client capabilities** on Fabric/NeoForge v1: HUD, keybinds, client tick, sounds, toasts. Excluded v1: world-render hooks, custom screens, raw input, networking, mixins | User decision; exclusions bound the blast radius (a bad render hook hard-crashes the client) and the prompt surface |
+| 3 | **NeoForge only**, no legacy MinecraftForge | SRG names at runtime would force a remapping pipeline; ecosystem moved on |
+| 4 | Loaders target **MC 26.1+** only | 26.1 is unobfuscated — generated code compiles against Mojang names with zero remapping; ≤1.21.11 Fabric would need an intermediary pipeline |
+| 5 | **Paper floor 1.20.6**; Spigot, ≤1.20.4, Folia unsupported | Market data: <5% share for everything below, each with disproportionate cost |
+| 6 | **No VibeMod↔VibeMod networking v1** — servers never push generated client code to players | That is remote code execution on player machines; needs consent/signing UX. Client features = singleplayer/LAN-host. Client-local mode on third-party servers is v1.1, config-flagged, chat-only |
+| 7 | **The live game is the compile classpath** — never ship or pin API jars for generated code | The running server validates generated code against exactly itself; compile diagnostics feed the existing self-heal loop |
+| 8 | **Capability probes, not version checks** | Version strings differ per platform/fork; capabilities compose |
+| 9 | **`sdk-client` is pure JDK** (`HudCanvas` facade, state getters, `Object` escape hatch) — deviation from the client-design pass, see §4.3 | Compiles everywhere without MC jars; shields Fabric's thrice-rewritten HUD API; much easier prompt surface |
+| 10 | One revocation model everywhere: `Registration.close()` | Generalizes today's HandlerList/task/command teardown; identical semantics on all platforms |
+
+---
+
+## 1. Modules and dependency graph
+
+```
+sdk-client      pure JDK                       (generated-code client contract)
+platform-api    JDK + adventure-api + sdk-client   (SPI + screen models)
+core            JDK + Gson + adventure-api + platform-api   (engine)
+sdk             paper-api (provided) + sdk-client           (generated-code contract, Paper flavor)
+paper           core + platform-api + sdk + paper-api
+fabric          core + platform-api + sdk-mod flavor + sdk-client + fabric-loader/api (Loom)
+neoforge        core + platform-api + sdk-mod flavor + sdk-client + neoforge (ModDevGradle)
+```
+
+Rules:
+- `core` and `platform-api` never import `org.bukkit`, `io.papermc`, `net.minecraft`,
+  `net.fabricmc`, `net.neoforged`. Adventure (`net.kyori.adventure`) **is allowed** in both —
+  it is a standalone library and the project's text/UI currency (LuckPerms precedent).
+- `sdk-client` never imports anything outside `java.*`.
+- Gson stays an assumed-present dependency on Paper (provided via paper-api transitives, per
+  ARCHITECTURE.md); on Fabric/NeoForge it is JiJ'd with the host jar.
+- ECJ (`org.eclipse.jdt:ecj`) is `compileOnly` in core, JiJ'd in fabric/neoforge (§7.3).
+
+### 1.1 Class-by-class destination map
+
+Every class in `plugin/src/main/java/com/gijsm/vibemod/`:
+
+| Current class | Destination | Notes |
+|---|---|---|
+| `llm/OpenRouterClient` | core | move-only |
+| `llm/StreamScanner` | core | move-only |
+| `llm/ModelCatalog` | core | move-only |
+| `llm/PromptLibrary` | core | parameterized by `PlatformProfile` (§6); embedded api-source constants become build-time-generated (§6.4) |
+| `compile/InMemoryCompiler` | core | gains `CompilerProvider` ctor param + `--release` clamp (§7.3); the paperclip `libraries/`+`versions/` walk moves OUT (to `paper`'s ClasspathProvider) |
+| `compile/CompileResult` | core | move-only |
+| `gen/ModGenerator` | core | `Bukkit.getScheduler()` hops → `TickScheduler`; `Bukkit.isPrimaryThread()` → `TickScheduler.onMain()` |
+| `gen/GeneratedProject` | core | move-only |
+| `store/ModStore` | core | meta.json v3 normalization added (§5) |
+| `store/ModConfigs` | core | values map becomes thread-safe (volatile/concurrent) — client callbacks read knobs off-main (§8.4) |
+| `store/JarExporter` | core | wrapper source + plugin descriptor emitted per `PlatformProfile` (§6.3); Paper wrapper keeps current template with `api-version` from profile |
+| `api/Mod` | sdk | unchanged (frozen surface) |
+| `api/VibeContext` | sdk | + `hasClient()`, `client(Consumer<ClientContext>)` (§4.2) |
+| `api/ModCommandHandler` | sdk | unchanged |
+| `api/VibeMod` (deprecated bridge) | sdk | unchanged — pre-v3 stored mods still compile |
+| `runtime/ModRegistry` | **split** | platform-free lifecycle → core `runtime/ModLifecycle` (states enabled/degraded, version activation, restore-on-boot, error-storm policy, `Registration` draining); Bukkit binding → paper `PaperEventBridge` + `PaperModHost` (listener reflection + `EventExecutor` + watchdog wrap + `@EventHandler` scan) |
+| `runtime/ModHandle` | core | loses direct `Listener`/`BukkitTask` fields; holds `List<Registration>` |
+| `runtime/ModErrors` | core | replace any Bukkit logging with JDK logger; storm-counter API gains a `where` dimension used by client dispatch (§8.3) |
+| `runtime/Watchdog` | core | measured-thread parameterized (main vs render); trip path unchanged |
+| `runtime/DebugEcho` | core | broadcast via `Messenger` (permission-scoped) instead of `Server#broadcast` |
+| `runtime/DynamicCommands` | paper | becomes `PaperCommandBridge implements CommandBridge` (getCommandMap + knownCommands reflection stay here, isolated) |
+| `command/VibeCommand` | paper (v2.0) | routing is mostly platform-neutral; extract to core only when fabric needs it (Phase D may promote shared routing to core `command/VibeRouter` — allowed, not required) |
+| `VibeMod` (main class) | paper | bootstrap: builds core services, wires SPI impls |
+| `ui/DialogKit` | paper | becomes internals of `PaperDialogRenderer` |
+| `ui/Dialogs`, `ui/InfoDialogs`, `ui/ModHubDialog`, `ui/SettingsDialog` | **split** | screen *content* → core `ui/screens/*` builders producing `Screen` models (§3); dialog mechanics → paper `PaperDialogRenderer` |
+| `ui/Style`, `ui/Text`, `ui/MarkdownMini`, `ui/InstallCard` | core | Adventure-only, already platform-free in content |
+| `ui/VirtualBooks` | core | console dumps via `Messenger.console()` |
+| `ui/Progress` | **split** | BossBar marquee is Adventure (`Audience#showBossBar`) → core; `Particle`/`Sound`/`Location` celebration effects → thin `Celebration` SPI method on `Messenger` (paper implements; loaders may no-op v1) |
+| `ui/ChatMode` | paper | becomes `PaperChatBridge implements ChatBridge` (AsyncChatEvent stays Paper-only; loaders implement ChatBridge over their chat events) |
+| self-tests (`*SelfTest`) | core test roots | stay `main()` classes; `CompilerSelfTest` gains ECJ-forced mode (§7.3); `StoreSelfTest` unchanged semantics |
+
+---
+
+## 2. platform-api SPI
+
+All interfaces live in `platform-api/src/main/java/com/gijsm/vibemod/platform/` (skeletons
+committed; javadoc there is normative). Summary of semantics and threading:
+
+| Interface | Purpose | Threading contract |
+|---|---|---|
+| `Registration` | idempotent revocable handle; `close()` never throws | thread-safe |
+| `PlatformInfo` | `platformName()`, `mcVersion()`, capability probes: `hasDialogs()`, `hasSystemCompiler()`, `hasClient()`, `hasNativeCommandMap()`, `isDedicatedServer()` | immutable after boot |
+| `TickScheduler` | `repeat/later/async` returning `TaskHandle extends Registration`; `runOnMain(Runnable)`; `onMain()` | callbacks on main server thread (except `async`) |
+| `EventBridge` | `Registration listen(Object nativeListener, String modName)` — registers a platform-native listener object with watchdog + error-storm wrapping | main thread |
+| `CommandBridge` | `Registration register(String name, String description, CommandHandler h)`; `void resyncAll()`; `CommandHandler.run(Sender, String[])` | handlers on main thread |
+| `Sender` | who invoked: `Audience audience()`, `String name()`, `boolean hasPermission(String)`, `UUID idOrNull()` | — |
+| `Messenger` | `Audience player(UUID)`, `Audience console()`, `broadcast(Component)`, `broadcast(Component, String permission)`, `celebrate(UUID)` (particles/sound; may no-op) | main thread |
+| `ChatBridge` | `Registration capture(UUID player, ChatCaptureHandler)` — swallow that player's next chat lines until handler returns DONE/CANCELLED | handler hopped to main thread |
+| `ClasspathProvider` | `List<Path> compileClasspath()` — real files only; implementations own the extract-once cpcache (§7.2) | called off-main (compile thread) |
+| `CompilerProvider` | `JavaCompiler compiler()`, `String name()`, `int maxSupportedRelease()`; static `resolve()` chain (§7.3) | thread-safe |
+| `ClientEventBridge` | client hooks (§8): `hud`, `clientTick`, `leaseKey`, `clientCommand`, `playUiSound`, `toast`, `inGame` | registration thread-safe; callbacks on **render thread** |
+| `UiRenderer` | `void show(UUID player, Screen screen)` (§3) | main thread |
+
+`paper/` implements: PlatformInfo, TickScheduler (BukkitScheduler), EventBridge
+(HandlerList/EventExecutor), CommandBridge (commandMap), Messenger, ChatBridge
+(AsyncChatEvent), ClasspathProvider (paperclip walk), UiRenderer ×2 (Dialog + Chat).
+No ClientEventBridge on Paper (`hasClient()` false).
+
+`fabric/` and `neoforge/` implement all of the above including ClientEventBridge
+(client only), per §8.
+
+---
+
+## 3. Screens are data: the screen model
+
+Package `com.gijsm.vibemod.platform.ui` (skeletons committed). Pure JDK + Adventure.
+
+```
+Screen        title: Component, body: List<BodyBlock>, inputs: List<Input>,
+              buttons: List<Button>, exit: Button|null, columns: int, kind: FORM|MENU|NOTICE
+BodyBlock     Text(Component, WidthHint)  |  Icon(String iconId, boolean glint, Component beside)
+WidthHint     BODY, WIDE, INPUT, ROW  (renderer maps to px or ignores)
+Input         Text(key, label, initial, maxLength, multiline)
+              Bool(key, label, initial)
+              Choice(key, label, List<Option(id, label, selected)>)
+              Number(key, label, min, max, step, initial, labelFormat)
+Button        label: Component, tooltip: Component|null, width: WidthHint, action: UiAction
+UiAction      RunCommand(String command)                     — stateless navigation
+              Submit(UiCallback)                              — reads inputs, one-shot
+              Callback(UiCallback)                            — no inputs read, one-shot
+UiCallback    void handle(UiResponse response, UUID player)   — invoked ON MAIN THREAD by renderer
+UiResponse    String text(key) | Boolean bool(key) | Double number(key)   — null when absent
+```
+
+Renderer obligations (both renderers): hop callbacks to the main thread; never let a
+callback exception propagate (catch → log → `Style.err` to player); re-validate every
+submitted value server-side (clients lie); one-shot callbacks (a second click is a no-op).
+
+### 3.1 DialogRenderer mapping (paper, `hasDialogs`)
+
+Mechanical: Screen.kind FORM → `DialogType.confirmation(submitButton, cancel)`;
+MENU → `DialogType.multiAction(buttons).exitAction(exit).columns(n)`; NOTICE →
+`DialogType.notice(exit)`. Inputs map 1:1 to `DialogInput.text/bool/singleOption/numberRange`
+(key sanitization `[^a-z0-9_]→_` with reverse map — lift from `Dialogs.inputKey`).
+`UiAction.RunCommand` → `DialogAction.staticAction(ClickEvent.runCommand(...))`;
+Submit/Callback → `DialogAction.customClick(...)` with `ClickCallback.Options.uses(1)` and
+main-thread hop — i.e. today's `DialogKit.mainThreadClick`. Show = next-tick
+`player.showDialog`, never `closeInventory()` (regression: commits 639dd32/3666bf0).
+
+### 3.2 ChatRenderer mapping (universal fallback)
+
+The load-bearing design: **forms render as edit-in-place lists, not sequential wizards.**
+
+- Screen → a chat block: `── title ──` header, body blocks as lines (`MarkdownMini`
+  output verbatim; `Icon` renders as its `beside` component, id dropped), then interactive
+  lines, then a button row.
+- `Input.Text/Number` → line `key = current [✎ change]`; clicking `[✎ change]` starts a
+  `ChatBridge.capture` for that player ("type a value in chat, or `cancel`"), validates
+  (clamp numbers to min/max/step), then re-renders the whole screen with the new pending
+  value. Multiline text (make/edit prompts): capture accepts lines until a lone `done`.
+- `Input.Bool` → `key = on [toggle]` — click flips pending value, re-render.
+- `Input.Choice` → `key: [opt1] [opt2] …` — selected one highlighted; click picks, re-render.
+- `Button(Submit)` → `[Label]` click component that submits the **pending** value set as a
+  `UiResponse`. Pending state lives in a per-player `ChatFormSession` (one active per player;
+  opening a new screen discards the old; 5-minute TTL).
+- `Button(RunCommand)` → `ClickEvent.runCommand` 1:1. `Button(Callback)` → callback token.
+- Click plumbing for Submit/Callback/toggle/change: a hidden `/vibe ui <token>` subcommand;
+  tokens are random, single-use, per-player, TTL 5 min, held in the renderer. (Adventure
+  `ClickCallback` is NOT used here — on Paper it exists, but chat-renderer must also run on
+  loaders where we control the token path uniformly.)
+- MENU screens (hub, browser, history, source index): rows as click lines, exit button last.
+  NOTICE: block + nothing.
+
+ChatRenderer lives in **core** (`ui/chat/`) — it only needs Messenger, ChatBridge,
+CommandBridge (for the `/vibe ui` route the host wires), so every platform reuses it.
+
+### 3.3 The 17 screens, inventoried
+
+Builders live in core `ui/screens/`, one method per screen, producing `Screen` from the same
+inputs the current classes take. Content below is the extraction spec (from
+`ui/Dialogs.java`, `ui/InfoDialogs.java`, `ui/ModHubDialog.java`, `ui/SettingsDialog.java`):
+
+| # | Screen (builder) | Kind | Body | Inputs | Buttons / exit |
+|---|---|---|---|---|---|
+| 1 | makePrompt | FORM | icon CRAFTING_TABLE + "Describe…" | multiline `prompt` (2000), text `name` (32) | Submit "✨ Create" → onPrompt(name-hint + text); cancel |
+| 2 | edit(mod) | FORM | manual summary | multiline `change` (2000) | Submit "Update" → onEdit; cancel |
+| 3 | config(mod, knobs) | FORM | optional error banner; per-knob `key — description` lines | per knob: bool/choice/number(min,max,step)/text(256) | Submit "Save" → onConfig; rejected keys → reopen with banner + pending values; cancel |
+| 4 | modelPicker | FORM | current model+price; session spend | choice `model` (id — price, cheapest first), text `custom` (80, wins if non-blank) | Submit "Use" → onPick; cancel "Keep the current model" |
+| 5 | fixConfirm(mod) | FORM(no inputs) | icon+"is degraded"; question; last error | — | RunCommand "🔧 Fix it" → `/vibe fix <m> confirm`; cancel |
+| 6 | rollbackConfirm(mod,v) | FORM(no inputs) | icon; "Recompile and hot-load…?"; changelog | — | RunCommand "⚡ Activate vN" → `/vibe rollback <m> <v> confirm`; cancel |
+| 7 | deleteConfirm(mod) | FORM(no inputs) | icon; "permanently deletes … N versions" | — | RunCommand "✖ Delete forever" → `/vibe delete <m> confirm`; cancel |
+| 8 | modHub(mod) | MENU c3 | icon(glint=running)+name; desc; usage; state line; version+changelog; creator; knob count; lifetime cost | — | Manual/Source/History/Errors; admin: Configure/Edit/Enable|Disable/Debug(state dot)/Reload/Export/[Fix when degraded]/Delete — all RunCommand `/vibe <sub> <m>`; exit "← Back to list" → `/vibe list` |
+| 9 | browser | MENU c1 | "N mods · R running · D degraded" or empty-state hint | — | per-mod row `● Name vN` (tooltip: desc/state/versions/knobs) → `/vibe info <m>`; admin "⚙ Settings"; exit Done (no-op) |
+| 10 | manual(mod) | MENU c2 | icon+name; markdown blocks; "Verified facts"; config table (uniform font) | — | Source/Errors; exit "← Back" → `/vibe info <m>` |
+| 11 | sourceIndex(mod,v) | MENU c1 | "N files — pick one." | — | per-file row (tooltip fqcn + line count) → Callback opening screen 12; Manual/Errors; exit back-to-hub |
+| 12 | sourceFile(mod,v,fqcn) | MENU | `// fqcn` (WIDE); whole source, uniform font (WIDE) | — | "← Back to files" → `/vibe source <m>` (or Manual/Errors when single-file); exit back-to-hub |
+| 13 | errors(mod) | MENU c3 | per-record: `n× Class: msg` + `at frame (where, last Xs ago)` + stack lines | — | Manual/Source/History; exit back-to-hub |
+| 14 | history(mod) | MENU c1 | "N versions · vX active" | — | per-version row newest-first `● ✨ v1 · create · 3d ago` (tooltip changelog/meta/missing-sources) → Callback opening screen 15; exit back-to-hub |
+| 15 | versionDetail(mod,v) | MENU | changelog-or-prompt; `Prompt: …`; joined meta (+"sources missing") | — | [⚡ Activate… → `/vibe rollback <m> <v>` when !active && onDisk]; "← Back to history"; exit back-to-hub |
+| 16 | costs | NOTICE | icon GOLD_INGOT + session spend; per-mod cost lines (uniform); zero-mods + pre-tracking footnotes | — | Done |
+| 17 | settings | MENU c3 + inputs | icon COMPARATOR; model+price; session spend; "API key… in config.yml" | choice `thinking`(off/low/medium/high), bool `streaming`, numbers `timeout`(30-600/15) `maxtokens`(0-131072/1024) `retries`(0-10) `concurrency`(1-8), bool `watchdog`, numbers `watchdogms`(50-1000/25) `watchdogbudget`(100-2000/50), bool `debugecho` | Submit "Save" (clamped server-side); Callback "Model…" → opens 4 (reopens 17 after pick); Callback "⟳ Reload from disk"; exit Cancel |
+
+Helpers that move with the builders: `relativeTime`, `changelogOrPrompt`, `ModCost`,
+`kindGlyph`, state dots/colors (`Style`), `inputKey` sanitize/reverse-map.
+
+---
+
+## 4. The SDK: generated-code contract
+
+### 4.1 One contract, two flavors
+
+`Mod` is identical everywhere (shared file). `VibeContext`/`ModCommandHandler` exist in two
+flavors with the same FQCN (`com.gijsm.vibemod.api.*`), selected by which sdk jar the host
+puts on the generated-code classpath:
+
+- **Paper flavor** (`sdk/src/main/java`, committed as skeleton): today's Bukkit-typed
+  surface *unchanged* (corpus compatibility for the 569 stored sources) plus
+  `hasClient()` (default `false`) and `client(Consumer<ClientContext>)` (default no-op).
+  `ClientContext` is pure JDK (§4.3) so these defaults compile against paper-api.
+- **Mod flavor** (`sdk/src/mod/java`, Phase D creates it; spec below): Mojang-typed,
+  shared verbatim by Fabric and NeoForge (both run official names on 26.1+).
+
+Mod-flavor `VibeContext` (normative spec — Phase D implements exactly this):
+
+```java
+MinecraftServer server();
+String modName(); Logger log(); Path dataFolder();
+TaskHandle repeat(long delayTicks, long periodTicks, Runnable task);   // TaskHandle: cancel()
+TaskHandle later(long delayTicks, Runnable task);
+void command(String name, String description, ModCommandHandler h);    // h: (CommandSourceStack src, String[] args)
+void action(String name, ModCommandHandler h);                         // /vibe do <mod> <name>
+boolean/long/double/String configBool|Int|Double|String(String key);
+boolean hasClient();
+void client(Consumer<ClientContext> setup);
+// curated server event hooks, host-dispatched + revoked with the mod:
+void onPlayerJoin(Consumer<ServerPlayer> h);        // Fabric: ServerPlayConnectionEvents.JOIN / Neo: PlayerLoggedInEvent
+void onPlayerQuit(Consumer<ServerPlayer> h);        // …DISCONNECT / PlayerLoggedOutEvent
+void onServerTick(Consumer<MinecraftServer> h);     // ServerTickEvents.END_SERVER_TICK / ServerTickEvent.Post
+void onChat(ChatHandler h);                         // boolean handle(ServerPlayer, String) → false cancels; ServerMessageEvents / ServerChatEvent
+void onBlockBreak(BlockHandler h);                  // boolean → false cancels; PlayerBlockBreakEvents.BEFORE / BlockEvent.BreakEvent
+void onUseBlock(UseHandler h);                      // UseBlockCallback / RightClickBlock
+void onUseItem(UseHandler h);                       // UseItemCallback / RightClickItem
+void onEntityDeath(BiConsumer<LivingEntity, DamageSource> h);  // ServerLivingEntityEvents.AFTER_DEATH / LivingDeathEvent
+void onPlayerDeath(Consumer<ServerPlayer> h);
+void onRespawn(Consumer<ServerPlayer> h);           // AFTER_RESPAWN / PlayerRespawnEvent
+```
+
+The curated-hook list is v1-frozen; anything else is out of scope for generated mods on
+loaders (the prompt says so; compile errors catch attempts). Rationale: Fabric events
+cannot unregister, so *every* hook must be host-dispatched anyway — a curated list is the
+honest surface, and Fabric's server-side event vocabulary is far smaller than Bukkit's to
+begin with. Paper mods keep the full Bukkit event system via `listen()` as today.
+
+### 4.2 Paper-flavor `VibeContext` additions
+
+`hasClient()` and `client(...)` exist on Paper for prompt uniformity but are documented
+"loader-only feature — no-op on Paper servers" and default-implemented so the frozen v3
+surface stays source-compatible for all 49 stored mods.
+
+### 4.3 `sdk-client` (pure JDK — Decision 9)
+
+Committed skeletons; the normative surface:
+
+```java
+ClientContext:
+  void hud(String id, HudRenderer renderer);
+  KeyLease key(String label, String defaultKey, Runnable onPress);  // IllegalStateException when pool exhausted
+  void tick(ClientTickHandler handler);
+  void clientCommand(String name, String description, ClientCommandHandler handler); // /vibec <mod> <name>
+  void sound(String soundId, float volume, float pitch);
+  void toast(String title, String body);
+  boolean inGame();
+  // pure-JDK state getters (render-thread values, safe inside hud/tick callbacks):
+  double playerX(); double playerY(); double playerZ();
+  float playerHealth(); float playerMaxHealth();
+  String dimension();            // e.g. "minecraft:overworld"; "" when not in game
+  String targetedBlock();        // block id under crosshair within reach, "" if none
+  int fps();
+  long worldTime();              // day time ticks; -1 when not in game
+  Object minecraftHandle();      // escape hatch: the net.minecraft.client.Minecraft instance; cast at your own risk
+
+HudRenderer:      void render(HudCanvas c, float tickDelta);
+HudCanvas:        int width(); int height();                       // scaled GUI size
+                  void text(String s, int x, int y, int argb);
+                  void text(String s, int x, int y, int argb, boolean shadow);
+                  int textWidth(String s);
+                  void box(int x1, int y1, int x2, int y2, int argb);   // filled rect
+                  void outline(int x1, int y1, int x2, int y2, int argb);
+                  void item(String itemId, int x, int y);              // 16x16 item icon
+ClientTickHandler: void tick(ClientContext ctx);
+ClientCommandHandler: void run(ClientContext ctx, String[] args);
+KeyLease:         void release(); boolean active(); String slotName(); boolean pressed();
+```
+
+Hosts implement `HudCanvas` over `GuiGraphics` (~60 lines each). This is deliberately a
+*drawing* API, not a widget API — enough for coordinate HUDs, timers, counters, bars.
+Deviation note: the client-design pass proposed Mojang-typed `HudRenderer(GuiGraphics,…)`;
+Decision 9 overrides it for compile-everywhere, churn-shielding and prompt simplicity.
+`minecraftHandle()` preserves the power path.
+
+---
+
+## 5. meta.json v3
+
+Current stored shape (v2, `ModStore`) gains three fields:
+
+```json
+{ "schema": 3,
+  "platform": "paper" | "fabric" | "neoforge",
+  "mcVersion": "1.21.8",
+  "side": "server" | "client" | "both",
+  ...existing fields... }
+```
+
+Normalization (extend `ModStore.normalize`, same pattern as v1→v2): on read, a meta.json
+without these fields gets `platform="paper"`, `mcVersion="1.21.8"` (every existing mod was
+generated there), `side="server"`; written back on next save. `side` is derived at
+generation time from whether the produced code calls `ctx.client(...)`; it drives UX badges
+and prompt selection ONLY — never load gating (`ctx.client` no-ops where irrelevant).
+A mod whose stored `platform` differs from the running platform is shown in the browser as
+`(other platform)` and refuses enable with a friendly message — `/vibe make` again is the
+migration path. Same-platform `mcVersion` drift is NOT gated: restore-on-boot recompiles
+against the live server and the self-heal loop handles breakage, as today.
+
+---
+
+## 6. PlatformProfile and prompts
+
+### 6.1 Schema
+
+```java
+record PlatformProfile(
+    String id,                    // "paper-modern" | "paper-legacy" | "fabric" | "neoforge"
+    String displayName,           // "Paper 1.21.7+" …
+    String roleLine,              // replaces PromptLibrary:183 "You are an expert … author."
+    String apiSourceBlock,        // generated: the flavor's VibeContext + Mod + handler sources (§6.4)
+    String importRules,           // allowed import roots + explicit bans
+    String cheatSheet,            // event/command/enum guidance for this era/platform
+    String threadingContract,     // §8.4 text for loader profiles; main-thread text for paper
+    List<FewShot> fewShots,       // (user, assistant) example pairs
+    String pluginDescriptor,      // JarExporter: api-version / fabric.mod.json / neoforge.mods.toml template
+    String iconInstruction)       // PromptLibrary:250 equivalent
+```
+
+Selected at boot from `PlatformInfo` (platform + `hasDialogs` is irrelevant here; version
+threshold 1.21.7 splits the two Paper profiles). `ModGenerator` threads the profile through
+`makePrompt`/`editPrompt`/`fixPrompt`/`repairPrompt`.
+
+### 6.2 The four v1 profiles
+
+| Profile | Import rules | Cheat-sheet highlights | Few-shots |
+|---|---|---|---|
+| paper-modern (1.21.7+) | `java.*`, `org.bukkit.*`, **`net.kyori.adventure.*` now officially allowed** (88+ stored mods already use it); bans: `net.minecraft.*`, `io.papermc.*`, reflection | current PromptLibrary:294-297 enum guidance; 1.21.3+ attribute names (`Attribute.MAX_HEALTH`) | existing EXAMPLE_1/2 unchanged |
+| paper-legacy (1.20.6–1.21.6) | same as paper-modern | **era table**: pre-1.21.3 attribute names (`GENERIC_MAX_HEALTH` family), pre-1.21.3 `Sound`/`Particle`/`Enchantment` enum era, no `setEnchantmentGlintOverride` | existing examples with enum names checked against 1.20.6 |
+| fabric (26.1+) | `java.*`, `com.gijsm.vibemod.api.*`, `net.minecraft.*` (read-only use of game types passed into hooks); bans: `net.fabricmc.*` (all registration goes through ctx), mixins, `Screen` subclasses, render events, `java.net.*` | curated ctx hooks table (§4.1) + ClientContext surface + "no registry content (items/blocks)" | HUD-timer mod; keybind-toggle mod; simple gameplay mod (onBlockBreak counter) |
+| neoforge (26.1+) | same as fabric with `net.neoforged.*` banned | identical (same sdk flavor) | same three |
+| *(all)* | | threading contract per platform; `side` guidance ("if you use ctx.client, say side=client/both in meta") | |
+
+### 6.3 JarExporter per profile
+
+`pluginDescriptor` + a wrapper-emitter strategy per profile. v1: Paper wrapper only
+(current template, `api-version` from profile = `'1.20'`); fabric/neoforge `/vibe export`
+returns "not yet supported on this platform" (tracked as v1.1) — exporting a standalone
+loader mod means bundling loader boilerplate and is not on the critical path.
+
+### 6.4 Build-time prompt sources
+
+A Gradle task (`generatePromptSources`) in core reads the sdk flavor sources
+(`Mod.java`, `VibeContext.java`, `ModCommandHandler.java`, `ClientContext.java`) and emits
+`com.gijsm.vibemod.llm.GeneratedApiSources` (string constants) consumed by `PromptLibrary`.
+This kills the hand-duplicated constants at PromptLibrary.java:39-157; `LlmSelfTest`'s
+compile-check of prompt examples keeps guarding drift.
+
+---
+
+## 7. Compilation pipeline changes
+
+### 7.1 Classpath principle
+
+`InMemoryCompiler` drops its own classpath assembly; it receives `ClasspathProvider`.
+Implementations:
+- **Paper**: current logic moved verbatim — `java.class.path` + code-source of
+  `org.bukkit.Bukkit` + own code-source + paperclip `libraries/`+`versions/` walk.
+- **Fabric**: `FabricLoader.getModContainer("minecraft"|"fabric-loader"|each fabric-api
+  module|"vibemod").getOrigin().getPaths()`; fallback: code-source reflection on
+  `net.minecraft.server.MinecraftServer` + one fabric-api class.
+- **NeoForge**: FML mod-file APIs for patched minecraft + neoforge jars under `libraries/`;
+  translate `union:` URLs (strip scheme + `%23n!/` suffix) — small pure function, unit-tested.
+
+### 7.2 cpcache (extract-once)
+
+Any provider path that is not a plain readable `.jar` file (nested JiJ jar, directory,
+union path) is copied to `<dataFolder>/cpcache/<first16-of-sha256>.jar`, content-addressed,
+reused across boots, orphans pruned on boot. Needed because javac/ECJ read real files while
+Knot/ModLauncher read nested jars in place.
+
+### 7.3 CompilerProvider + ECJ
+
+`resolve()` order: `ToolProvider.getSystemJavaCompiler()` → `ServiceLoader.load(JavaCompiler.class)`
+→ `Class.forName("org.eclipse.jdt.internal.compiler.tool.EclipseCompiler")`. ECJ ≥3.43
+(JDK 25 line), EPL-2.0: license text shipped under `META-INF/licenses/`, credited in mod
+metadata. `compileOnly` in core; **Jar-in-Jar in fabric/neoforge — never relocated**
+(relocation breaks the reflective name + ServiceLoader entry). `buildOptions()` clamps
+`--release` to `min(Runtime.version().feature(), provider.maxSupportedRelease())`.
+`CompilerSelfTest` gains `-Dvibemod.compiler=ecj` forcing path 3 and must pass the full
+stored-corpus compile. Known risk: ECJ's file manager vs our `InMemoryFileManager` —
+contained fallback is explicit `-classpath` + a fully in-memory manager.
+Client contingency (probe in Phase D before building anything): if Mojang's jlink runtime
+lacks the `java.compiler` API module, JiJ the `javax.tools` API classes; check
+`ModuleLayer.boot().findModule("java.compiler")` on a real launcher install first.
+
+---
+
+## 8. Client architecture (fabric/neoforge, physical client only)
+
+### 8.1 Host-owned dispatchers
+
+One permanent registration per surface at client init; generated mods attach/detach via
+`ClientEventBridge`; teardown drains. Fabric: `HudElementRegistry.addLast("vibemod:mods",…)`,
+`ClientTickEvents.END_CLIENT_TICK`. NeoForge: `RegisterGuiLayersEvent` (one layer above
+CHAT), `ClientTickEvent.Post`. Every dispatch entry is try/catch-wrapped → `ModErrors`
+(where="client"); the storm counter's trip auto-disables the mod. **A throwing HUD renderer
+must never crash the render loop — this lands with the first client commit, not later.**
+
+### 8.2 Key pool
+
+8 `KeyMapping`s pre-registered at client init (`vibemod.slot.1..8`, category
+`key.categories.vibemod`, default unbound). Lease = lowest free slot; auto-bind the
+requested default only if the user never manually rebound that slot (tracked in host
+config as auto-bound flags); release clears handler + unbinds if auto-bound. Presses
+detected in the client-tick dispatcher via `consumeClick()`. Pool exhaustion throws at
+`ctx.client` setup time → surfaces as a normal mod-load diagnostic.
+
+### 8.3 /vibec
+
+Static root registered once (Fabric: `ClientCommandRegistrationCallback`; NeoForge:
+`RegisterClientCommandsEvent`, re-fires per connection — re-register each time):
+`/vibec <mod> <command> [args…]` dispatching into the per-mod handler registry with a live
+`SuggestionProvider`; `/vibec list` host verb. Dynamic top-level client commands: excluded v1.
+
+### 8.4 Threading contract (goes verbatim into loader profiles + SDK javadoc)
+
+`onEnable`/`onDisable` and all server hooks run on the server thread. `ctx.client(...)`
+setup runs on the server thread; registrations are thread-safe. `hud`/`tick`/`key`/
+`clientCommand` callbacks run on the **render thread**. Client callbacks must only use
+`ClientContext` (its getters are render-thread-safe) and mod-local state; never touch
+server state from client callbacks or vice versa — in singleplayer both live in one JVM
+and races are silent. `ctx.config*` reads are thread-safe everywhere. `Watchdog` measures
+client callbacks on the render thread with the same budgets/trip path.
+
+### 8.5 Dialogs on loaders
+
+Server-side vanilla `Dialog` construction + `ServerPlayer#openDialog` (inline
+`Holder.direct`, no registry); responses arrive as custom-click actions — **one mixin** on
+`ServerCommonPacketListenerImpl`/`ServerCommonNetworkHandler` routes them into the
+UiRenderer's callback registry (Fabric + NeoForge alike unless NeoForge exposes an event).
+Singleplayer rides the identical integrated-server path. Before building the loader
+DialogRenderer, check whether adventure-platform-mod ships `Audience#showDialog`; if yes,
+reuse Paper's renderer logic against Adventure `DialogLike` instead.
+
+---
+
+## 9. Phase acceptance criteria
+
+Common to every phase: work on this branch; one commit per coherent step; never
+`git stash`; the phase's full checklist verified before reporting done; deviations
+documented in the completion report.
+
+### Phase B — Gradle multi-module
+- [ ] `gradle build` (wrapper committed, Gradle 8.x, Java 21 toolchain for paper/core/sdk) produces `paper/build/libs/VibeMod.jar`
+- [ ] Maven files removed; `settings.gradle.kts` lists core, platform-api, sdk, sdk-client, paper
+- [ ] Class moves per §1.1 table (splits may be deferred to C where the table says so; pure moves happen here)
+- [ ] Paper jar parity: same plugin.yml (`api-version: '1.21'` — unchanged in B), `jar tf` classes superset-equal to Maven jar (allowing new platform-api/sdk classes), boots on the local dev server, `/vibe` browser opens, one canned `/vibe make`-less smoke: restore existing mods from `server/plugins/VibeMod/mods` copy → all enabled mods load
+- [ ] All 5 self-tests run green via Gradle JavaExec tasks (`CompilerSelfTest`, `LlmSelfTest`, `StoreSelfTest` incl. 569-source corpus, `ErrorsSelfTest`, `CatalogSelfTest`)
+- [ ] `generatePromptSources` task replaces PromptLibrary's hand-embedded constants; `LlmSelfTest` still passes
+- [ ] Both CI workflows build with Gradle and upload the same artifact names
+
+### Phase C — Seams + Paper 1.20.6 + ChatRenderer
+- [ ] `PlatformInfo` probe implemented (dialog capability = classpath probe for `io.papermc.paper.dialog.Dialog` + MC version ≥1.21.7); all SPI impls wired in paper bootstrap
+- [ ] 17 screen builders in core produce models per §3.3; `PaperDialogRenderer` renders all 17 byte-comparably to today (manual QA on dev server)
+- [ ] `ChatRenderer` in core implements §3.2 incl. `/vibe ui <token>` route, ChatFormSession, capture flows
+- [ ] Renderer selection by `hasDialogs`; config override `ui.force-chat: true` for QA
+- [ ] `CompilerProvider` seam + clamp; ECJ-forced `CompilerSelfTest` passes corpus
+- [ ] PlatformProfile wiring; paper-modern + paper-legacy profiles; adventure officially allowed
+- [ ] `plugin.yml` + JarExporter `api-version: '1.20'`; `setEnchantmentGlintOverride` capability-gated
+- [ ] run-task (`xyz.jpenilla.run-task`) targets for Paper 1.20.6 / 1.21.8 / 26.x; on each: boot, `vibe` command registered, canned-source compile→load→command→unload smoke (scripted via RCON, reuse `scripts/rcon.sh` pattern)
+- [ ] On 1.20.6: full `/vibe` flow works chat-only (manual QA: make, browser, hub, config, settings)
+
+### Phase D — Fabric
+- [ ] `fabric/` module on Loom, MC 26.1+, one jar server+client; `fabric.mod.json` entrypoints main + client
+- [ ] All SPI impls per §2/§7/§8; ECJ + Gson + adventure-platform-mod JiJ'd
+- [ ] sdk mod-flavor per §4.1; fabric PlatformProfile per §6.2
+- [ ] Dialog renderer per §8.5 (adventure-platform-mod check first, documented outcome)
+- [ ] `java.compiler` module probe on a real launcher install documented; contingency only if absent
+- [ ] Gate: dedicated-server run-task smoke (as C); `runClient` singleplayer: canned gameplay mod AND canned HUD+keybind client mod compile→load→render→toggle→unload; deliberately-throwing HUD renderer auto-disables without client crash; `/vibec` routes; key pool leases/releases across mod reload
+- [ ] Watchdog measures render-thread callbacks (trip test with a busy-loop HUD mod)
+
+### Phase E — NeoForge
+- [ ] `neoforge/` on ModDevGradle; same checklist as D transposed (EVENT_BUS bridges, GUI layer, `RegisterClientCommandsEvent` re-registration, `sendCommands` resync, union: URL translation unit-tested)
+- [ ] Gate: same as D on NeoForge server + client
+
+### Phase F — CI, docs, release
+- [ ] CI: all module jars built; matrix run-task smokes (Paper 1.20.6/1.21.8/26.x, Fabric 26.x server, NeoForge 26.x server) headless with scripted RCON/console smoke; self-tests incl. ECJ-forced wired in
+- [ ] README per-platform install/quickstart; ARCHITECTURE.md updated to point here; CHANGELOG 2.0.0
+- [ ] bStats on all three hosts (platform + mcVersion charts)
+- [ ] `scripts/` either multi-platform or explicitly Paper-scoped (documented)
+- [ ] Draft PR with migration summary
+
+---
+
+## 10. Phase A compile gate (record)
+
+All 30 skeleton sources (platform-api 21, sdk 3, sdk-client 6) compile clean with
+`-Werror` on JDK/`--release` 21. Because `sdk-client` is pure JDK (Decision 9), nothing
+is deferred to Phase D for compilation. Exact command (run from the repo root; jars from
+the local Maven repo):
+
+```
+javac --release 21 -Werror -d <out> \
+  -cp ~/.m2/repository/io/papermc/paper/paper-api/1.21.8-R0.1-SNAPSHOT/paper-api-1.21.8-R0.1-SNAPSHOT.jar\
+:~/.m2/repository/net/kyori/adventure-api/4.24.0/adventure-api-4.24.0.jar\
+:~/.m2/repository/net/kyori/adventure-key/4.24.0/adventure-key-4.24.0.jar\
+:~/.m2/repository/net/kyori/examination-api/1.3.0/examination-api-1.3.0.jar \
+  $(find sdk-client/src sdk/src platform-api/src -name '*.java')
+```
+
+(paper-api is needed only by `sdk`'s Bukkit-typed members; adventure jars only by
+`platform-api` — paper-api does not bundle Adventure.)
+
+## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
+
+Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;
+VibeMod↔VibeMod networking / server-pushed client mods; client-local mode on third-party
+servers (v1.1); world-render hooks, custom screens, raw input, networking, mixins in
+generated code; loader jar export; dynamic top-level client commands; registry content
+(items/blocks) in generated mods on any platform.
