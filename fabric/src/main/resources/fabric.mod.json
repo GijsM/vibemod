@@ -9,7 +9,6 @@
     "sources": "https://github.com/GijsM/vibemod"
   },
   "license": "MIT",
-  "icon": "assets/vibemod/icon.png",
   "environment": "*",
   "entrypoints": {
     "main": ["com.gijsm.vibemod.fabric.VibeModFabric"],
