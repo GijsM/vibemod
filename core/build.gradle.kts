@@ -2,7 +2,8 @@
 // Adventure + platform-api. Never org.bukkit / io.papermc / net.minecraft.
 //
 // Gson and Adventure are `compileOnly`: on Paper the server provides both
-// (paper-api transitives, see ARCHITECTURE.md "No new dependencies"); on
+// (paper-api transitives, see docs/ARCHITECTURE-V1.md "No new dependencies" -
+// a v1 rule the loader jars deliberately broke, see the NOTICE they ship); on
 // loaders they are Jar-in-Jar'd by the host module in Phases D/E.
 
 dependencies {

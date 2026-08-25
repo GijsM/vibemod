@@ -33,8 +33,8 @@ subprojects {
     }
 
     // VibeMod has no test framework: the tests are plain `main()` classes wired
-    // as `selfTest*` JavaExec tasks (ARCHITECTURE.md, "no -Werror / no new
-    // dependencies"). Gradle's JUnit-driven `test` task has nothing to find, so
+    // as `selfTest*` JavaExec tasks (ARCHITECTURE.md, "Ground rules that still
+    // apply"). Gradle's JUnit-driven `test` task has nothing to find, so
     // it stays inert and `check` depends on the self-tests instead.
     tasks.withType<Test>().configureEach {
         enabled = false

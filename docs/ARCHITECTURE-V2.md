@@ -510,12 +510,14 @@ documented in the completion report.
 - [x] `neoforge/` on ModDevGradle; same checklist as D transposed (EVENT_BUS bridges, GUI layer, `RegisterClientCommandsEvent` re-registration, `sendCommands` resync, union: URL translation unit-tested) — see §10.4
 - [x] Gate: same as D on NeoForge server + client (28/28 dedicated, 30/30 client)
 
-### Phase F — CI, docs, release
-- [ ] CI: all module jars built; matrix run-task smokes (Paper 1.20.6/1.21.8/26.x, Fabric 26.x server, NeoForge 26.x server) headless with scripted RCON/console smoke; self-tests incl. ECJ-forced wired in
-- [ ] README per-platform install/quickstart; ARCHITECTURE.md updated to point here; CHANGELOG 2.0.0
-- [ ] bStats on all three hosts (platform + mcVersion charts)
-- [ ] `scripts/` either multi-platform or explicitly Paper-scoped (documented)
-- [ ] Draft PR with migration summary
+### Phase F — CI, docs, release — see §10.5
+- [x] CI: all module jars built; matrix run-task smokes (Paper 1.20.6/1.21.8/26.x, Fabric 26.x server, NeoForge 26.x server) headless with scripted RCON/console smoke; self-tests incl. ECJ-forced wired in — **all six jobs green on the first run**
+- [x] README per-platform install/quickstart; ARCHITECTURE.md updated to point here; CHANGELOG 2.0.0
+- [~] bStats on all three hosts (platform + mcVersion charts) — **Paper only**; no bStats client exists for either loader, and the Paper one is inert until a service id is registered (§10.5)
+- [x] `scripts/` either multi-platform or explicitly Paper-scoped (documented) — Paper-scoped
+- [x] Draft PR with migration summary
+- [x] *(added)* the EPL-2.0 text §10.4 deferred, shipped and verified in both loader jars
+- [x] *(added)* a checked-in fixture corpus, so the corpus gate stops printing SKIPPED in CI
 
 ---
 
@@ -1439,6 +1441,7 @@ that a HUD renderer really renders.
 - **Cannot run headless at all**: nothing, as far as this phase found — but the
   two client gates have never been run under xvfb here, only on a real macOS
   display. That is the one Phase F assumption still unverified.
+  **Answered in §10.5: both run green under xvfb + llvmpipe on ubuntu-latest.**
 - **Caches worth keeping**: `~/.gradle`, `fabric/smoke-cache/` (the Fabric server
   launcher + fabric-api) and `neoforge/smoke-cache/` (the NeoForge installer and
   the ~200MB server tree it builds — the smoke script already treats it as a
@@ -1446,6 +1449,198 @@ that a HUD renderer really renders.
 - **The client gates write verdict files**; the NeoForge one halts the JVM with
   an exit code and also enforces a wall-clock deadline on its own daemon thread,
   so a wedged client cannot hang a job.
+
+## 10.5 Phase F record (CI, docs, release) — what actually landed
+
+Version **2.0.0**, bumped in the four places that carry it (`build.gradle.kts`,
+`plugin.yml`, `fabric.mod.json`, `neoforge.mods.toml`).
+
+### The matrix, and what it proved on its first run
+
+`.github/workflows/build.yml` is three tiers:
+
+| job | what it does |
+|---|---|
+| `build` | JDK 25, `./gradlew build` (every module, five self-tests, the fixture corpus) then `./gradlew selfTestEcj`. Uploads the three jars. |
+| `smoke` × 5 | Paper 1.20.6 / 1.21.8 / 26.2, Fabric 26.2, NeoForge 26.2. Each downloads a real server, installs the **uploaded** jar, boots it and drives the whole flow over RCON. `fail-fast: false`. Server downloads cached per entry. |
+| `client-gates` | `:fabric:runClientGameTest` and `scripts/clientgate-neoforge.sh` under `xvfb-run` + Mesa llvmpipe, `continue-on-error: true`. Builds from source: both run inside their loader's dev environment by construction. |
+
+One JDK — **25** — for every job. 26.x requires it and Paper 1.20.6 and 1.21.8
+both run on it, which is not an assumption: it is what the machine every gate in
+§10.2–§10.4 was developed on has.
+
+The smoke jobs deliberately consume the artifacts the `build` job uploaded
+rather than rebuilding, because §10.3's whole point is that the installed jar and
+the dev classpath are different animals.
+
+**First run (PR #1, run 32862997059): every one of the seven jobs green, whole
+matrix in 8m37s.** That is the §9 Phase F matrix item closed with evidence
+rather than intent, and it is also the first time Paper 1.20.6, Paper 26.2,
+Fabric and NeoForge have been exercised on anything but one laptop. The NeoForge
+gate is worth calling out because it was the one expected to be slow: cold, with
+no cache, the installer ran in 9s, the server booted in 15s, and all 28
+assertions passed — the whole job took 34 seconds.
+
+**The xvfb question §10.4 left open is answered, and the answer is yes — for
+both.** `:fabric:runClientGameTest` (a real client, a real GL context, a real
+singleplayer world) took 2m59s and passed; `scripts/clientgate-neoforge.sh`
+reported **PHASE E CLIENT GATE PASSED (30 checks)** — including the throwing HUD
+renderer, the slow one tripping the render watchdog, the key press reaching the
+mod, and bare `/vibe` opening a native dialog. Both on `ubuntu-latest` under
+`xvfb-run --server-args="-screen 0 1280x720x24"` with `LIBGL_ALWAYS_SOFTWARE=1`.
+
+The apt packages that matter: `xvfb`, `libgl1-mesa-dri` (llvmpipe), and the
+`libx*` set GLFW dlopen()s — `libxi6`, `libxcursor1`, `libxrandr2`,
+`libxinerama1`, `libxxf86vm1`, `libxss1`. Without those last ones GLFW fails
+with a message that does not name them, which is the trap.
+
+`continue-on-error: true` stays on the job for now regardless. One green run is
+not a track record, and these are the flakiest thing in the matrix by
+construction — two real game clients, five minutes, software-rendered. Promote
+them to required once they have passed several times; the job's own comment says
+so.
+
+### The licence gap §10.4 deferred, closed
+
+`META-INF/licenses/` in both loader jars, from
+`loader-common/src/main/resources` so the two share one copy:
+
+- `ECJ-EPL-2.0.txt` — the Eclipse Foundation's own plain text
+  (`https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt`), sha256
+  `0becf16567beb77fa252b7664631dd177c8f9a1889e48995b45379c7130e5303`. Verified
+  against SPDX's canonical `EPL-2.0.txt`: **identical modulo typography** — SPDX
+  renders the quotes curly where Eclipse renders them straight, and that is the
+  only difference in 14 198 bytes. (`https://www.eclipse.org/legal/epl-2.0/`
+  serves HTML; the `epl-2.0.txt` path under it is a 404. The
+  `/org/documents/` path is the plain-text one.)
+- `Kyori-MIT.txt` — adventure's own LICENSE verbatim, covering adventure,
+  examination and option (all MIT, all KyoriPowered, all nested).
+- `NOTICE.txt` — every nested artifact by coordinate, its licence, why it is in
+  there, and the one that deliberately is not (Gson).
+
+`release.yml` **fails the release** if either loader jar has lost
+`ECJ-EPL-2.0.txt` or `NOTICE.txt`. ECJ is EPL-2.0 and ships nested inside both,
+so that is a licence violation rather than a cosmetic slip.
+
+The Paper jar bundles no third-party code except bStats (MIT, relocated), so it
+carries no `META-INF/licenses/`.
+
+### The fixture corpus
+
+`core/src/test/resources/corpus` — three mods in `ModStore`'s real on-disk
+layout, compiled by `StoreSelfTest` **before** the real corpus and, unlike it,
+**required**. The real corpus is one user's 569 stored sources; it cannot be
+committed, so in CI the corpus gate printed SKIPPED and proved nothing.
+
+The three are chosen for the paths that would otherwise go untested on a runner:
+`FixtureCanary` is two versions deep and two files wide (the gate walks version
+*history*, not just `currentVersion`); `FixtureLegacy` is deliberately stale — a
+pre-v3 `meta.json`, `implements VibeMod`, and `com.gijsm.vibemine.api` imports —
+because the rewrite in `ModStore.sources()` and the deprecated bridge interface
+both look exactly like dead code to anyone tidying up; `FixtureClient` is the
+only generated source in the headless matrix that compiles against `sdk-client`,
+since the two gates that exercise the client surface for real need a display.
+
+### §10.4 deviation 7 taken, not just noted
+
+Fabric's chat capture now registers **before** the event bridge in
+`VibeModFabric.onInitialize`, so a line typed into a chat-rendered form is
+swallowed before any generated mod's `onChat` hook is offered it — NeoForge's
+`EventPriority.HIGHEST` behaviour, which §10.4 already called the better one.
+fabric-api invokes `ALLOW_CHAT_MESSAGE` listeners in registration order and
+short-circuits on the first `false`, so the fix is the two lines swapped.
+`scripts/smoke-fabric.sh` re-run green against the rebuilt installed jar.
+
+### bStats: Paper only, and inert
+
+`PaperMetrics` (paper module) with `platform`, `mc_version`, `ui_renderer`,
+`system_compiler` and `stored_mods` charts. **`SERVICE_ID = -1`, and `start()`
+refuses to run on it**, because bStats keys every submission on a numeric service
+id that only exists once a human registers the plugin at bstats.org, and a
+placeholder is not harmless — it is either rejected or piles VibeMod's data onto
+somebody else's chart. The boot line says `Metrics: off (no bStats service id
+registered — see PaperMetrics.SERVICE_ID)`. One constant away from live.
+
+This forced the Paper jar onto **shadow**: bStats must be relocated (Paper's
+plugin class loaders delegate to each other, so two plugins with an un-relocated
+`org.bstats` share one class and one config), and relocation is bytecode
+rewriting, which the hand-rolled `zipTree` merge could not do. `shadowJar` is now
+`VibeMod.jar`; `jar` is a thin classified artifact nobody ships. The three
+run-paper targets and `scripts/build.sh` were all repointed. `smoke-paper.sh
+1.21.8` green afterwards, bot phase included.
+
+**Fabric and NeoForge ship no metrics at all**, and this is a deliberate skip
+rather than an oversight. There is no bStats client for either loader —
+`bstats-base` exists and could be wired to a platform by hand, but that is
+writing a metrics client, and it would need its own registered service ids that
+also do not exist. Recorded here so the next person does not go looking.
+
+### Docs
+
+- `README.md` rewritten around three platforms: a supported-versions table, an
+  explicit unsupported list, per-platform install (including the Paper dialog-vs-
+  chat tiers, the loaders' `config/vibemod.json`, `vibemod:admin` /
+  `vibemod:use`), what generated mods can do per platform, the client surface,
+  build instructions, and the gates.
+- `ARCHITECTURE.md` is now a **one-page map** into this document. The v1/v2/v3
+  frozen-contract file moved to `docs/ARCHITECTURE-V1.md` with a header listing
+  exactly which of its rules no longer hold — the "frozen surface" ones included,
+  which §9 asked for. Nothing was deleted.
+- `docs/PLATFORM-EXPANSION.md` gained a header saying it is the original
+  research and that this document is the implemented reality.
+- `CHANGELOG.md` has a 2.0.0 entry that lists the behavioural changes a 1.0.0
+  user would actually notice under **Changed** (chat UI on 1.20.6–1.21.6,
+  `api-version: '1.20'`, meta.json v3, `config/vibemod.json`, the Fabric chat
+  ordering, Paper-only export, `shadowJar`) and a **Known limitations** section
+  carrying the residual items below.
+
+### Two small things fixed on the way
+
+`fabric.mod.json` declared `"icon": "assets/vibemod/icon.png"` and no such file
+has ever existed in this repository. Removed; shipping a real icon is a
+follow-up. And neither loader jar shipped a lang file, so the eight pooled
+keybind slots appeared in the Controls screen as `key.vibemod.slot1` under a
+category called `key.category.vibemod.slots`. Both now ship one
+`assets/vibemod/lang/en_us.json` from `loader-common`. The key format was read
+off the 26.2 game jar with javap rather than guessed:
+`KeyMapping.Category.label()` is
+`Component.translatable(id.toLanguageKey("key.category"))`.
+
+`scripts/` is explicitly **Paper-scoped** (§9's "either multi-platform or
+explicitly Paper-scoped"), with a header on each dev helper saying so and
+pointing at the three smoke scripts. `PAPER_VERSION` selects the line;
+`setup.sh` no longer names its download after a build number it never requested,
+and `start.sh` no longer hard-codes a filename that goes stale.
+
+### Deviations, flagged
+
+1. **bStats on two of three platforms, not three** (§9 asks for all three).
+   Reasons above; the alternative was writing a metrics client.
+2. **The Paper artifact is built by a new plugin** (`com.gradleup.shadow`).
+   Nothing in §1–§8 anticipated it; bStats' relocation requirement forced it.
+   The `smoke-paper.sh 1.21.8` gate was re-run to prove the artifact is
+   equivalent (204 entries vs 185, and the delta is exactly bStats).
+3. **`ARCHITECTURE.md` was replaced rather than edited**, with the old content
+   moved to `docs/ARCHITECTURE-V1.md`. §9 allowed "rewrite as a pointer, or
+   merge"; merging 595 lines of stale frozen contracts into V2 would have made
+   V2 worse.
+
+### Residual human-QA items (the full list, carried from §10.2–§10.4)
+
+1. **A screen-by-screen visual check of the 17 dialogs**, on Paper, on a Fabric
+   client and on a NeoForge client. Open since Phase C, for the same reason each
+   time: the renderers are verified to construct and show, the mapping is
+   mechanical, and "does screen 12's source listing wrap correctly at 400px"
+   needs eyes.
+2. **A VibeMod client connected to a VibeMod dedicated server**, on either
+   loader. Every gate drives one or the other, never both at once.
+3. **The `java.compiler` probe on a Mojang-launcher jlink runtime.** Reports
+   present on every full JDK tested. If one ever reports ABSENT, the fix is to
+   Jar-in-Jar the `javax.tools` API classes.
+4. **A bStats service id**, if metrics are wanted: register at
+   bstats.org/getting-started and replace `PaperMetrics.SERVICE_ID`.
+5. **An icon**, for `fabric.mod.json` and the mod lists that show one.
+6. **Promote `client-gates` to required** once it has a track record.
 
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 

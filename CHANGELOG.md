@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-25
+
+VibeMod runs on **Fabric** and **NeoForge** as well as Paper, and the Paper floor drops from
+1.21.8 to **1.20.6**. One codebase, three hosts, one jar per host.
+
+Major rather than minor because the things a 1.0.0 user would notice changed: the UI is not
+always dialogs any more, the plugin declares a lower API version, stored `meta.json` gains
+fields, and the loader builds keep their settings in a different file format. All of those are
+listed under **Changed** below.
+
+### Added
+
+- **Fabric and NeoForge hosts** — Minecraft 26.1+, Java 25, one jar each serving a dedicated
+  server *and* a client. Generated mods are Mojang-typed and get a curated, frozen set of ten
+  server hooks (`onPlayerJoin`, `onPlayerQuit`, `onServerTick`, `onChat`, `onBlockBreak`,
+  `onUseBlock`, `onUseItem`, `onEntityDeath`, `onPlayerDeath`, `onRespawn`) plus the same
+  commands, actions, tasks and live config knobs Paper mods have. The curation is not
+  minimalism: a Fabric event cannot be unregistered, so every hook has to be host-dispatched for
+  a mod to be unloadable at all.
+- **Singleplayer.** On both loaders the host runs inside the integrated server, so `/vibe` in
+  your own world opens a real dialog screen and everything works locally.
+- **A client surface for generated mods** (loaders only) — `sdk-client`: HUD drawing (text,
+  boxes, outlines, item icons) with reads for position, health, dimension, targeted block, FPS
+  and world time; eight pooled keybind slots shown in **Options → Controls → VibeMod**; a
+  client-tick hook; and `/vibec <mod> <command>` for client-side commands. A key lease
+  auto-binds its suggested default **only** if you have never bound that slot yourself.
+- **A render-thread watchdog.** A HUD renderer that throws is detached immediately rather than
+  after the error-storm threshold — ten failures at sixty frames a second is ten frames, not ten
+  seconds — and one that is merely slow trips the watchdog and auto-disables its mod. The client
+  keeps running through both.
+- **Paper 1.20.6–1.21.6 support** via a full chat UI: the same seventeen screens rendered as
+  clickable chat blocks, with forms driven by typing into chat. `ui.force-chat: true` forces it
+  on a newer server, which is how it gets tested.
+- **ECJ as a fallback compiler** on the loader builds, bundled Jar-in-Jar, so a JRE-only install
+  can still compile generated mods. Which backend was resolved is printed in the boot line.
+- **`platform` / `mcVersion` / `side` on stored mods.** A mod remembers where it was generated;
+  enabling a Paper-generated mod on a Fabric server is refused with a friendly message instead of
+  a crash.
+- **A CI matrix that runs the real gates**: build + all self-tests + an ECJ-forced pass, then a
+  real dedicated server per platform and version (Paper 1.20.6 / 1.21.8 / 26.2, Fabric 26.2,
+  NeoForge 26.2) driven over RCON, plus two real game clients under xvfb.
+- **Third-party licences ship in the loader jars** under `META-INF/licenses/` — ECJ's EPL-2.0
+  and Kyori's MIT, with a NOTICE naming every nested artifact.
+- **bStats on Paper**, wired but inert: no bStats service id has been registered yet, and the
+  code refuses to start without a real one rather than inventing a placeholder.
+
+### Changed
+
+- **The UI is not always dialogs.** On Paper **1.20.6–1.21.6** there is no dialog API, so VibeMod
+  renders the chat UI instead. Every subcommand works either way; the boot log says which
+  renderer it picked. Nothing changes on 1.21.7+.
+- **`plugin.yml` declares `api-version: '1.20'`** (was `'1.21'`), which is what lets the plugin
+  load on the new floor. Everything newer that VibeMod touches is now behind a runtime capability
+  probe rather than a version comparison.
+- **`meta.json` is schema v3.** Existing files are normalized on read — no `platform` becomes
+  `paper`, no `mcVersion` becomes `1.21.8`, no `side` becomes `server` — and written back on the
+  next save. Nothing needs migrating by hand.
+- **Settings live in `config/vibemod.json` on the loaders**, not a YAML file. Same key set as
+  Paper's `config.yml`, spelled in JSON; unknown keys are preserved on save.
+- **Stored mods live in `<game dir>/vibemod/mods/` on the loaders** (Paper is unchanged:
+  `plugins/VibeMod/mods/`).
+- **Chat form input no longer reaches generated mods' `onChat` hooks on Fabric.** On NeoForge it
+  never did. A line typed into a chat-rendered form is form input, not chat, and letting a
+  generated mod observe somebody filling in a text field is a privacy leak as much as a cosmetic
+  bug — so the two loaders now agree, on NeoForge's ordering.
+- **`/vibe export` is Paper-only.** On the loaders it reports that it is not supported;
+  generating standalone loader boilerplate is not on the critical path.
+- **The Paper jar is built by `shadowJar`**, not a hand-rolled merge, so bStats can be relocated
+  as bStats requires. `:paper:jar` is now a thin artifact that is never shipped; use
+  `:paper:shadowJar` (or `scripts/build.sh`, which was updated).
+- **The build needs a JDK 25** for the two loader modules. Everything else still compiles at
+  `--release 21`.
+- **`ARCHITECTURE.md` is now a one-page map** into `docs/ARCHITECTURE-V2.md`. The old v1/v2/v3
+  frozen-contract document moved to `docs/ARCHITECTURE-V1.md` with a header saying which of its
+  rules no longer hold.
+
+### Fixed
+
+- `fabric.mod.json` declared an icon file that has never existed in the repository.
+- The eight keybind slots showed up in the Controls screen as raw translation keys; both loader
+  jars now ship an `en_us.json`.
+- `scripts/setup.sh` named its Paper download after a hard-coded build number it never actually
+  requested, so the filename and the bytes in it could disagree; `scripts/start.sh` hard-coded
+  the same stale name. Both now follow whatever build Fill reports, and honour `PAPER_VERSION`.
+
+### Known limitations
+
+- **bStats does nothing yet** on any platform: Paper's is wired but has no registered service id,
+  and there is no bStats client for Fabric or NeoForge, so those two ship no metrics at all.
+- **`/vibe export` is unsupported on the loaders**, as above.
+- The **17 dialog screens have not had a screen-by-screen visual review** on a Fabric or NeoForge
+  client. They are verified to construct and show, and the mapping is mechanical from the same
+  screen data Paper's renderer consumes, but wrapping and layout need human eyes.
+- **No VibeMod client + VibeMod dedicated server has been run at once.** Both halves are gated
+  separately, and between them they cover the same code paths, but not simultaneously.
+- The `java.compiler` module probe has never been observed on a **Mojang-launcher jlink
+  runtime**. It reports present on every full JDK tested. If one ever reports absent, the fix is
+  to bundle the `javax.tools` API classes.
+
 ## [1.0.0] - 2026-08-25
 
 First public release.
@@ -43,4 +142,5 @@ First public release.
 - **Live reload**: `/vibe reload` re-reads config.yml (model, timeouts, watchdog budgets,
   retries, concurrency, error-storm thresholds) without a restart.
 
+[2.0.0]: ../../releases/tag/v2.0.0
 [1.0.0]: ../../releases/tag/v1.0.0

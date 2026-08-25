@@ -7,7 +7,7 @@ import com.gijsm.vibemod.neoforge.LoaderUris;
  * other URI shapes a loader can hand out.
  *
  * <p>Plain {@code main()}, like every other VibeMod self-test — the project has
- * no test framework on purpose (ARCHITECTURE.md, "no new dependencies").
+ * no test framework on purpose (docs/ARCHITECTURE-V1.md, "no new dependencies").
  *
  * <p>Worth having even though FML 11 no longer emits {@code union:} anywhere:
  * this function decides whether a classpath entry survives into the compile

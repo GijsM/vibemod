@@ -1,6 +1,18 @@
 # Platform Expansion Plan
 
-*Status: proposed — research completed 2026-08-25. Nothing in this document is implemented yet.*
+> **This is the original research and plan, kept as written. It is not the implemented
+> reality — [ARCHITECTURE-V2.md](ARCHITECTURE-V2.md) is.**
+>
+> The expansion shipped in VibeMod 2.0.0: Paper 1.20.6+, Fabric 26.1+ and NeoForge 26.1+.
+> Read this document for *why* those directions were chosen and what the 2026 landscape looked
+> like; read V2 (and especially its §10, the phase-by-phase record) for what was actually built,
+> what deviated from the plan, and why. Some of what is proposed here was overtaken by the work:
+> `adventure-platform-mod` was investigated and rejected outright, the two loaders ended up
+> sharing a `loader-common` source tree this document does not describe, Gson turned out not to
+> need nesting, and NeoForge turned out to need no mixin at all.
+
+*Status: proposed — research completed 2026-08-25. Superseded by ARCHITECTURE-V2.md and
+implemented in 2.0.0.*
 
 VibeMod today is a single-module Maven project targeting exactly Paper 1.21.8. This
 document is the plan for expanding the supported surface in two directions:
