@@ -1,0 +1,14 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "key": {"G": "minecraft:gold_ingot", "E": "minecraft:ender_pearl", "B": "minecraft:black_wool"},
+  "pattern": ["GEG", "GBG", " G "],
+  "result": {
+    "id": "minecraft:totem_of_undying",
+    "components": {
+      "minecraft:custom_name": {"text": "Dream Totem", "color": "dark_purple", "italic": false},
+      "minecraft:lore": [{"text": "The night knows your name.", "color": "gray", "italic": false}],
+      "minecraft:item_model": "vibemod_nightmare:dream_totem",
+      "minecraft:enchantment_glint_override": true
+    }
+  }
+}

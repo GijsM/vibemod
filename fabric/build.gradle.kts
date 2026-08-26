@@ -212,6 +212,59 @@ fabricApi {
 }
 
 // ---------------------------------------------------------------------------
+// The stress campaign's real client (docs/phases/STRESS-TEST.md)
+//
+// Deliberately NOT a gametest. `runClientGameTest` above boots a client in test
+// mode with its mods pre-baked, which is the right shape for the Phase D gate
+// and the wrong shape for the stress campaign: what the campaign is measuring is
+// VibeMod's own running time, so the client has to be an ordinary client that a
+// person is playing, with mods arriving into it through `/vibe enable` typed at
+// the keyboard.
+//
+// `--quickPlayMultiplayer` is how it gets into a world without a human on the
+// menus: the script boots a real VibeMod dedicated server first and the client
+// connects straight to it. `--quickPlaySingleplayer` was tried first and is
+// recorded in STRESS-RESULT.md as what it actually did, which was nothing: the
+// argument is accepted by `net.minecraft.client.main.Main` in 26.2 and reaches
+// the process, and the client still sits on the title screen without a word in
+// the log. The multiplayer form removes the world-folder variable entirely and
+// costs only the two things a dedicated server never had anyway (client-side
+// `assets/**` and runtime registry content), both of which the Phase 3 client
+// gate already covers.
+//
+// OPT-IN: a run configuration that only the stress campaign uses should not
+// exist in an ordinary build, and `./gradlew build` and the gate never see it.
+//
+// (It was briefly suspected of breaking `:fabric:runClientGameTest` — the gate
+// failed three times with this block present and passed once with it stashed.
+// It was not the cause: with the block gated off, and the build therefore
+// configuring exactly as the pristine tree does, the gate failed again. See
+// STRESS-RESULT.md §5 for what it actually is — a load-sensitive 400-tick
+// compile timeout in the gate's own `awaitLoaded`.)
+//
+// The run directory is its own, so nothing here can disturb `runClient`'s.
+// Nothing in `check` or CI runs this task.
+// ---------------------------------------------------------------------------
+if (providers.gradleProperty("vibemodStressClient").isPresent) {
+    loom {
+        runs {
+            create("stressClient") {
+                client()
+                configName = "VibeMod Stress Client"
+                runDir = "stress-client"
+                programArgs("--quickPlayMultiplayer", "localhost:25589")
+                // Loom's default is -Xms2G -Xmx4G. This run shares a laptop with
+                // a dedicated server of its own AND, in practice, with whatever
+                // the person at the machine is doing - an earlier overlap in this
+                // campaign got somebody's client OOM-killed by the OS. A flat
+                // world with a view distance of 8 does not need four gigabytes.
+                vmArgs("-Xms512M", "-Xmx2G")
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The artifact
 // ---------------------------------------------------------------------------
 

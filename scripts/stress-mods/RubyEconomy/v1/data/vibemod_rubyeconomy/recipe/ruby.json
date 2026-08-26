@@ -1,0 +1,14 @@
+{
+  "type": "minecraft:smelting",
+  "ingredient": "minecraft:redstone",
+  "result": {
+    "id": "minecraft:amethyst_shard",
+    "components": {
+      "minecraft:custom_name": {"text": "Ruby", "color": "red", "italic": false},
+      "minecraft:lore": [{"text": "One ruby. Legal tender.", "color": "gray", "italic": false}],
+      "minecraft:item_model": "vibemod_rubyeconomy:ruby"
+    }
+  },
+  "experience": 0.2,
+  "cookingtime": 200
+}

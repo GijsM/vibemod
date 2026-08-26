@@ -1,0 +1,14 @@
+{
+  "parent": "minecraft:adventure/root",
+  "criteria": {
+    "joined": {"trigger": "minecraft:impossible"}
+  },
+  "display": {
+    "icon": {"id": "minecraft:totem_of_undying"},
+    "title": {"translate": "advancements.vibemod_nightmare.first_night.title"},
+    "description": {"translate": "advancements.vibemod_nightmare.first_night.description"},
+    "frame": "goal",
+    "show_toast": true,
+    "announce_to_chat": true
+  }
+}
