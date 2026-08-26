@@ -3,6 +3,7 @@ package com.gijsm.vibemod.fabric.net;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.Identifier;
 
 /**
  * What the client says back about a {@link ContentBind} (V4 Phase 2).
@@ -32,7 +33,13 @@ public record BindAck(int protocol, boolean deferred, String problem)
         implements CustomPacketPayload {
 
     /** The channel. Serverbound, configuration phase. */
-    public static final Type<BindAck> TYPE = CustomPacketPayload.createType("vibemod:bind_ack");
+    // NOT createType(String): that overload is the only one on 26.2 and it routes
+    // through Identifier.withDefaultNamespace, which treats the WHOLE string as a
+    // path under minecraft: — so "vibemod:bind_ack" becomes the illegal
+    // minecraft:vibemod:bind_ack and throws out of <clinit>, taking the server
+    // down in onInitialize before anything else runs.
+    public static final Type<BindAck> TYPE =
+            new Type<>(Identifier.parse("vibemod:bind_ack"));
 
     public static final StreamCodec<FriendlyByteBuf, BindAck> STREAM_CODEC =
             StreamCodec.of(BindAck::write, BindAck::read);

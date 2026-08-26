@@ -4,6 +4,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -28,6 +31,13 @@ import com.gijsm.vibemod.command.VibeRouter;
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.compile.SymbolOracle;
+import com.gijsm.vibemod.fabric.dimension.DimensionContent;
+import com.gijsm.vibemod.fabric.dynamic.DynamicContent;
+import com.gijsm.vibemod.fabric.dynamic.ProxyGate;
+import com.gijsm.vibemod.fabric.dynamic.ReconfigureBouncer;
+import com.gijsm.vibemod.fabric.net.ContentSync;
+import com.gijsm.vibemod.fabric.pack.FabricPackServer;
+import com.gijsm.vibemod.fabric.project.VanillaLane;
 import com.gijsm.vibemod.fabric.shim.CreativeTabs;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
 import com.gijsm.vibemod.fabric.shim.PaletteGuard;
@@ -170,11 +180,18 @@ public final class VibeModFabric implements ModInitializer {
      *
      * <p>{@code chatRenderer} is null when native dialogs are in use — then there
      * is no per-player form state to forget.
+     *
+     * <p>{@code dynamic} (V4 Phase 5) is per-server for the same reason
+     * {@code reloads} is: the sweep reads the world's materialised datapacks and
+     * the bouncer counts ticks on a live server, and neither means anything
+     * between worlds. Its one un-undoable subscription lives elsewhere — see
+     * {@code DynamicContent.installProcessListeners} in {@link #onInitialize()}.
      */
     public record Services(MinecraftServer server, FabricPlatformInfo platform, ModLifecycle lifecycle,
                            ModStore store, ModErrors errors, LoaderMessenger messenger,
                            LoaderTickScheduler scheduler, UiRenderer ui, VibeRouter router,
-                           ChatRenderer chatRenderer, ReloadCoordinator reloads) {
+                           ChatRenderer chatRenderer, ReloadCoordinator reloads,
+                           DynamicContent dynamic, DimensionContent dimensions) {
     }
 
     /** The live services, or null when no server is running. */
@@ -208,6 +225,19 @@ public final class VibeModFabric implements ModInitializer {
      */
     public static PaletteGuard paletteGuard() {
         return paletteGuard;
+    }
+
+    /**
+     * The dynamic-registry facade for the current server (V4 Phase 5), or null
+     * between worlds.
+     *
+     * <p>Reached through {@link Services} rather than a static of its own,
+     * because unlike the three above it does NOT outlive a world. The accessor
+     * exists so the gates can reach it without holding the whole record.
+     */
+    public static DynamicContent dynamicContent() {
+        Services live = services;
+        return live == null ? null : live.dynamic();
     }
 
     /** Called by the client entrypoint at its own init, before any server starts. */
@@ -273,6 +303,53 @@ public final class VibeModFabric implements ModInitializer {
         });
         registrySeam.setPaletteGuard(paletteGuard);
 
+        // V4 Phase 2 (Lane A), here and nowhere else: every one of the six
+        // things this call makes — four payload-type registrations, a phase
+        // ordering on BEFORE_CONFIGURE, two connection listeners and two global
+        // receivers — is permanent. A per-server install would leave a dead
+        // manifest sender behind for every world ever loaded, and
+        // PayloadTypeRegistry would throw on the second one anyway.
+        //
+        // It also hands the seam two things it cannot build for itself: the
+        // dedicated-server policy the seam consults before admitting content,
+        // and a subscription to Fabric's raw-id remap, which is what keeps a
+        // reconnecting client's ids agreeing with the ones it was told about.
+        ContentSync.install(registrySeam);
+        // V4 Phase 4, Lane B, and it must come AFTER the line above: this
+        // listener registers into ContentSync.PHASE, whose ordering relative to
+        // fabric-api's own BEFORE_CONFIGURE listener is established there.
+        //
+        // What it installs is the half that makes a vanilla client possible at
+        // all: a redirect that hides VibeMod's entries from fabric-api's sync
+        // map for a connection that cannot receive our manifest. Without it that
+        // client is disconnected during configuration by fabric-api itself, with
+        // a message naming neither VibeMod nor the item. If the redirect fails
+        // to apply, VanillaLane refuses the connection itself, with a message
+        // that does name us — an honest refusal beating an anonymous kick.
+        VanillaLane.install(registrySeam, () -> {
+            Services live = services;
+            return live == null ? null : live.server();
+        });
+
+        // V4 Phase 5, same rule, one subscription: the JOIN listener the bounce
+        // debounce needs. The facade behind it is PER-SERVER (it reads the
+        // world's datapacks), so what is registered here is the supplier, not
+        // the instance — null between worlds, exactly like the fanout above.
+        DynamicContent.installProcessListeners(() -> {
+            Services live = services;
+            return live == null ? null : live.dynamic();
+        });
+        // V4 Phase 6, and the same supplier-not-instance reason: it snapshots at
+        // BEFORE_CONFIGURE which dimension_type ids each connecting client
+        // actually holds, which is the roster a teleport is later refused
+        // against. DimensionType.STREAM_CODEC is a bare registry index with no
+        // inline-value branch, so a client one entry short does not render a
+        // wrong dimension — it fails the decode and the connection ends.
+        DimensionContent.installProcessListeners(() -> {
+            Services live = services;
+            return live == null ? null : live.dimensions();
+        });
+
         // The note* calls are what make the fanout's immediate-replay honest
         // (V3 Phase 1 §A): a mod hot-loaded after an event has fired needs it
         // replayed, and a mod loaded BEFORE it fires must not get it twice. Only
@@ -288,10 +365,40 @@ public final class VibeModFabric implements ModInitializer {
             // headroom on whatever version is actually running, which is the
             // honest replacement for a figure computed from a data dump.
             paletteGuard.probe();
+            // V4 Phase 5. One sweep at STARTED, and it is not redundant with the
+            // one applyStoredVersion runs per mod: a world whose datapacks were
+            // edited on disk while the server was down has content no load event
+            // will ever announce. The sweep is idempotent, so on a world where
+            // nothing changed this costs a directory walk and says nothing.
+            Services live = services;
+            if (live != null) {
+                live.dynamic().apply("server started");
+                // AFTER the sweep above, and the order is the point: a recorded
+                // dimension may name a dimension_type that only that sweep has
+                // just put back. Re-opening it first would refuse itself.
+                live.dimensions().serverStarted(server);
+            }
+        });
+        // V4 Phase 6. STOPPING, not STOPPED, and the difference is load-bearing:
+        // at STOPPING the levels are still open and the session still holds the
+        // directory lock, which is exactly what a temporary dimension needs in
+        // order to close its chunk source and delete its own folder. By STOPPED
+        // both are gone and the folder would be left behind.
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
+            Services live = services;
+            if (live != null) {
+                live.dimensions().serverStopping(server);
+            }
         });
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             eventFanout.noteServerStopped();
             stop();
+            // Process-lived state, so it does NOT belong in stop() with the
+            // per-server teardown: the in-flight reconfigure marks are keyed by
+            // player and read by the process-lived DISCONNECT listener below,
+            // which is still armed after the last world closes. Clearing them
+            // here is what stops world B from inheriting world A's marks.
+            DynamicContent.serverStopped();
         });
 
         // ORDER MATTERS, and it is the one line in this file that is a decision
@@ -321,6 +428,16 @@ public final class VibeModFabric implements ModInitializer {
                 // already exists rather than making a second one, and inherits
                 // its "null between worlds" lifetime for free.
                 live.reloads().tick();
+                // V4 Phase 5: the bounce debounce and its rate limits are
+                // counted in ticks, so they ride the subscription that already
+                // exists and inherit its per-server lifetime — a bounce armed by
+                // world A must not fire into world B.
+                live.dynamic().tick();
+                // V4 Phase 6: finishes an armed drain. A closing dimension is
+                // not removed until it is genuinely idle — no players, no loaded
+                // chunks, no pending chunk work — so the close is a request and
+                // this is what completes it.
+                live.dimensions().tick();
             }
             // V4 Phase 1: the post-crossing straggler watch rides it for the
             // same reason. Outside the `live != null` guard because the guard
@@ -348,7 +465,24 @@ public final class VibeModFabric implements ModInitializer {
             eventFanout.commands().hostCallbackFired(dispatcher, registry, environment);
         });
 
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> forget(handler.player.getUUID()));
+        // V4 Phase 5 put a guard in front of the forget, and the guard is a BELT
+        // rather than a contract. On 26.2 with fabric-api 0.158.0 this event does
+        // not fire for a bounce at all: the play→configuration swap goes through
+        // a setListener injection that only calls endSession, so the disconnect
+        // half never runs. The guard costs one map lookup and covers the case
+        // where that split changes, because the split it relies on is two
+        // @Inject sites in someone else's mixin.
+        //
+        // Skipping is safe in the other direction too: a bounce that FAILS is a
+        // real disconnect, and its mark expires on a timer rather than on a
+        // packet, so the forget happens a moment late instead of never.
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            UUID id = handler.player.getUUID();
+            if (DynamicContent.isReconfiguring(id)) {
+                return;
+            }
+            forget(id);
+        });
     }
 
     /** Drops everything a leaving player left behind: click tokens, form state, their audience. */
@@ -454,6 +588,13 @@ public final class VibeModFabric implements ModInitializer {
         }
         live.errors.flush();
         live.scheduler.shutdown();
+        // V4 Phase 3. The pack server is per-server despite holding a socket:
+        // the tree it publishes is this world's mods, and a port left listening
+        // after the world closed would serve a stale zip to whoever asked next —
+        // and refuse to bind when world B starts. The Fabric event half of Phase
+        // 3 (FabricPackPush) is NOT torn down here; it is installed once per JVM
+        // from startIfEnabled and finds a null pack server between worlds.
+        FabricPackServer.stopCurrent();
         DialogClicks.clear();
         LOG.info("VibeMod stopped");
     }
@@ -611,9 +752,49 @@ public final class VibeModFabric implements ModInitializer {
             // server side), and the client half is reached through two
             // interfaces that name no client type, so this whole block is
             // identical on NeoForge.
-            reloads = new ReloadCoordinator(server, hooks == null ? null : hooks.reloader());
+            // V4 Phase 3 adds the third delivery route beside those two: a
+            // dedicated server has no FabricClientPacks to write into, so it
+            // publishes assets/** over HTTP and pushes the URL at configuration
+            // time. Null on a physical client and when packserver.mode=off, and
+            // both sinks below treat null as "this host does not do that",
+            // exactly as they already treat a null client sink on a dedicated
+            // server. FabricPackPush.installOnce() happens inside
+            // startIfEnabled, so the un-undoable Fabric subscription it makes is
+            // made at most once per JVM however many worlds this one loads.
+            FabricPackServer packServer =
+                    FabricPackServer.startIfEnabled(dataFolder, config, platform.isDedicatedServer());
+            reloads = new ReloadCoordinator(server, hooks == null ? null : hooks.reloader(), packServer);
+
+            // V4 Phase 5. The gate is asked, before a bounce, whether this
+            // server is one where kicking a player back to configuration is safe
+            // — a proxy in front of it turns a bounce into a disconnect — and it
+            // answers from the game and config directories rather than from a
+            // setting, because the setting is the thing most likely to be wrong.
+            // Built per-server because `auto` reads this world's connections.
+            ProxyGate proxies = new ProxyGate(
+                    proxyMode(config.getString("dynamic.proxy", "auto")),
+                    FabricLoader.getInstance().getGameDir(),
+                    FabricLoader.getInstance().getConfigDir(),
+                    platform.isDedicatedServer());
+            // The announcer is the one thing the dynamic package cannot build for
+            // itself: a bounce is visible to players, and telling them is the
+            // host's job because the messenger is per-server. Two methods rather
+            // than one because "everyone is being reconnected" and "you are being
+            // reconnected" are different sentences to be in the middle of.
+            DynamicContent dynamic = new DynamicContent(() -> server, proxies,
+                    new ReconfigureBouncer.Announcer() {
+                        @Override public void all(String m) { messenger.broadcast(Style.info(m)); }
+                        @Override public void player(UUID id, String m) {
+                            messenger.player(id).sendMessage(Style.info(m));
+                        }
+                    });
+
+            // V4 Phase 6. Per-server, because a dimension is a thing inside one
+            // world: the roster, the ledger and the open levels all belong to it.
+            DimensionContent dimensions = new DimensionContent(() -> server);
+
             lifecycle.setContent(new LoaderModContent(server, store, reloads,
-                    hooks == null ? null : hooks.resources()));
+                    hooks == null ? null : hooks.resources(), packServer));
 
             // The render-thread watchdog reports to the same lifecycle and shares
             // its budgets: watchdogging a HUD renderer differs from watchdogging a
@@ -674,7 +855,7 @@ public final class VibeModFabric implements ModInitializer {
             commandBridge.reinstallInto(server.getCommands().getDispatcher());
 
             services = new Services(server, platform, lifecycle, store, modErrors, messenger,
-                    scheduler, ui, router, chatRenderer, reloads);
+                    scheduler, ui, router, chatRenderer, reloads, dynamic, dimensions);
 
             restoreModsFromDisk();
             LOG.info("VibeMod ready — /vibe make \"something wonderful\"");
@@ -863,6 +1044,15 @@ public final class VibeModFabric implements ModInitializer {
                         lifecycle.load(mod.name(), mod.currentVersion(), mod.description(),
                                 mod.mainClass(), compiled.classes(),
                                 mod.config(), store.resolvedConfigValues(mod.name()), mod.debugEcho());
+                        // V4 Phase 5, and THIS is the point where the files
+                        // exist: lifecycle.load runs LoaderModContent.install →
+                        // materialize, so the mod's data/** is on disk by the
+                        // time this line runs and a sweep can see it. Every route
+                        // that makes a stored version live goes through here —
+                        // rollback, enable, /vibe reload, boot restore — so one
+                        // call covers all of them, and the sweep is idempotent,
+                        // so a mod that declares nothing dynamic costs a walk.
+                        services.dynamic().apply(mod.name() + " loaded");
                         store.setEnabled(mod.name(), true);
                         feedback.audience().sendMessage(
                                 Style.ok(mod.name() + " v" + mod.currentVersion() + " is live"));
@@ -884,9 +1074,36 @@ public final class VibeModFabric implements ModInitializer {
          * ran. Mods stamped for another platform (meta.json v3, §5) are skipped
          * with a log line rather than attempted — their sources compile against a
          * different sdk flavor.
+         *
+         * <p>V4 Phase 2 changed the ORDER this walks in, from whatever the store
+         * happens to list to the ledger's recorded restore order. It matters
+         * because raw registry ids are assigned in registration order, and a
+         * client that reconnects into the same epoch should find the ids where it
+         * left them.
+         *
+         * <p>Best-effort, and deliberately not claimed as more: {@link
+         * #applyStoredVersion} compiles on a worker and calls {@code
+         * lifecycle.load} from {@code runOnMain}, so when two compiles race the
+         * order mods actually REGISTER in is the order their compiles finished,
+         * not the order of this loop. That is benign — Fabric remaps raw ids on
+         * join and the store keeps string ids — and the ledger's order cursor is
+         * per mod, so racing mods cannot trip each other on it. But "boot restore
+         * follows the ledger" is an intention until this restore is made
+         * sequential, not a guarantee.
          */
         private void restoreModsFromDisk() {
+            Map<String, ModStore.StoredMod> byName = new LinkedHashMap<>();
             for (ModStore.StoredMod mod : store.all()) {
+                byName.put(mod.name(), mod);
+            }
+            // Null ledger is the client-with-no-seam case; then the store's own
+            // order is the only order there is.
+            RegistryLedger book = registrySeam == null ? null : registrySeam.ledger();
+            List<String> names = book == null
+                    ? List.copyOf(byName.keySet())
+                    : book.inRestoreOrder(List.copyOf(byName.keySet()));
+            for (String name : names) {
+                ModStore.StoredMod mod = byName.get(name);
                 if (!mod.enabled()) {
                     continue;
                 }
@@ -897,6 +1114,30 @@ public final class VibeModFabric implements ModInitializer {
                 }
                 LOG.info("Restoring mod " + mod.name() + " v" + mod.currentVersion());
                 applyStoredVersion(console(), mod.name(), null);
+            }
+        }
+
+        /**
+         * {@code dynamic.proxy}, tolerantly.
+         *
+         * <p>A typo here used to throw {@code IllegalArgumentException} out of
+         * {@code valueOf} from inside {@code wire()}, which aborts world start —
+         * a mistyped config value taking the whole server down is a worse
+         * outcome than the thing the setting guards. Falling back to
+         * {@code AUTO} is also the safe direction: auto detects proxies and
+         * closes the gate, so a typo cannot silently enable mid-play
+         * reconfiguration behind a Velocity.
+         */
+        private static ProxyGate.Mode proxyMode(String configured) {
+            String name = configured.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+            try {
+                return ProxyGate.Mode.valueOf(name);
+            } catch (IllegalArgumentException e) {
+                LOG.warning("dynamic.proxy is \"" + configured + "\", which is not one of "
+                        + java.util.Arrays.toString(ProxyGate.Mode.values())
+                        + "; falling back to AUTO, which detects proxies and disables mid-play "
+                        + "reconfiguration when it finds one");
+                return ProxyGate.Mode.AUTO;
             }
         }
 

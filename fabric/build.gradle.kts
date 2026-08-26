@@ -327,6 +327,39 @@ val surgeonSelfTest = tasks.register<JavaExec>("surgeonSelfTest") {
 
 tasks.named("check") { dependsOn(surgeonSelfTest) }
 
+// ---------------------------------------------------------------------------
+// The packet-completeness gate (V4 Phase 4)
+//
+// Same shape as the surgeon self-test above and for the same two reasons: it
+// needs `main`'s OUTPUT (ProjectedPackets, the declared coverage table) and
+// `main`'s COMPILE CLASSPATH (the game jar, which is the only enumeration of
+// the protocol that exists) on one classpath, and it is a pure function of
+// types that needs no game to run.
+//
+// Handing on `main`'s compile classpath verbatim is what lets the gate find the
+// game jar by scanning `java.class.path` for `minecraft-merged`. Re-declaring
+// the Minecraft dependency here would let the version the gate scans drift from
+// the version the host compiles against, which is precisely the drift the gate
+// exists to detect.
+// ---------------------------------------------------------------------------
+val packetGateSources: SourceSet = sourceSets.create("packetGate")
+
+packetGateSources.compileClasspath =
+    sourceSets.main.get().output + sourceSets.main.get().compileClasspath
+packetGateSources.runtimeClasspath = packetGateSources.output + packetGateSources.compileClasspath
+
+val packetGate = tasks.register<JavaExec>("packetGate") {
+    group = "verification"
+    description = "Fails if a game packet reaches content and has no row in ProjectedPackets (V4 Phase 4)."
+    mainClass = "PacketGate"
+    classpath = packetGateSources.runtimeClasspath
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(fabricJava)
+    }
+}
+
+tasks.named("check") { dependsOn(packetGate) }
+
 /**
  * Prints the resolved compile classpath, one `:`-joined line.
  *

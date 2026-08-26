@@ -883,8 +883,15 @@ assert "the recipe landed in the pack at its canonical namespace" \
 assert "the host logged the materialization" \
   in_file "$LOG" 'Datapack vibemod-resourcecanary materialized'
 assert "the coordinator ran a reload for it" in_file "$LOG" 'Server data reloaded in'
-assert "assets/** were stored but reported inert on a dedicated server" \
-  in_file "$LOG" 'this host has no client resource pack'
+# V4 Phase 3 retired the assertion that used to live here — "assets/** were
+# stored but reported inert on a dedicated server", keyed on 'this host has no
+# client resource pack'. A dedicated server now HAS an asset route: the tree is
+# zipped deterministically and served at /<sha1>.zip. Asserting the old line
+# would be asserting the absence of the feature.
+assert "the pack server is serving the canary's assets on a dedicated server" \
+  in_file "$LOG" 'Pack server listening on'
+assert "and it named the content-addressed archive it built" \
+  in_file "$LOG" 'asset file(s) as'
 
 PRCON="$RUN/pack-rcon.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \

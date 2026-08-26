@@ -97,6 +97,19 @@ public final class VibeModFabricClient implements ClientModInitializer {
         Shims.installClient(created);
         ClientShims.install(created);
 
+        // V4 Phase 2, the client half of Lane A: the payload types and the two
+        // configuration receivers that answer the manifest and the bind. Here
+        // for the same process-lived reason as everything above it — a
+        // PayloadTypeRegistry entry and a global receiver cannot be undone, and
+        // configuration happens before any world exists to own them.
+        //
+        // The seam is already built: Fabric runs `main` entrypoints before
+        // `client` ones, so VibeModFabric.onInitialize has run and its
+        // process-lived seam is non-null. Reading it here rather than holding a
+        // copy keeps the one-owner rule — the server half builds it, this half
+        // subscribes to it.
+        ClientContentSync.install(VibeModFabric.registrySeam());
+
         // V3 Phase 2 §D. Built here for the same "process-lived, before the first
         // mod" reason — and RESET here, which is the stale guard: at client init
         // no world is loaded, so no mod is live, so the pack must be empty.

@@ -6,6 +6,7 @@ import java.util.List;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.Identifier;
 
 /**
  * What the client says back about a {@link ContentManifest} (V4 Phase 2).
@@ -47,7 +48,7 @@ public record ContentAck(int protocol, String orderHash, int count, List<String>
 
     /** The channel. Serverbound, configuration phase. */
     public static final Type<ContentAck> TYPE =
-            CustomPacketPayload.createType("vibemod:content_ack");
+            new Type<>(Identifier.parse("vibemod:content_ack"));
 
     /**
      * The split threshold.

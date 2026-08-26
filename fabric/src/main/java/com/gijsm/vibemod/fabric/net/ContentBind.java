@@ -3,6 +3,7 @@ package com.gijsm.vibemod.fabric.net;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.Identifier;
 
 /**
  * "Bind the components of the content you just registered" (V4 Phase 2, the
@@ -62,7 +63,7 @@ public record ContentBind(int protocol) implements CustomPacketPayload {
 
     /** The channel. Clientbound, configuration phase. */
     public static final Type<ContentBind> TYPE =
-            CustomPacketPayload.createType("vibemod:content_bind");
+            new Type<>(Identifier.parse("vibemod:content_bind"));
 
     public static final StreamCodec<FriendlyByteBuf, ContentBind> STREAM_CODEC =
             StreamCodec.of((buf, bind) -> buf.writeVarInt(bind.protocol()),

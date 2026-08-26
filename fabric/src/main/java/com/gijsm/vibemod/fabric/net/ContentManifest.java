@@ -6,6 +6,7 @@ import java.util.List;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.Identifier;
 
 import com.gijsm.vibemod.store.BlockSchema;
 import com.gijsm.vibemod.store.RegistryLedger;
@@ -96,7 +97,7 @@ public record ContentManifest(int protocol, String installationId, long epoch, S
 
     /** The channel. Clientbound, configuration phase. */
     public static final Type<ContentManifest> TYPE =
-            CustomPacketPayload.createType("vibemod:content_manifest");
+            new Type<>(Identifier.parse("vibemod:content_manifest"));
 
     /**
      * The split threshold handed to {@code registerLarge}.

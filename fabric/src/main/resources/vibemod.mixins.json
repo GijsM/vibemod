@@ -11,7 +11,12 @@
     "StrategyAccessor",
     "LevelChunkSectionAccessor",
     "ChunkMapAccessor",
-    "ServerGamePacketListenerAccessor"
+    "ServerGamePacketListenerAccessor",
+    "ConnectionAccessor",
+    "ServerCommonPacketListenerAccessor",
+    "RegistrySyncManagerMixin",
+    "MinecraftServerAccessor",
+    "MinecraftServerTickLevelsMixin"
   ],
   "client": ["client.PackRepositoryAccessor", "client.EntityRenderersAccessor"],
   "injectors": {
