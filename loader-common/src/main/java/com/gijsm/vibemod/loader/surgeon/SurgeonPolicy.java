@@ -128,7 +128,14 @@ public record SurgeonPolicy(List<String> allowedRoots, List<Denial> denials) {
             new Denial("java/util/concurrent/Executors", null, "thread pools"),
             new Denial("java/util/concurrent/ForkJoinPool", null, "thread pools"),
             new Denial("java/util/concurrent/CompletableFuture", "*Async", "off-thread work"),
-            new Denial("java/lang/Runtime", null, "the process runtime"),
+            // Same prefix trap as the Thread denials above, and a worse one:
+            // "java/lang/Runtime" also matches RuntimeException and
+            // RuntimePermission, so a mod that merely CATCHES RuntimeException —
+            // about as ordinary as Java gets — was refused and told it had used
+            // "the process runtime". The smoke gate found it on a real server.
+            new Denial("java/lang/Runtime", null,
+                    List.of("java/lang/RuntimeException", "java/lang/RuntimePermission"),
+                    "the process runtime"),
             new Denial("java/lang/ProcessBuilder", null, "starting processes"),
             new Denial("java/lang/System", "exit", "shutting the JVM down"),
             // URI is pure text and shows up in perfectly innocent code; the

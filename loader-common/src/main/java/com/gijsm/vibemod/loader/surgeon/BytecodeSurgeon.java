@@ -3,6 +3,7 @@ package com.gijsm.vibemod.loader.surgeon;
 import java.lang.classfile.ClassElement;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
+import java.lang.classfile.ClassHierarchyResolver;
 import java.lang.classfile.ClassTransform;
 import java.lang.classfile.CodeElement;
 import java.lang.classfile.CodeModel;
@@ -127,7 +128,21 @@ public final class BytecodeSurgeon implements ClassSurgeon {
             own.add(binaryName.replace('.', '/'));
         }
 
-        ClassFile classFile = ClassFile.of();
+        // NOT ClassFile.of(): its default hierarchy resolver loads classes off
+        // the SYSTEM class loader, which on a Fabric server cannot see
+        // net.minecraft.* at all. Rewriting a method whose stack maps have to be
+        // regenerated — anything holding a game type as a local across a branch
+        // or a try/catch — then fails with "Could not resolve class Identifier",
+        // a diagnostic naming no file, no line and no action the model could
+        // take. Simple methods never need the resolver, which is exactly what
+        // made this latent until a mod held an Identifier across a finally.
+        //
+        // This class's own loader is the right one: it is Knot on Fabric and the
+        // mod loader's on NeoForge, and both can see the game.
+        ClassFile classFile = ClassFile.of(ClassFile.ClassHierarchyResolverOption.of(
+                ClassHierarchyResolver
+                        .ofClassLoading(BytecodeSurgeon.class.getClassLoader())
+                        .cached()));
         List<String> violations = new ArrayList<>();
         Map<String, ClassModel> parsed = new LinkedHashMap<>();
 

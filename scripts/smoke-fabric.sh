@@ -327,6 +327,7 @@ META3
 mkdir -p "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/recipe" \
          "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/advancement" \
          "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function" \
+         "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/damage_type" \
          "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang"
 
 cat > "$RUN/vibemod/mods/ResourceCanary/v1/ResourceCanary.java" <<'RES'
@@ -416,6 +417,27 @@ cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/function/
 say resource-canary-fn-ok
 FN
 
+# V4 Phase 5, and it is here rather than in a canary of its own because it is
+# the same channel: a `damage_type` is datapack-shaped but is NOT one of the
+# seven directories `/reload` re-reads. Vanilla loads the registry layer when
+# the world loads, and this pack did not exist then — so without Phase 5 this
+# file would sit on disk being correct and inert until the next boot, and the
+# host says exactly that ("apply on next world load, not on this reload").
+# DatapackSweep + DynamicSeam are what make it real now, and the assertions
+# below check both halves: the honest deferral notice AND the id in the live
+# registry anyway.
+#
+# The shape is vanilla's own (data/minecraft/damage_type/generic.json) and names
+# nothing outside the game, so the decode cannot fail for a reason that is about
+# this gate rather than about the seam.
+cat > "$RUN/vibemod/mods/ResourceCanary/v1/data/vibemod_resourcecanary/damage_type/canary.json" <<'DMG'
+{
+  "message_id": "generic",
+  "exhaustion": 0.0,
+  "scaling": "when_caused_by_living_non_player"
+}
+DMG
+
 # assets/** on a dedicated server: stored, inert, and SAID SO once.
 cat > "$RUN/vibemod/mods/ResourceCanary/v1/assets/vibemod_resourcecanary/lang/en_us.json" <<'LANG'
 {"advancements.vibemod_resourcecanary.ruby.title": "A Warm Glow"}
@@ -440,11 +462,24 @@ META4
 # ------------------------------------------------------------------ V3 Phase 3
 #
 # RegistryCanary: a plain Fabric mod that registers a REAL item, exactly the way
-# the RubySword few-shot teaches. On a dedicated server that is refused, and the
-# refusal is the whole assertion: registration would technically succeed here
-# (no vanilla client is attached at the moment a mod loads) and would then break
-# the first client that joined, so the policy is deterministic rather than
-# opportunistic.
+# the RubySword few-shot teaches.
+#
+# V4 Phase 2 CHANGED WHAT THIS CANARY PROVES. Through V3 it proved a refusal:
+# registration would technically have succeeded here (no vanilla client is
+# attached at the moment a mod loads) and would then have broken the first
+# client that joined, so the policy refused deterministically rather than
+# opportunistically. Phase 2 answered the fact behind that policy — Lane A puts
+# the server's ids on a VibeMod client BEFORE fabric-api's registry sync, and
+# Phase 4's `configureClient` redirect hides them from a vanilla one — so
+# `RegistrySeam.refuseOnDedicatedServer` now asks the installed
+# `ContentSync` policy, which allows a registration that no connected client
+# could be hurt by. Nobody is connected during boot restore, so this lands.
+#
+# The assertions below therefore assert the SUCCESS, at the same depth the old
+# ones asserted the refusal: the id is in the live registry (asked of the
+# running game over RCON, not of the log), the mod loads, and the ledger records
+# it. The refusal itself is not gone and is not untested — see StateCanary,
+# which puts the policy back to null and proves the V3 sentence verbatim.
 mkdir -p "$RUN/vibemod/mods/RegistryCanary/v1"
 cat > "$RUN/vibemod/mods/RegistryCanary/v1/RegistryCanary.java" <<'REG'
 package vibemod.registrycanary;
@@ -482,7 +517,7 @@ import json, sys, time
 open(sys.argv[1], "w").write(json.dumps({
     "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
     "name": "RegistryCanary",
-    "description": "A plain Fabric mod that registers a real item; refused on a dedicated server.",
+    "description": "A plain Fabric mod that registers a real item; allowed on a dedicated server since V4 Phase 2.",
     "usage": "", "manual": "", "icon": "IRON_SWORD",
     "mainClass": "vibemod.registrycanary.RegistryCanary",
     "currentVersion": 1, "enabled": True, "creator": "smoke",
@@ -495,14 +530,15 @@ META5
 
 # ------------------------------------------------------------------ V4 Phase 1
 #
-# BlockCanary: the same claim as RegistryCanary, one registry over. Blocks are
-# the new content type in V4 Phase 1 and they are refused here for exactly the
-# reason items are — this host is dedicated — but the refusal has to NAME the
-# block registry, because a block is the one entry whose id can never be taken
-# back: a saved section indexes its palette by position, so an id that stops
-# existing renumbers every entry after it and scrambles terrain (finding 3c).
-# "Refused, and we said which registry" is the difference between an operator
-# who can act and one who files a bug about missing blocks.
+# BlockCanary: the same claim as RegistryCanary, one registry over, and it lands
+# on a dedicated server for the same Phase 2 reason.
+#
+# A block is the one entry whose id can never be taken back: a saved section
+# indexes its palette by position, so an id that stops existing renumbers every
+# entry after it and scrambles terrain (finding 3c). That is why the assertions
+# below are not content with "it registered" — they place it in a real chunk and
+# read it back, and they check that a block landing on a dedicated server did
+# not quietly widen the global palette on its way in.
 mkdir -p "$RUN/vibemod/mods/BlockCanary/v1"
 cat > "$RUN/vibemod/mods/BlockCanary/v1/BlockCanary.java" <<'BLOCK'
 package vibemod.blockcanary;
@@ -528,10 +564,8 @@ public final class BlockCanary implements ModInitializer {
     @Override
     public void onInitialize() {
         // A plain cube with no properties: exactly one blockstate, which is the
-        // shape the prompt profile teaches. The Block is CONSTRUCTED before the
-        // refusal is reached — Block.<init> takes an intrusive holder the same
-        // way Item.<init> does — so this also proves the window discards the
-        // orphan instead of failing the next freeze over it.
+        // shape the prompt profile teaches, and which makes the palette
+        // arithmetic below checkable by hand — one block, one appended state.
         canaryBlock = Registry.register(BuiltInRegistries.BLOCK, ID, new Block(
                 BlockBehaviour.Properties.of()
                         .strength(1.0F)
@@ -546,7 +580,7 @@ import json, sys, time
 open(sys.argv[1], "w").write(json.dumps({
     "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
     "name": "BlockCanary",
-    "description": "A plain Fabric mod that registers a real block; refused on a dedicated server.",
+    "description": "A plain Fabric mod that registers a real block; allowed on a dedicated server since V4 Phase 2.",
     "usage": "", "manual": "", "icon": "STONE",
     "mainClass": "vibemod.blockcanary.BlockCanary",
     "currentVersion": 1, "enabled": True, "creator": "smoke",
@@ -556,6 +590,189 @@ open(sys.argv[1], "w").write(json.dumps({
     "config": [], "configValues": {},
 }, indent=2))
 META6
+
+# -------------------------------------------------------- V4 Phases 2/4/5/6
+#
+# StateCanary: the one canary that is allowed to know VibeMod exists, because
+# the two things it does cannot be done from outside the host.
+#
+# 1. IT EXERCISES THE V3 REFUSAL, WHICH IS STILL LIVE CODE. A null
+#    `DedicatedPolicy` is not "allow" — RegistrySeam treats it as the
+#    pre-Phase-2 answer and refuses with DEDICATED_REFUSAL verbatim. That path
+#    is reachable in production (any boot in which ContentSync did not install)
+#    and it is the fallback the whole feature rests on, so the gate exercises it
+#    rather than asserting it away: the policy is set to null, one item and one
+#    block are registered the way an ordinary mod would, both refusals are
+#    caught and echoed, and the policy is put back in a `finally`.
+#
+#    Its own mod, deliberately. A refused registration leaves a
+#    constructed-but-unregistered intrusive holder and a stray data-component
+#    initializer, and the window's rollback is ALL-OR-NOTHING for the window it
+#    closes (see RegistrySeam.rollBackComponentInitializers). Doing this inside
+#    RegistryCanary would roll back the successful item's components too. Here
+#    the blast radius is a mod that registers nothing on purpose — and the two
+#    orphan-discard lines and the rollback line are then asserted, which is the
+#    same machinery the V3 gate proved, still proved.
+#
+# 2. IT READS THE STATE LINES BACK OUT. ContentSync, VanillaLane, DynamicContent
+#    and DimensionContent all keep a `describeState()` of `name=value` pairs
+#    "for the gates", and on a dedicated server nothing logs them. `/vibestate`
+#    is how this gate asks. Same trick the palette gate's canary uses; the
+#    generated-mod policy allows a mod to import the host, and only a gate ever
+#    should.
+mkdir -p "$RUN/vibemod/mods/StateCanary/v1"
+cat > "$RUN/vibemod/mods/StateCanary/v1/StateCanary.java" <<'STATE'
+package vibemod.statecanary;
+
+import java.util.logging.Logger;
+
+import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.Commands;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+
+import com.gijsm.vibemod.fabric.VibeModFabric;
+import com.gijsm.vibemod.fabric.net.ContentSync;
+import com.gijsm.vibemod.fabric.project.VanillaLane;
+import com.gijsm.vibemod.fabric.shim.RegistrySeam;
+
+/** Exercises the null-policy refusal, then reports every phase's state line. */
+public final class StateCanary implements ModInitializer {
+
+    private static final Logger LOG = Logger.getLogger("VibeMod.StateCanary");
+
+    private static final String NS = "vibemod_statecanary";
+
+    // Static finals and one try/catch per method, both deliberately. The
+    // surgeon regenerates stack map frames with java.lang.classfile's DEFAULT
+    // ClassHierarchyResolver, which cannot see net.minecraft classes — a method
+    // holding a game-typed local across a try/catch/finally merge fails the
+    // rewrite with "Could not resolve class Identifier" and no useful advice.
+    // Reported, not fixed here; this canary keeps its frames trivial so that it
+    // is testing the registry policy rather than that.
+    private static final Identifier ITEM_ID =
+            Identifier.fromNamespaceAndPath(NS, "null_policy_item");
+    private static final Identifier BLOCK_ID =
+            Identifier.fromNamespaceAndPath(NS, "null_policy_block");
+
+    @Override
+    public void onInitialize() {
+        probeNullPolicy();
+        CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
+                dispatcher.register(Commands.literal("vibestate").executes(ctx -> {
+                    report(ctx.getSource());
+                    return 1;
+                })));
+    }
+
+    /**
+     * The V3 refusal, still live, exercised rather than assumed.
+     *
+     * <p>Both registrations MUST throw. If either lands, the line it logs says
+     * so in a way the gate fails on, because a null policy that silently allows
+     * content is the one failure mode with no symptom until a vanilla client
+     * joins.
+     */
+    private void probeNullPolicy() {
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        ContentSync policy = ContentSync.installed();
+        if (seam == null || policy == null) {
+            LOG.severe("state-canary-policy-unavailable: seam=" + seam + " contentSync=" + policy);
+            return;
+        }
+        try {
+            // Null is the pre-ContentSync state, which is exactly what this
+            // probe is for. Restored in the finally below, on every path.
+            seam.setDedicatedPolicy(null);
+            probeItem();
+            probeBlock();
+        } finally {
+            seam.setDedicatedPolicy(policy);
+            LOG.info("state-canary-policy-restored");
+        }
+    }
+
+    /**
+     * One item, the way any mod would register one.
+     *
+     * <p>{@code UnsupportedOperationException}, not {@code RuntimeException},
+     * and NOT for taste: {@code SurgeonPolicy} denies the PREFIX
+     * {@code java/lang/Runtime}, which also matches
+     * {@code java/lang/RuntimeException}, so a mod that catches one is refused
+     * with "forbidden API: java.lang.RuntimeException — the process runtime".
+     * Reported, not worked around silently. Naming the exact type is the
+     * sharper assertion anyway: it is the type {@code RegistrySeam} documents,
+     * and anything else fails this mod's load loudly rather than being caught.
+     */
+    private static void probeItem() {
+        try {
+            Registry.register(BuiltInRegistries.ITEM, ITEM_ID, new Item(
+                    new Item.Properties().setId(ResourceKey.create(Registries.ITEM, ITEM_ID))));
+            LOG.severe("state-canary-item-REGISTERED under a null policy");
+        } catch (UnsupportedOperationException refused) {
+            LOG.info("state-canary-item-refused: " + refused.getMessage());
+        }
+    }
+
+    /** The same claim one registry over, so the refusal has to name that one. */
+    private static void probeBlock() {
+        try {
+            Registry.register(BuiltInRegistries.BLOCK, BLOCK_ID, new Block(
+                    BlockBehaviour.Properties.of()
+                            .setId(ResourceKey.create(Registries.BLOCK, BLOCK_ID))));
+            LOG.severe("state-canary-block-REGISTERED under a null policy");
+        } catch (UnsupportedOperationException refused) {
+            LOG.info("state-canary-block-refused: " + refused.getMessage());
+        }
+    }
+
+    /** One line per phase, each a bare {@code name=value} string the gate greps. */
+    private void report(CommandSourceStack source) {
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        ContentSync sync = ContentSync.installed();
+        VanillaLane lane = VanillaLane.installed();
+        VibeModFabric.Services live = VibeModFabric.services();
+        say(source, "state-registry " + (seam == null ? "none" : seam.describeState()));
+        say(source, "state-lane-a " + (sync == null ? "none" : sync.describeState()));
+        say(source, "state-lane-b " + (lane == null ? "none" : lane.describeState()));
+        say(source, "state-dynamic " + (VibeModFabric.dynamicContent() == null
+                ? "none" : VibeModFabric.dynamicContent().describeState()));
+        say(source, "state-dimension " + (live == null ? "none" : live.dimensions().describeState()));
+    }
+
+    private static void say(CommandSourceStack source, String line) {
+        // sendSystemMessage, not sendSuccess: this has to come back over RCON,
+        // and that is the call the rest of this gate already proves does.
+        source.sendSystemMessage(Component.literal(line));
+    }
+}
+STATE
+
+python3 - "$RUN/vibemod/mods/StateCanary/meta.json" <<'META7'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
+    "name": "StateCanary",
+    "description": "Exercises the null DedicatedPolicy refusal and reports every V4 phase's state line.",
+    "usage": "/vibestate", "manual": "", "icon": "COMPASS",
+    "mainClass": "vibemod.statecanary.StateCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V4 state canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First state canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META7
 
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
@@ -636,13 +853,18 @@ for i in $(seq 1 180); do
   sleep 1
 done
 for i in $(seq 1 180); do
-  grep -q 'Refusing registry content from RegistryCanary' "$LOG" 2>/dev/null \
-    && { note "registry canary refused after ${i}s"; break; }
+  grep -q 'RegistryCanary v1 is live' "$LOG" 2>/dev/null \
+    && { note "registry canary live after ${i}s"; break; }
   sleep 1
 done
 for i in $(seq 1 180); do
-  grep -q 'Refusing registry content from BlockCanary' "$LOG" 2>/dev/null \
-    && { note "block canary refused after ${i}s"; break; }
+  grep -q 'BlockCanary v1 is live' "$LOG" 2>/dev/null \
+    && { note "block canary live after ${i}s"; break; }
+  sleep 1
+done
+for i in $(seq 1 180); do
+  grep -q 'StateCanary v1 is live' "$LOG" 2>/dev/null \
+    && { note "state canary live after ${i}s"; break; }
   sleep 1
 done
 # V3 Phase 2 §C: the datapack is materialized during the load, but the reload
@@ -696,15 +918,22 @@ assert "the probe says how many states are left before the palette has to widen"
 # Informational, deliberately: a version bump that moves the blockstate count
 # must be VISIBLE without being a failure, because the budget is measured at
 # runtime and the gate above already proves it adds up.
-if [[ "$P_STATES" == "32366" ]]; then
-  note "blockstate count is 32366, the 26.2 figure this phase was designed against"
+# The probe runs at SERVER_STARTED and restore-on-boot compiles asynchronously,
+# so whether the block canary's single state is already in this figure is a
+# race — hence 32366 OR 32367, and informational either way.
+if [[ "$P_STATES" == "32366" || "$P_STATES" == "32367" ]]; then
+  note "blockstate count is $P_STATES, the 26.2 figure this phase was designed against"
+  note "      (32366 vanilla, +1 if the block canary had already registered)"
 else
   note "NOTE: blockstate count is ${P_STATES:-unknown}, not the 32366 that V4 Phase 1 was"
   note "      designed against. Not a failure — the budget is read live off the registry —"
   note "      but the headroom table in the V4 plan is now describing a different version."
 fi
-# Nothing in this gate registers a block, so nothing may cross the boundary. If
-# this ever fires, some other assertion below is measuring a widened palette.
+# This gate DOES register a block now (V4 Phase 2 let it land on a dedicated
+# server), so this is no longer "nothing was registered" — it is the budget
+# claim: one plain cube is one state, and 26.2 has hundreds of states of
+# headroom, so nothing may widen. If this ever fires, every palette number
+# measured below is measuring a different id space.
 assert "nothing in this gate crossed the palette boundary" \
   not_in_file "$LOG" 'crossing the global block palette boundary'
 assert "so the straggler watch never armed either" \
@@ -860,9 +1089,10 @@ RRCON="$RUN/cmd-reload.log"
 sleep 5
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "nativecmd" "smokeping" "vibe list" \
   | tee -a "$RRCON"
-# Two now, not one: the V3 Phase 2 resource canary registers /rescanary as well.
-assert "the host replayed both mods' command registrations into the new dispatcher" \
-  in_file "$LOG" 'Replaying 2 mod command registration'
+# Three now: NativeCanary's /nativecmd, ResourceCanary's /rescanary and the V4
+# StateCanary's /vibestate.
+assert "the host replayed every live mod's command registrations into the new dispatcher" \
+  in_file "$LOG" 'Replaying 3 mod command registration'
 assert "the mod's own command still runs after /reload" in_file "$RRCON" 'native-cmd-ok'
 assert "and the v2 command bridge survived the same reload" in_file "$RRCON" 'smoke-pong howdy'
 assert "and /vibe itself survived the same reload" in_file "$RRCON" 'SmokeCanary'
@@ -977,75 +1207,291 @@ assert "re-enabling put the datapack directory back" test -d "$PACK_DIR"
 assert "re-enabling put the recipe back in the live manager" in_file "$BRCON" 'recipe=true'
 assert "nothing in the resource channel threw" not_in_file "$LOG" 'Could not write the datapack'
 
-# ------------------------------------------------------------------ V3 Phase 3 §D
+# ------------------------------------------------------------ V4 Phase 2 §D
 #
-# The dedicated-server registry policy. Every assertion here is about a REFUSAL,
-# because that is the whole feature on this host: the mod is an ordinary Fabric
-# mod registering an ordinary item, and it must fail to load, loudly, with a
-# message an operator can act on — not register successfully and break the first
-# client that joins.
-note "asserting the registry seam refuses a dedicated server (V3 Phase 3 §A/§D)"
-assert "the registry seam refused a dedicated server" \
-  in_file "$LOG" 'Refusing registry content from RegistryCanary'
-assert "and the refusal states the deterministic policy verbatim" \
-  in_file "$LOG" 'registry content is singleplayer/LAN-host only in v1; applies after restart on dedicated'
-assert "the refusal failed the mod's LOAD rather than being swallowed" \
-  in_file "$LOG" 'Failed to start RegistryCanary: onInitialize failed for mod RegistryCanary'
-assert "the mod's onInitialize never got past the refusal" \
-  not_in_file "$LOG" 'registry-canary-registered'
-assert "the refusal did not stop the other mods loading" in_file "$LOG" 'NativeCanary v1 is live'
+# The dedicated-server registry policy, as it stands after V4 Phase 2.
+#
+# WHAT THIS SECTION USED TO ASSERT, AND WHY IT DOES NOT ANY MORE. Through V3
+# every assertion here was about a REFUSAL: an ordinary Fabric mod registering
+# an ordinary item had to fail to load, loudly, rather than register and break
+# the first client that joined. Phase 2 answered the fact that made that policy
+# necessary. `RegistrySeam.refuseOnDedicatedServer` now asks an installed
+# `DedicatedPolicy`; `ContentSync` is that policy and it allows a registration
+# nobody connected could be hurt by, because a Lane A client is handed the ids
+# before fabric-api's registry sync and a Lane B one has them hidden from its
+# sync map. Sixteen assertions in this section were therefore asserting the
+# ABSENCE of a shipped feature, which is worse than no gate at all: the
+# tempting way to make them green is to break the code back.
+#
+# They are replaced, not deleted, and the replacements are the sharper claim in
+# every case where there is one. "Nothing was written to a ledger" becomes "the
+# ledger records both ids"; "the item id is absent from the running game"
+# becomes "the running game hands the item back when asked for it".
+#
+# The V3 refusal is NOT retired — a null `DedicatedPolicy` still means it,
+# verbatim, and that path is exercised further down by StateCanary.
+note "asserting registry content LANDS on a dedicated server (V4 Phase 2)"
+assert "the seam admitted an item on a dedicated server, and named it" \
+  in_file "$LOG" 'Mod RegistryCanary registered item vibemod_registrycanary:ruby_sword'
+assert "the mod's own onInitialize ran past the registration" \
+  in_file "$LOG" 'registry-canary-registered'
+assert "so the mod is LIVE rather than failed" in_file "$LOG" 'RegistryCanary v1 is live'
+assert "nothing refused it" not_in_file "$LOG" 'Refusing registry content from RegistryCanary'
+assert "and its load did not fail" not_in_file "$LOG" 'Failed to start RegistryCanary'
+# V4 Phase 1's registry, one over, and the one whose ids can never be released.
+assert "the same is true for a block" \
+  in_file "$LOG" 'Mod BlockCanary registered block vibemod_blockcanary:canary_block'
+assert "the block canary's onInitialize ran past the registration too" \
+  in_file "$LOG" 'block-canary-registered'
+assert "and it is live" in_file "$LOG" 'BlockCanary v1 is live'
+assert "nothing refused the block either" \
+  not_in_file "$LOG" 'Refusing registry content from BlockCanary'
+assert "content landing did not stop the other mods loading" in_file "$LOG" 'NativeCanary v1 is live'
 assert "and did not stop the resource channel either" in_file "$LOG" 'ResourceCanary v1 is live'
-assert "the item id really is absent from the running game" \
-  not_in_file "$LOG" 'registered item vibemod_registrycanary'
-assert "nothing was tombstoned or written to a ledger on a host that registers nothing" \
-  test ! -e "$RUN/vibemod/registry-ledger.json"
-# The bug this gate found: Item.<init> appends to DATA_COMPONENT_INITIALIZERS
-# before the registration is refused, and nothing removes it — so every LATER
-# datapack reload died with "Missing element ResourceKey[minecraft:item / …]".
-assert "the refused item's half-built state was rolled back" \
-  in_file "$LOG" 'Rolled back 1 data-component initializer'
+
+# The inverse of V3's "nothing was tombstoned or written to a ledger", and the
+# sharper claim: a host that registers content MUST write the ledger, because
+# the ledger is what a later boot replays in order and what a Lane A manifest is
+# hashed over. A missing entry here is a registry that renumbers on the next
+# restart, which is exactly the failure the ledger exists to prevent.
+LEDGER="$RUN/vibemod/registry-ledger.json"
+note "asserting the registry ledger recorded what landed"
+assert "the installation wrote a registry ledger" test -f "$LEDGER"
+assert "and it records the item id" in_file "$LEDGER" 'vibemod_registrycanary:ruby_sword'
+assert "and the block id" in_file "$LEDGER" 'vibemod_blockcanary:canary_block'
+assert "the block entry carries the state schema a pin would need to rebuild it" \
+  in_file "$LEDGER" '"block":'
+assert "both mods are recorded live, not tombstoned" not_in_file "$LEDGER" '"tombstone"'
+assert "and neither is pinned while it is still installed" not_in_file "$LEDGER" '"pinned"'
+
+# The half that cannot be faked by a log line: ask the RUNNING GAME. `setblock`
+# and `item replace` resolve their id arguments against the live
+# BuiltInRegistries during the Brigadier parse, and `data get` reads the id back
+# out of a real container in a real chunk — which also proves the item's data
+# components are BOUND, because building the stack would otherwise throw
+# "Components not bound yet" (RegistrySeam.bindComponents runs at window close;
+# this is what says it worked).
+note "asking the running game for the ids, not the log"
+LIVE_LOG="$RUN/live-content.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "forceload add 0 0" | tee "$LIVE_LOG"
+# forceload takes effect on the next chunk-load pass, and every command below
+# needs that chunk present. Cheaper than polling for a reply that would be
+# identical either way.
+sleep 3
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
+  "setblock 0 100 0 vibemod_blockcanary:canary_block" \
+  "execute if block 0 100 0 vibemod_blockcanary:canary_block run say block-canary-is-in-the-world" \
+  "setblock 0 102 0 minecraft:chest" \
+  "item replace block 0 102 0 container.0 with vibemod_registrycanary:ruby_sword" \
+  "data get block 0 102 0 Items" \
+  | tee -a "$LIVE_LOG"
+assert "the block id parsed against the live BLOCK registry" \
+  not_in_file "$LIVE_LOG" 'Unknown block type'
+assert "and the block really is in the world, read back by the server itself" \
+  in_file "$LOG" 'block-canary-is-in-the-world'
+assert "the item id parsed against the live ITEM registry" \
+  not_in_file "$LIVE_LOG" 'Unknown item'
+assert "a stack of it could be BUILT, so its data components are bound" \
+  not_in_file "$LIVE_LOG" 'Components not bound'
+assert "and the id reads back out of a real container in a real chunk" \
+  in_file "$LIVE_LOG" 'vibemod_registrycanary:ruby_sword'
+
+# ------------------------------------------------- the state lines (V4 2/4/5/6)
+#
+# Four phases keep a `describeState()` of `name=value` pairs "for the gates" and
+# NOTHING logs them on a dedicated server. /vibestate is StateCanary asking each
+# one and echoing it over RCON. Read twice, three seconds apart, because one of
+# the assertions below is about a counter that has to be GROWING.
+note "reading the V4 state lines back off the running server"
+SRCON="$RUN/state.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibestate" | tee "$SRCON"
+sleep 3
+SRCON2="$RUN/state-2.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibestate" | tee "$SRCON2"
+assert "the state canary answers at all" in_file "$SRCON" 'state-registry registryMods='
+
+# ---- V4 Phase 1: the budget still holds, with a block through the seam
+#
+# The probe assertions further up measured the palette at SERVER_STARTED. These
+# measure it now, after a block has actually gone through the seam on a
+# dedicated server, and the claim is arithmetic rather than a number: one plain
+# cube is one blockstate, and one blockstate must not have moved the width.
+S_BITS="$(grep -m1 -oE 'paletteBits=[0-9]+' "$SRCON" | cut -d= -f2 || true)"
+note "asserting the blockstate budget after a real block registration (V4 Phase 1)"
+assert "the seam appended exactly the one state a plain cube needs" \
+  in_file "$SRCON" 'registryBlockStates=1 '
+assert "and it counts the block as live content" in_file "$SRCON" 'registryBlocks=1'
+assert "beside the one item" in_file "$SRCON" 'registryItems=1'
+assert "no pinned stub was minted in a world that has deleted nothing" \
+  in_file "$SRCON" 'registryPinnedStubs=0'
+assert "the palette is still the width the boot probe measured (${S_BITS:-?} == ${P_BITS:-?})" \
+  test "${S_BITS:-x}" = "${P_BITS:-y}"
+assert "so registering a block on a dedicated server crossed no boundary" \
+  not_in_file "$LOG" 'crossing the global block palette boundary'
+assert "and no section anywhere had to be repacked" in_file "$SRCON" 'paletteRepacks=0'
+
+# ---- V4 Phase 2 / Phase 4: lane detection
+note "asserting the lane machinery (V4 Phase 2 / Phase 4)"
+assert "Lane A delivery is armed for the life of the process" \
+  in_file "$LOG" 'Lane A delivery armed: manifest before'
+assert "and its task is ordered ahead of fabric-api's registry sync" \
+  in_file "$LOG" 'phase vibemod:content_first ordered before'
+assert "Lane B is armed with projection ON" \
+  in_file "$LOG" 'Lane B armed: vanilla-client projection on'
+# THE load-bearing one. The configureClient redirect is a @Redirect against
+# another mod's implementation class; `required: true` catches a rename, but
+# only this self-check catches "the mixin applied and the filter did nothing",
+# which is the failure that silently kicks every vanilla player. It runs at
+# boot, so a lone dedicated server is exactly the right place to check it.
+assert "the configureClient redirect passed its BOOT self-check" \
+  in_file "$LOG" 'Lane B step zero verified'
+assert "and the self-check proved both halves it claims" \
+  in_file "$LOG" 'is merged onto RegistrySyncManager and the filter strips VibeMod namespaces'
+assert "it did not fail and fall back to the V3 refusal" \
+  not_in_file "$LOG" 'Lane B step zero FAILED'
+assert "the Lane B state line agrees that hiding is on" \
+  in_file "$SRCON" 'state-lane-b laneB=projecting registryHiding=on'
+assert "the server can build a Lane A manifest, and it holds both ids" \
+  in_file "$SRCON" 'state-lane-a laneA=0 laneB=0 manifestEntries=2'
+assert "the manifest carries an order hash and a blockstate baseline" \
+  in_file "$SRCON" 'manifestBlockStateBaseline='
+# That a DedicatedPolicy is INSTALLED is not asserted again here, and that is
+# deliberate rather than an omission: it is already proved twice over by the
+# pair of sections around this one. Content landed on a dedicated server (§D
+# above) and a null policy refuses verbatim (the last section), so a policy that
+# said yes is the only thing that can be between them. A third assertion on the
+# same predicate would inflate the count without adding a claim.
+
+note "OWED, and said out loud rather than implied: this gate has no second client."
+note "      laneA=0 / laneB=0 / filteredMaps=0 above are honest zeros. The manifest is"
+note "      BUILT, hashed and sized here, but never sent; no connection is ever"
+note "      classified; and RegistryHiding's filter is proved only against the synthetic"
+note "      map its own self-check builds, never against a real one. A real Lane A join,"
+note "      a real vanilla Lane B join and the projection itself belong to"
+note "      :fabric:runClientGameTest, which has a client to join with."
+
+# ---- V4 Phase 5: dynamic registries and the proxy gate
+#
+# A damage_type is datapack-shaped but is NOT one of the seven directories a
+# /reload re-reads: vanilla builds that registry layer when the world loads, and
+# this pack did not exist then. So the host says the honest thing ("apply on
+# next world load") and Phase 5's sweep then makes it real anyway. Both halves
+# are asserted, because either one alone is a half-truth.
+note "asserting V4 Phase 5 (dynamic registries, proxy gate)"
+assert "the host said a registry-layer file does not apply on a reload" \
+  in_file "$LOG" 'ResourceCanary ships registry-layer data (damage_type)'
+assert "and the sweep applied it to the live registry anyway" \
+  in_file "$LOG" 'added damage_type vibemod_resourcecanary:canary'
+assert "the seam counts it" in_file "$SRCON" 'state-dynamic dynamicApplied=1'
+assert "nothing was flagged inactive and nothing was refused" \
+  in_file "$SRCON" 'dynamicInactive=0 dynamicRefused=0'
+assert "the bounce machinery reports state and is not disabled" \
+  in_file "$SRCON" 'bounceDisabled=false'
+# The proxy gate answers from the GAME DIRECTORY rather than from a setting,
+# which is the whole point of it, and this gate's own server.properties says
+# online-mode=false — the one thing every proxy setup needs, and the reason a
+# harness that nobody logs into can set it. So the honest assertion here is not
+# "open": it is that the gate read that file, closed itself over it, and said
+# which signal did it. An `open` gate here would mean the gate is not reading
+# server.properties at all.
+assert "the proxy gate read server.properties and closed over online-mode=false" \
+  in_file "$SRCON" 'proxyGate=closed proxySignals=1'
+# And the closed gate's consequence, which is the behaviour that matters: no
+# bounce is attempted, and the content is queued for each player's next join
+# instead of being dropped.
+assert "so no bounce was attempted on a proxy-shaped server" in_file "$SRCON" 'bounces=0'
+assert "and the new content was deferred to the next join rather than lost" \
+  in_file "$SRCON" 'nextJoinDeliveries=1'
+note "OWED: the SERVER_STARTED sweep runs on every boot, but on THIS boot it"
+note "      necessarily finds nothing — restore-on-boot compiles asynchronously, so no"
+note "      mod's data/** is on disk yet when SERVER_STARTED fires. What is asserted"
+note "      above is the same DynamicContent.apply(), through the per-mod call, which is"
+note "      the one that has content to see. Proving the STARTED call specifically needs"
+note "      a second boot against a world whose datapacks are already on disk."
+note "      The bounce itself needs connected players and is likewise not reachable here."
+
+# ---- V4 Phase 6: runtime dimensions and the tick-loop redirect
+#
+# MinecraftServerTickLevelsMixin's redirect is require = 0, so a version bump
+# that moves the call site disables it SILENTLY — which is precisely the failure
+# mode §10 refuses. LevelTickGuard counts every invocation, so "the redirect
+# applied" is provable rather than assumed, and "it is still applying" is
+# provable by reading the counter twice.
+note "asserting V4 Phase 6 (runtime dimensions, tickChildren redirect)"
+assert "the dimension machinery came up with the server" \
+  in_file "$LOG" 'Runtime dimensions ready.'
+assert "and reports its state" in_file "$SRCON" 'state-dimension dimOpen=0 dimClosing=0'
+assert "nothing was refused a dimension it should have had" in_file "$SRCON" 'dimRefused=0'
+assert "the roster recorded the boot dimension-type floor" in_file "$SRCON" 'dimTypeFloor='
+assert "the tickChildren redirect APPLIED - the guard reads armed" \
+  in_file "$SRCON" 'levelTickGuard=armed'
+SNAP1="$(grep -m1 -oE 'levelSnapshots=[0-9]+' "$SRCON" | cut -d= -f2 || true)"
+SNAP2="$(grep -m1 -oE 'levelSnapshots=[0-9]+' "$SRCON2" | cut -d= -f2 || true)"
+assert "and it has counted real invocations (${SNAP1:-?} > 0)" test "${SNAP1:-0}" -gt 0
+assert "which keep growing on a ticking server (${SNAP1:-?} -> ${SNAP2:-?})" \
+  test "${SNAP2:-0}" -gt "${SNAP1:-0}"
+
+# ------------------------------------------- the V3 refusal, where it still is
+#
+# A null DedicatedPolicy is NOT "allow" — RegistrySeam treats it as the
+# pre-Phase-2 answer and refuses with DEDICATED_REFUSAL verbatim. It is the
+# fallback the whole feature rests on (a boot in which ContentSync did not
+# install has no way of knowing who is connected), so it is exercised rather
+# than assumed: StateCanary sets the policy to null, registers one item and one
+# block exactly as an ordinary mod would, catches both refusals, and restores
+# the policy in a finally.
+#
+# The three lines this also keeps proving are the ones the V3 gate found bugs
+# with: a refused registration leaves a constructed-but-unregistered intrusive
+# holder in BOTH registries, and a stray data-component initializer that
+# poisons every later datapack reload unless it is rolled back.
+note "asserting a null DedicatedPolicy still means the V3 refusal, verbatim"
+assert "the state canary ran its probe and put the policy back" \
+  in_file "$LOG" 'state-canary-policy-restored'
+assert "a null policy refused a dedicated server, and told the operator" \
+  in_file "$LOG" 'Refusing registry content from StateCanary on a dedicated server'
+assert "stating the deterministic V3 policy verbatim" \
+  in_file "$LOG" 'registry content is singleplayer/LAN-host only in v1; applies after restart on dedicated'
+assert "the refusal reached the mod as a throw naming the ITEM registry" \
+  in_file "$LOG" 'state-canary-item-refused: Mod StateCanary tried to register null_policy_item into minecraft:item on a dedicated server'
+assert "and the block half named the BLOCK registry, not just 'registry content'" \
+  in_file "$LOG" 'state-canary-block-refused: Mod StateCanary tried to register null_policy_block into minecraft:block on a dedicated server'
+assert "the refused item did not quietly land" not_in_file "$LOG" 'state-canary-item-REGISTERED'
+assert "nor the refused block" not_in_file "$LOG" 'state-canary-block-REGISTERED'
+assert "the orphaned item object was discarded, loudly" \
+  in_file "$LOG" 'constructed-but-unregistered minecraft:item object(s)'
+assert "and the orphaned block object was, NAMED as a block" \
+  in_file "$LOG" 'constructed-but-unregistered minecraft:block object(s)'
+assert "the refused item's half-built component initializer was rolled back" \
+  in_file "$LOG" 'data-component initializer(s) left behind'
 assert "so no later datapack reload was poisoned by it" \
   not_in_file "$LOG" 'Missing element ResourceKey[minecraft:item'
-assert "and the orphaned item object was discarded, loudly" \
-  in_file "$LOG" 'constructed-but-unregistered minecraft:item object(s)'
+assert "and the probe cost the refusing mod nothing - it is live" \
+  in_file "$LOG" 'StateCanary v1 is live'
 
-# V4 Phase 1: the same policy, one registry over. Extended here rather than in a
-# section of its own, because it IS the same refusal — what is new is that it
-# has to name the block registry, and that a refused Block leaves the same kind
-# of orphan a refused Item does.
-assert "the same refusal covers blocks" \
-  in_file "$LOG" 'Refusing registry content from BlockCanary'
-assert "the block registration failed the mod's LOAD too" \
-  in_file "$LOG" 'Failed to start BlockCanary: onInitialize failed for mod BlockCanary'
-assert "the block canary's onInitialize never got past the refusal" \
-  not_in_file "$LOG" 'block-canary-registered'
-# The orphan a refused BLOCK leaves. Block.<init> takes an intrusive holder
-# exactly as Item.<init> does, so the window has to discard one of these too —
-# and vanilla would fail the next freeze over it rather than ignore it.
-assert "the refused block's orphaned intrusive holder was discarded, loudly, and NAMED as a block" \
-  in_file "$LOG" 'constructed-but-unregistered minecraft:block object(s)'
-assert "no blockstate id was minted for a block that was refused" \
-  not_in_file "$LOG" 'crossing the global block palette boundary'
-
+# ------------------------------------------------- what /vibe now says about it
+#
+# The inverse of V3's four journalling assertions. There is no refusal to
+# journal any more, so the claim is that /vibe errors is EMPTY for both mods and
+# that the install card names the ids they registered — which is the line an
+# operator reads to find out that a disabled mod's id is still taken.
 RRCON="$RUN/registry.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
   "vibe errors RegistryCanary" "vibe info RegistryCanary" \
   "vibe errors BlockCanary" "vibe info BlockCanary" | tee "$RRCON"
-assert "the refusal is journalled where /vibe errors can show it" \
-  in_file "$RRCON" 'singleplayer/LAN-host only'
-assert "and it is journalled as an onInitialize failure, not a crash" \
-  in_file "$RRCON" 'onInitialize'
-# /vibe list reads the STORE, so a mod that failed to load is still listed as
-# enabled — that is pre-existing and correct (it will be retried next boot).
-# What must be true is that nothing is LIVE, which the install card says.
-assert "and the refused mod is not live" \
-  in_file "$RRCON" 'not currently loaded'
-# The half that matters for V4: the journalled refusal has to say WHICH registry
-# it refused. "Registry content is refused here" leaves an operator guessing;
-# "into minecraft:block" tells them the mod wanted a block and this host cannot
-# have one.
-assert "the block refusal names the block registry, not just 'registry content'" \
-  in_file "$RRCON" 'into minecraft:block on a dedicated server'
+note "asserting /vibe reports content rather than a refusal"
+assert "/vibe errors journalled no dedicated-server refusal for the item mod" \
+  not_in_file "$RRCON" 'singleplayer/LAN-host only'
+assert "and no onInitialize failure for either" \
+  not_in_file "$RRCON" 'onInitialize failed for mod'
+assert "the install card shows both mods loaded, not absent" \
+  not_in_file "$RRCON" 'not currently loaded'
+assert "and it names the id the item mod registered" \
+  in_file "$RRCON" 'registered content: vibemod_registrycanary:ruby_sword'
+assert "the block mod's card names its block id under its own heading" \
+  in_file "$RRCON" 'blocks: vibemod_blockcanary:canary_block'
+assert "and says out loud that the id outlives a disable" \
+  in_file "$RRCON" 'stays registered until the world is restarted'
 
 cleanup
 trap - EXIT
