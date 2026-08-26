@@ -1,6 +1,7 @@
 package com.gijsm.vibemod.fabric.shim;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,12 +13,16 @@ import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import net.fabricmc.fabric.api.event.registry.RegistryIdRemapCallback;
+
 import net.minecraft.core.Holder;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.component.DataComponentInitializers;
 import net.minecraft.core.component.DataComponentLookup;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
@@ -25,14 +30,17 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.item.Rarity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockBehaviour;
 
 import com.gijsm.vibemod.fabric.mixin.DataComponentInitializersAccessor;
 import com.gijsm.vibemod.fabric.mixin.DefaultAttributesAccessor;
 import com.gijsm.vibemod.fabric.mixin.MappedRegistryAccessor;
+import com.gijsm.vibemod.fabric.net.ContentManifest;
 import com.gijsm.vibemod.loader.ModAttribution;
 import com.gijsm.vibemod.loader.content.ReloadCoordinator;
 import com.gijsm.vibemod.platform.Registration;
@@ -105,6 +113,23 @@ import com.gijsm.vibemod.store.RegistryLedger;
  * renumbers everything after it. A deleted block mod is therefore <b>pinned</b>
  * rather than tombstoned, and {@link #replayPinnedBlocks} registers an inert
  * {@link StubBlock} for each of its block ids on every subsequent boot.
+ *
+ * <h2>5. A client can register the same ids, from a list rather than from code
+ * (V4 Phase 2)</h2>
+ *
+ * <p>{@link #registerFromManifest} is the same three mechanisms with the mod
+ * taken out. A Lane A client has no {@code ModAttribution}, no lifecycle and no
+ * {@code MinecraftServer}; it has an ordered list of ids and the presentation
+ * facts for each, and it must end up with byte-identical registries so that
+ * every wire id agrees. So it reuses the window, the repair and the guard —
+ * everything except {@link #requireHandle()}, the ledger and the ownership
+ * bookkeeping, none of which mean anything without a mod behind them.
+ *
+ * <p>The thing that made this a separate entry point rather than a flag on
+ * {@link #register} is small and fatal: {@code register} opens with
+ * {@code requireHandle()}, and on a client with no mod lifecycle
+ * {@code ModAttribution.current()} is null, so every manifest entry would throw
+ * before it reached a registry.
  */
 public final class RegistrySeam implements RegistryTarget {
 
@@ -183,6 +208,35 @@ public final class RegistrySeam implements RegistryTarget {
 
     /** Live entries per mod, in registration order; a mod with none is absent. */
     private final Map<String, List<Live>> live = new ConcurrentHashMap<>();
+    /**
+     * Everything this process has put into a registry, in the order it went in
+     * (V4 Phase 2).
+     *
+     * <p>Monotonic, and deliberately not the same list as {@link #live}. That
+     * one is about ownership and comes back down when a mod is disabled; this
+     * one is about the id space, which does not. A Lane A manifest has to name
+     * every id the server's registries actually hold — a disabled mod's item is
+     * still in {@code BuiltInRegistries.ITEM}, still occupies a raw id, and a
+     * client that skipped it would build a registry one entry short of the
+     * server's.
+     *
+     * <p>Pinned stubs are in here too, under {@code (pinned)}, for exactly the
+     * same reason.
+     */
+    private final List<Live> order = Collections.synchronizedList(new ArrayList<>());
+    /**
+     * Which installation each manifest-registered id came from (V4 Phase 2,
+     * client side).
+     *
+     * <p>The whole of the cross-server collision detector.
+     * {@code ModResources.canonicalNamespace} is {@code vibemod_<modname>} —
+     * unique per mod, not per server — so two installations that both generated
+     * a {@code RubySword} mint the same id, and a client that has taken the
+     * first cannot give it back. Remembering which installation an id came from
+     * turns the second server's join into a named refusal instead of a client
+     * quietly holding the wrong item under the right name.
+     */
+    private final Map<String, String> manifestOrigins = new ConcurrentHashMap<>();
     /** Default-attribute suppliers this seam installed, so a drain can remove them. */
     private final Map<String, List<EntityType<?>>> attributes = new ConcurrentHashMap<>();
 
@@ -197,6 +251,24 @@ public final class RegistrySeam implements RegistryTarget {
      * once per block; see {@link BlockRegistration#admit}.
      */
     private volatile PaletteGuard paletteGuard;
+
+    /**
+     * Who decides whether a dedicated server may take registry content at all
+     * (V4 Phase 2), or null for the V3 answer: never.
+     *
+     * <p>Installed rather than branched on because the question is not this
+     * class's to answer. "May this land?" is a fact about who is connected —
+     * whether every player on the server is a Lane A client that will build the
+     * same registries, or whether somebody is attached who would be kicked by
+     * fabric-api at their next configuration. That knowledge lives with the
+     * connection listener, so the listener supplies the verdict and this class
+     * relays it, refusal text and all.
+     *
+     * <p>Null is not "allow". Null is the pre-Phase-2 refusal, verbatim,
+     * because a host that never installed a policy has no way of knowing who is
+     * out there.
+     */
+    private volatile DedicatedPolicy dedicatedPolicy;
 
     private final AtomicInteger tabRebuilds = new AtomicInteger();
     /**
@@ -234,6 +306,47 @@ public final class RegistrySeam implements RegistryTarget {
     public record Live(String modName, String registry, Identifier id, Object value) {
     }
 
+    /**
+     * Whether registry content may land on a dedicated server right now, and
+     * why not when it may not (V4 Phase 2).
+     *
+     * @see #setDedicatedPolicy
+     */
+    public interface DedicatedPolicy {
+
+        /**
+         * @param server  the live dedicated server
+         * @param modName the mod trying to register, for the message
+         * @return null to allow the registration, or the reason it is refused —
+         *         relayed to the mod verbatim, so it should read as a sentence
+         *         about who is connected rather than as a code
+         */
+        String refusalOrNull(MinecraftServer server, String modName);
+    }
+
+    /**
+     * What {@link #registerFromManifest} did.
+     *
+     * @param orderKeys the {@code <registry>|<id>} keys actually registered or
+     *                  already held, in the order the manifest listed them —
+     *                  this is what the client hashes and sends back
+     * @param problems  every reason an entry did not land, all of them rather
+     *                  than the first, because a refusal message that names one
+     *                  collision when there are nine is a second bug report
+     */
+    public record ManifestOutcome(List<String> orderKeys, List<String> problems) {
+
+        public ManifestOutcome {
+            orderKeys = List.copyOf(orderKeys);
+            problems = List.copyOf(problems);
+        }
+
+        /** True when every entry landed. */
+        public boolean clean() {
+            return problems.isEmpty();
+        }
+    }
+
     /** Installs the per-installation ledger. Called when a server starts. */
     public void setLedger(RegistryLedger ledger) {
         this.ledger = ledger;
@@ -255,6 +368,49 @@ public final class RegistrySeam implements RegistryTarget {
     /** The palette guard, or null before one is installed. */
     public PaletteGuard paletteGuard() {
         return paletteGuard;
+    }
+
+    /**
+     * Installs the dedicated-server policy (V4 Phase 2). Called once, from the
+     * same wiring that installs the connection listener that answers it.
+     */
+    public void setDedicatedPolicy(DedicatedPolicy policy) {
+        this.dedicatedPolicy = policy;
+    }
+
+    /**
+     * Everything this process has registered, in registration order — the list
+     * a Lane A manifest is built from. See {@link #order}.
+     */
+    public List<Live> liveOrder() {
+        synchronized (order) {
+            return List.copyOf(order);
+        }
+    }
+
+    /** How many blockstates this seam has appended to {@code BLOCK_STATE_REGISTRY}. */
+    public int blockStatesAppended() {
+        return blockStatesAppended.get();
+    }
+
+    /**
+     * What {@code Block.BLOCK_STATE_REGISTRY.size()} was before VibeMod touched
+     * it — vanilla plus whatever other mods this process loaded.
+     *
+     * <p>Derived rather than remembered, because it has to be right on a client
+     * that started with no server and on a server that has been running for an
+     * hour, and the one number that is true in both cases is "what is there now
+     * minus what we put there". {@code IdMapper} has no remove, so the
+     * subtraction cannot go stale.
+     *
+     * <p>This is the figure a Lane A manifest carries and a Lane A client
+     * checks. Blockstate ids are global, positional and never remapped —
+     * Fabric's registry sync does not touch {@code IdMapper} at all — so two
+     * ends with different baselines cannot agree about chunk data no matter how
+     * carefully they agree about everything else.
+     */
+    public int blockStateBaseline() {
+        return Block.BLOCK_STATE_REGISTRY.size() - blockStatesAppended.get();
     }
 
     // ------------------------------------------------------------------ the window
@@ -445,17 +601,104 @@ public final class RegistrySeam implements RegistryTarget {
     private void bindComponents() {
         MinecraftServer live = server.get();
         if (live == null) {
+            // A Lane A client, every time. There is no server here and there
+            // never will be, so this is not "not yet" — it is the reason
+            // ContentBind exists at all. See bindComponents(HolderLookup.Provider).
             return;
+        }
+        bindComponents(live.registryAccess());
+    }
+
+    /**
+     * The same pass, against a provider the caller supplies (V4 Phase 2).
+     *
+     * <p>{@code HolderLookup.Provider} rather than {@code RegistryAccess} and
+     * rather than a client type, because that is what
+     * {@code DataComponentInitializers.build} actually takes and because this
+     * class must stay loadable on a dedicated server. The client's provider is
+     * {@code ClientPacketListener.registryAccess()}; the server's is its own.
+     *
+     * <p>Rethrows nothing. A failed bind leaves items whose
+     * {@code Holder.Reference.components()} still throws, which is visible and
+     * repairable; a throw out of here would take down whatever was calling,
+     * which on the client is a connection handler.
+     *
+     * @return true when the pass completed
+     */
+    public boolean bindComponents(HolderLookup.Provider provider) {
+        if (provider == null) {
+            return false;
         }
         try {
             for (DataComponentInitializers.PendingComponents<?> pending
-                    : BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(live.registryAccess())) {
+                    : BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(provider)) {
                 pending.apply();
             }
+            return true;
         } catch (Throwable t) {
             LOG.log(Level.WARNING, "Could not bind data components for runtime-registered content; "
-                    + "the next datapack reload will", t);
+                    + "until something does, putting one of these items in a stack throws "
+                    + "\"Components not bound yet\"", t);
+            return false;
         }
+    }
+
+    // ------------------------------------------------------------------ Fabric's remap
+
+    /**
+     * Repairs what a Fabric raw-id remap rewrites underneath us (V4 Phase 2).
+     *
+     * <p>Invisible until Lane A ships, and a live bug the day it does.
+     * {@link #repairAfterRegistration()} builds
+     * {@code new DataComponentLookup<>(accessor.getById())} — a lookup keyed by
+     * <em>raw id</em>, taken as a snapshot. Fabric's {@code SyncConfigurationTask}
+     * then hands the client the server's {@code id → rawId} map and the client
+     * renumbers its registries to match, which is precisely a rewrite of
+     * {@code byId} out from under that snapshot. Everything downstream of it
+     * would then answer with a neighbouring item's components.
+     *
+     * <p>We cooperate with the remap and never compete with it: no raw id is
+     * touched here, and nothing is reordered. This subscribes, waits, and
+     * rebuilds afterwards.
+     *
+     * <p>Process-lived. {@code Event.register} cannot be undone, so this must be
+     * called exactly once per JVM — from the same place the connection listener
+     * is installed.
+     */
+    public void installRemapRepair() {
+        for (ResourceKey<? extends Registry<?>> key : WINDOW) {
+            Registry<?> registry = registryFor(key);
+            if (registry == null) {
+                continue;
+            }
+            RegistryIdRemapCallback.event(cast(registry)).register(state -> {
+                MappedRegistryAccessor accessor = accessorFor(key);
+                if (accessor == null) {
+                    return;
+                }
+                try {
+                    accessor.setComponentLookup(new DataComponentLookup<>(accessor.getById()));
+                    LOG.fine(() -> "Rebuilt the " + key.identifier() + " component lookup after "
+                            + "Fabric renumbered " + state.getRawIdChangeMap().size() + " raw id(s)");
+                } catch (Throwable t) {
+                    LOG.log(Level.WARNING, "Could not rebuild the " + key.identifier()
+                            + " component lookup after a raw-id remap; components would answer "
+                            + "for the wrong entry", t);
+                }
+            });
+        }
+        // One rebuild for the tabs rather than one per registry: the contents
+        // are derived from all three and a rebuild walks every item in the game.
+        RegistryIdRemapCallback.event(cast(BuiltInRegistries.ITEM)).register(state -> {
+            invalidateCreativeTabs();
+            rebuildCreativeTabs("raw-id remap");
+        });
+        LOG.fine("Subscribed to Fabric's raw-id remap for item, block and entity type");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> Registry<T> cast(Registry<?> registry) {
+        return (Registry<T>) registry;
     }
 
     // ------------------------------------------------------------------ registration
@@ -494,6 +737,19 @@ public final class RegistrySeam implements RegistryTarget {
         }
 
         Identifier canonical = canonicalise(handle.name(), id);
+        if (book != null) {
+            // V4 Phase 2. On the NEAR side of everything, because a refusal
+            // here costs one mod load while the thing it prevents — the same
+            // ids minted in a different sequence — cannot be undone once the
+            // ids exist. See RegistryLedger.orderProblem.
+            String drift = book.orderProblem(handle.name(), registryKey.identifier().toString(),
+                    canonical.toString());
+            if (drift != null) {
+                LOG.warning("Refusing a registration that disagrees with the registry ledger's "
+                        + "recorded order: " + drift);
+                throw new UnsupportedOperationException(drift);
+            }
+        }
         if (!(registry instanceof MappedRegistry<?> mapped)) {
             throw new UnsupportedOperationException(registryKey.identifier()
                     + " is not a writable registry on this game version");
@@ -534,6 +790,7 @@ public final class RegistrySeam implements RegistryTarget {
 
         Live entry = new Live(handle.name(), registryKey.identifier().toString(), canonical, value);
         live.computeIfAbsent(handle.name(), ignored -> new ArrayList<>()).add(entry);
+        order.add(entry);
         if (book != null) {
             // Registration time is the ONLY moment the state schema can be read:
             // the live StateDefinition is the only copy of it, and the class that
@@ -813,6 +1070,10 @@ public final class RegistrySeam implements RegistryTarget {
             registeredInWindow++;
             blockStatesAppended.addAndGet(BlockRegistration.appendStates(stub));
             pinnedStubs.incrementAndGet();
+            // A stub occupies a raw id and a run of blockstate ids exactly like
+            // a live block, so a Lane A client that skipped it would build a
+            // registry short of the server's. Ordered with the rest.
+            order.add(new Live("(pinned)", RegistryLedger.BLOCK_REGISTRY, id, stub));
             LOG.info("Pinned block " + id + " is back as an inert stub (" + schema + ")");
             return true;
         } catch (Throwable t) {
@@ -821,6 +1082,281 @@ public final class RegistrySeam implements RegistryTarget {
                     + "after it", t);
             return false;
         }
+    }
+
+    // ------------------------------------------------------------------ manifest replay
+
+    /**
+     * Registers a server's content on a client, from an ordered list (V4 Phase 2).
+     *
+     * <p>The same window, the same repair, the same palette guard and the same
+     * {@code BlockRegistration} tail as {@link #register}. What is deliberately
+     * absent is everything that presupposes a mod: no {@link #requireHandle()}
+     * (a client has no {@code ModAttribution}, so the mod-attributed path would
+     * throw on the first entry), no ledger write (the client is not the
+     * installation that owns these ids), no {@code ModHandle.track} (there is no
+     * teardown here — the connection ends and the ids stay, because they always
+     * stay).
+     *
+     * <p><b>In order, and only in order.</b> The list is registered exactly as
+     * given, with no sorting and no retry: raw registry ids are assigned in
+     * registration order, and while Fabric's {@code SyncConfigurationTask} will
+     * renumber them to match the server, {@code Block.BLOCK_STATE_REGISTRY} is
+     * an {@code IdMapper} that it never touches. Blockstate ids agree only if
+     * both ends appended the same states in the same sequence.
+     *
+     * <p><b>An id this client already holds is not registered twice.</b>
+     * {@code MappedRegistry} has no remove, so a second registration of the same
+     * id is either a throw or a silent overwrite, and neither is what the caller
+     * wants. If the id came from this same installation it is counted as
+     * present and skipped; if it came from a different one it is a problem, and
+     * the caller refuses the join over it. See {@link #manifestOrigins}.
+     *
+     * <p>Errors are collected, never thrown. The caller is a network handler in
+     * the configuration phase, and the useful answer to "this manifest cannot be
+     * applied" is a disconnect message naming every reason, not a stack trace
+     * that ends the connection at the first one.
+     *
+     * @param installationId which VibeMod installation the entries belong to
+     * @param entries        the ordered content, exactly as received
+     */
+    public ManifestOutcome registerFromManifest(String installationId,
+                                                List<ContentManifest.Entry> entries) {
+        List<String> keys = new ArrayList<>(entries.size());
+        List<String> problems = new ArrayList<>();
+        withWindow(() -> {
+            for (ContentManifest.Entry entry : entries) {
+                try {
+                    if (registerManifestEntry(installationId, entry, problems)) {
+                        keys.add(entry.orderKey());
+                    }
+                } catch (Throwable t) {
+                    LOG.log(Level.WARNING, "Could not register manifest entry " + entry.id(), t);
+                    problems.add(entry.id() + " could not be registered: " + t);
+                }
+            }
+        });
+        return new ManifestOutcome(keys, problems);
+    }
+
+    /** One manifest entry. Returns true when the client now holds this id. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private boolean registerManifestEntry(String installationId, ContentManifest.Entry entry,
+                                          List<String> problems) {
+        Identifier id;
+        try {
+            id = Identifier.parse(entry.id());
+        } catch (RuntimeException e) {
+            problems.add(entry.id() + " is not a valid identifier");
+            return false;
+        }
+        ResourceKey<? extends Registry<?>> registryKey = manifestRegistryKey(entry.registry());
+        if (registryKey == null) {
+            problems.add(entry.id() + " belongs to " + entry.registry()
+                    + ", which this VibeMod does not register at runtime");
+            return false;
+        }
+        Registry<?> registry = registryFor(registryKey);
+        if (!(registry instanceof MappedRegistry<?> mapped)) {
+            problems.add(entry.registry() + " is not writable on this game version");
+            return false;
+        }
+
+        String owner = manifestOrigins.get(entry.id());
+        if (registry.containsKey(id)) {
+            if (installationId.equals(owner)) {
+                // Already ours from an earlier join in this same client process.
+                // Counted as present, because it is.
+                return true;
+            }
+            problems.add(entry.id() + (owner == null
+                    ? " is already registered by something else on this client"
+                    : " is already registered on this client by a DIFFERENT VibeMod installation ("
+                            + owner + "). Registry ids are derived from the mod's name, so two "
+                            + "servers that generated a mod with the same name mint the same id — "
+                            + "and a client cannot give one back, because MappedRegistry has no "
+                            + "remove. Restart the client before joining this server"));
+            return false;
+        }
+
+        Object value = buildManifestValue(registryKey, id, entry, problems);
+        if (value == null) {
+            return false;
+        }
+        if (value instanceof Block block) {
+            BlockRegistration.admit(paletteGuard, entry.modName(), id, block);
+        }
+        ResourceKey key = ResourceKey.create((ResourceKey) registryKey, id);
+        ((MappedRegistry) mapped).register(key, value, RegistrationInfo.BUILT_IN);
+        registeredInWindow++;
+        if (value instanceof Block block) {
+            blockStatesAppended.addAndGet(BlockRegistration.appendStates(block));
+        }
+        if (value instanceof Item item) {
+            BlockRegistration.linkBlockItem(item);
+        }
+        if (value instanceof EntityType<?> type) {
+            // The same NoopRenderer install a locally registered type gets. It
+            // is even more load-bearing here: on a Lane A client the mod's own
+            // onInitializeClient never runs, so there is no real renderer coming
+            // and this IS the renderer.
+            ClientSeam client = Shims.clientSeam();
+            if (client != null) {
+                client.ensureEntityRenderer(type);
+            }
+        }
+        manifestOrigins.put(entry.id(), installationId);
+        order.add(new Live(entry.modName(), entry.registry(), id, value));
+        LOG.fine(() -> "Registered " + entry.registry() + " " + id + " from "
+                + entry.modName() + " v" + entry.modVersion() + "'s manifest");
+        return true;
+    }
+
+    /**
+     * Builds the object one manifest entry describes, or null having said why.
+     *
+     * <p>Three shapes, and each is the smallest honest thing that makes the
+     * client agree with the server about ids:
+     *
+     * <ul>
+     *   <li><b>Block</b> — a {@link StubBlock} from the recorded
+     *       {@link BlockSchema}. That class already exists for pinned ids and
+     *       already reproduces a state schema exactly, which is the only
+     *       property a blockstate <em>id</em> needs, and ids are what this phase
+     *       is about. Two things it does not reproduce, stated rather than
+     *       discovered later: the block's own {@code descriptionId} is the
+     *       stub's ("mod deleted, block pinned"), which is visible in F3 and
+     *       nowhere a player normally looks because the <em>item</em> carries
+     *       the right name; and its hardness is the stub's, so client-side
+     *       mining animation runs at the stub's speed while the server decides
+     *       when the block actually breaks. Both belong to a client-facing block
+     *       class this phase does not have a reason to add yet.</li>
+     *   <li><b>Item</b> — a plain {@code Item}, or a {@code BlockItem} when the
+     *       manifest names the block it places, carrying the presentation
+     *       numbers verbatim.</li>
+     *   <li><b>Entity type</b> — {@code EntityType.Builder.createNothing},
+     *       which is vanilla's own "a type with no factory". <b>The client
+     *       registers the type but cannot build the entity</b>: a real factory
+     *       would need the mod's class, which Lane A deliberately does not ship,
+     *       and a stand-in {@code Entity} subclass would define a different
+     *       {@code SynchedEntityData} id space than the server's and desync on
+     *       the first data value. So the id agrees, the wire agrees, and the mob
+     *       does not appear — vanilla logs "Skipping Entity with id" and carries
+     *       on. That is a stated limitation of this phase, not an oversight.</li>
+     * </ul>
+     */
+    private Object buildManifestValue(ResourceKey<? extends Registry<?>> registryKey, Identifier id,
+                                      ContentManifest.Entry entry, List<String> problems) {
+        if (Registries.BLOCK.equals(registryKey)) {
+            BlockSchema schema = entry.block();
+            if (schema == null) {
+                problems.add(entry.id() + " is a block with no recorded state schema");
+                return null;
+            }
+            try {
+                return StubBlock.create(schema, ResourceKey.create(Registries.BLOCK, id));
+            } catch (RuntimeException e) {
+                problems.add(entry.id() + ": " + e.getMessage());
+                return null;
+            }
+        }
+        if (Registries.ITEM.equals(registryKey)) {
+            ContentManifest.ItemFacts facts = entry.item();
+            if (facts == null) {
+                problems.add(entry.id() + " is an item with no recorded presentation");
+                return null;
+            }
+            return buildManifestItem(id, facts);
+        }
+        if (Registries.ENTITY_TYPE.equals(registryKey)) {
+            ContentManifest.EntityFacts facts = entry.entity();
+            if (facts == null) {
+                problems.add(entry.id() + " is an entity type with no recorded presentation");
+                return null;
+            }
+            MobCategory category = mobCategory(facts.category());
+            if (category == null) {
+                problems.add(entry.id() + " names mob category " + facts.category()
+                        + ", which this game version does not have");
+                return null;
+            }
+            EntityType.Builder<?> builder = EntityType.Builder.createNothing(category)
+                    .sized(facts.width(), facts.height())
+                    .eyeHeight(facts.eyeHeight())
+                    .clientTrackingRange(facts.clientTrackingRange())
+                    .updateInterval(facts.updateInterval());
+            if (facts.fireImmune()) {
+                builder = builder.fireImmune();
+            }
+            if (!facts.saveable()) {
+                builder = builder.noSave();
+            }
+            if (!facts.summonable()) {
+                builder = builder.noSummon();
+            }
+            return builder.build(ResourceKey.create(Registries.ENTITY_TYPE, id));
+        }
+        problems.add(entry.id() + " belongs to a registry this seam does not build for");
+        return null;
+    }
+
+    private static Item buildManifestItem(Identifier id, ContentManifest.ItemFacts facts) {
+        Item.Properties properties = new Item.Properties()
+                .setId(ResourceKey.create(Registries.ITEM, id))
+                // Whole strings rather than derivations. A BlockItem prefixes
+                // its description id with "block." and a plain Item with
+                // "item.", so deriving on this side would be one branch away
+                // from a name that renders as a raw translation key.
+                .overrideDescription(facts.descriptionId())
+                .component(DataComponents.ITEM_MODEL, Identifier.parse(facts.itemModel()));
+        if (facts.maxDamage() > 0) {
+            // durability() also forces the stack size to 1, exactly as it does
+            // on the server, so the two ends agree without asserting it here.
+            properties = properties.durability(facts.maxDamage());
+        } else {
+            properties = properties.stacksTo(facts.maxStackSize());
+        }
+        Rarity rarity = rarity(facts.rarity());
+        if (rarity != null) {
+            properties = properties.rarity(rarity);
+        }
+        if (facts.fireResistant()) {
+            properties = properties.fireResistant();
+        }
+        Block block = facts.blockId() == null ? null
+                : BuiltInRegistries.BLOCK.getValue(Identifier.parse(facts.blockId()));
+        if (block != null) {
+            return new net.minecraft.world.item.BlockItem(block, properties);
+        }
+        return new Item(properties);
+    }
+
+    private static ResourceKey<? extends Registry<?>> manifestRegistryKey(String registry) {
+        for (ResourceKey<? extends Registry<?>> key : WINDOW) {
+            if (key.identifier().toString().equals(registry)) {
+                return key;
+            }
+        }
+        return null;
+    }
+
+    /** By serialized name, not by ordinal; see {@code ItemFacts.rarity}. */
+    private static MobCategory mobCategory(String name) {
+        for (MobCategory category : MobCategory.values()) {
+            if (category.getSerializedName().equals(name)) {
+                return category;
+            }
+        }
+        return null;
+    }
+
+    private static Rarity rarity(String name) {
+        for (Rarity rarity : Rarity.values()) {
+            if (rarity.getSerializedName().equals(name)) {
+                return rarity;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ creative tabs
@@ -884,11 +1420,40 @@ public final class RegistrySeam implements RegistryTarget {
         throw new IllegalArgumentException("Not a registry id: " + id);
     }
 
+    /**
+     * The dedicated-server gate (V4 Phase 2 lifted this; V3 refused outright).
+     *
+     * <p>Three answers, in this order, and each one is a different question:
+     *
+     * <ol>
+     *   <li>Not a dedicated server — nothing to gate. Singleplayer and LAN host
+     *       have worked since V3.</li>
+     *   <li>No {@link DedicatedPolicy} installed — the V3 refusal, verbatim.
+     *       A host that never wired the connection listener cannot know who is
+     *       connected, and "probably nobody" is not a thing to bet a player's
+     *       inventory on.</li>
+     *   <li>A policy is installed — it answers, and its refusal is relayed
+     *       word for word rather than paraphrased. It is the only thing here
+     *       that knows which players are on which lane.</li>
+     * </ol>
+     */
     private void refuseOnDedicatedServer(ModHandle handle,
                                          ResourceKey<? extends Registry<?>> registryKey, Object id) {
         MinecraftServer live = server.get();
         if (live == null || !live.isDedicatedServer()) {
             return;
+        }
+        DedicatedPolicy policy = dedicatedPolicy;
+        if (policy != null) {
+            String refusal = policy.refusalOrNull(live, handle.name());
+            if (refusal == null) {
+                return;
+            }
+            LOG.warning("Refusing registry content from " + handle.name()
+                    + " on a dedicated server: " + refusal);
+            throw new UnsupportedOperationException("Mod " + handle.name() + " tried to register "
+                    + pathOf(id) + " into " + registryKey.identifier() + " on a dedicated server: "
+                    + refusal);
         }
         // Logged as well as thrown, and that is not double-reporting: the throw
         // is the MOD's news (it fails to load, the generator gets a repair
@@ -930,15 +1495,22 @@ public final class RegistrySeam implements RegistryTarget {
      * as it does for {@code ITEM}.
      */
     private static MappedRegistryAccessor accessorFor(ResourceKey<? extends Registry<?>> key) {
-        Registry<?> registry = null;
-        if (Registries.ITEM.equals(key)) {
-            registry = BuiltInRegistries.ITEM;
-        } else if (Registries.ENTITY_TYPE.equals(key)) {
-            registry = BuiltInRegistries.ENTITY_TYPE;
-        } else if (Registries.BLOCK.equals(key)) {
-            registry = BuiltInRegistries.BLOCK;
-        }
+        Registry<?> registry = registryFor(key);
         return registry instanceof MappedRegistry<?> mapped ? (MappedRegistryAccessor) mapped : null;
+    }
+
+    /** The registry object itself, or null for a key this seam does not handle. */
+    private static Registry<?> registryFor(ResourceKey<? extends Registry<?>> key) {
+        if (Registries.ITEM.equals(key)) {
+            return BuiltInRegistries.ITEM;
+        }
+        if (Registries.ENTITY_TYPE.equals(key)) {
+            return BuiltInRegistries.ENTITY_TYPE;
+        }
+        if (Registries.BLOCK.equals(key)) {
+            return BuiltInRegistries.BLOCK;
+        }
+        return null;
     }
 
     /**

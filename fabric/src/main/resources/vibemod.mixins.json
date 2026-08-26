@@ -10,7 +10,8 @@
     "DataComponentInitializersAccessor",
     "StrategyAccessor",
     "LevelChunkSectionAccessor",
-    "ChunkMapAccessor"
+    "ChunkMapAccessor",
+    "ServerGamePacketListenerAccessor"
   ],
   "client": ["client.PackRepositoryAccessor", "client.EntityRenderersAccessor"],
   "injectors": {

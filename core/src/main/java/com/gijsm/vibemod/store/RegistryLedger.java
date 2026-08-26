@@ -6,10 +6,15 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -73,6 +78,32 @@ import com.google.gson.GsonBuilder;
  * (events, commands, its own {@code use} override reaching mod state) is
  * drained with the rest of its registrations.
  *
+ * <h2>The order of record (V4 Phase 2)</h2>
+ *
+ * <p>Lane A — a dedicated server and a client that runs VibeMod — works only if
+ * both ends build the same registries in the same order. Fabric's
+ * {@code SyncConfigurationTask} renumbers <em>raw registry ids</em> for us and
+ * we must not compete with it, but two things it does not touch make order
+ * load-bearing anyway: {@code Block.BLOCK_STATE_REGISTRY} is an
+ * {@code IdMapper} that appends at {@code nextId++} and is never remapped, and
+ * a boot that mints ids in a different sequence than the last one changes what
+ * every un-remapped consumer of those ids means.
+ *
+ * <p>So every entry carries a <b>monotonic per-installation sequence</b>,
+ * assigned once, at first record. From then on this file — not the order the
+ * store happens to list mods in, and not the order a directory listing comes
+ * back in — is what "the order" means:
+ *
+ * <ul>
+ *   <li>{@link #restoreOrder()} is the order a boot restores mods in;</li>
+ *   <li>{@link #orderedEntries()} is the ordered id list a manifest is built
+ *       from and {@link #orderHash} is hashed over;</li>
+ *   <li>{@link #orderProblem} <b>refuses</b> a mod that registers its ids in a
+ *       different order than this file records. That is the difference between
+ *       "the raw ids drifted" and "somebody's saved inventory turned into a
+ *       different item".</li>
+ * </ul>
+ *
  * <p>Written next to the store rather than inside it: it is host state about a
  * whole installation, not part of any one mod's version history, and rolling a
  * mod back to v1 must not roll back the fact that an id exists.
@@ -102,17 +133,35 @@ public final class RegistryLedger {
      *              {@code StateDefinition} exists to read it off — by the time
      *              the mod is deleted the block object is the only copy of its
      *              own schema, and it is about to stop being constructed.
+     * @param seq   the monotonic per-installation sequence, assigned once at
+     *              first record and never rewritten. 1-based, because 0 is what
+     *              a ledger written before V4 Phase 2 deserialises to and
+     *              {@link #load()} uses that to tell "unnumbered" from
+     *              "numbered first".
      */
-    public record Entry(String registry, String id, BlockSchema block) {
+    public record Entry(String registry, String id, BlockSchema block, int seq) {
 
         /** A non-block entry, which is every entry the item and entity paths make. */
         public Entry(String registry, String id) {
-            this(registry, id, null);
+            this(registry, id, null, 0);
         }
 
         /** True when this id lives in {@code minecraft:block} and so can never be released. */
         public boolean isBlock() {
             return BLOCK_REGISTRY.equals(registry);
+        }
+
+        /**
+         * {@code "minecraft:item|vibemod_x:ruby"} — the one string
+         * {@link RegistryLedger#orderHash} hashes for this entry.
+         *
+         * <p>Registry and id both, because "the same ids in the same order" is
+         * not the claim being checked: two registries can hold the same path,
+         * and an ordered list that agreed on paths while disagreeing on which
+         * registry they went into would hash the same and mean something else.
+         */
+        public String orderKey() {
+            return RegistryLedger.orderKey(registry, id);
         }
     }
 
@@ -153,6 +202,18 @@ public final class RegistryLedger {
 
     private final Path file;
     private final Map<String, ModEntry> mods = new LinkedHashMap<>();
+    /** The next sequence to hand out; 1-based, so 0 always means "not numbered yet". */
+    private int nextSeq = 1;
+    /** This installation's identity, minted on first ask and never rewritten. */
+    private String installationId;
+    /**
+     * How far each mod has replayed its own recorded order in THIS process.
+     *
+     * <p>Deliberately not persisted: it is a fact about one boot's progress
+     * through the file, not about the file. Rebuilt from zero every time a
+     * server starts, which is exactly when a boot restore begins.
+     */
+    private final Map<String, Integer> replayCursor = new HashMap<>();
 
     public RegistryLedger(Path file) {
         this.file = file;
@@ -162,6 +223,27 @@ public final class RegistryLedger {
     /** The path this ledger persists to. */
     public Path file() {
         return file;
+    }
+
+    /**
+     * This installation's identity — a UUID minted the first time it is asked
+     * for and written to the ledger beside the ids it belongs to.
+     *
+     * <p>It exists because a client can visit two VibeMod servers. Namespaces
+     * are {@code vibemod_<modname>} and so are unique per <em>mod</em>, not per
+     * server: two installations that both generated a mod called
+     * {@code RubySword} mint the same id, and a client that has already taken
+     * the first one cannot give it back — {@code MappedRegistry} has no
+     * {@code remove}. This id is what lets the second server's join be refused
+     * at the door with a message that names the collision, instead of the
+     * client quietly holding somebody else's item under the same name.
+     */
+    public synchronized String installationId() {
+        if (installationId == null || installationId.isBlank()) {
+            installationId = UUID.randomUUID().toString();
+            save();
+        }
+        return installationId;
     }
 
     /**
@@ -195,14 +277,201 @@ public final class RegistryLedger {
             Entry existing = entry.entries.get(i);
             if (existing.registry().equals(registry) && existing.id().equals(id)) {
                 if (block != null && !block.equals(existing.block())) {
-                    entry.entries.set(i, new Entry(registry, id, block));
+                    // The sequence is carried over unchanged. It was assigned
+                    // the first time this id was ever recorded and it is the
+                    // one thing about the entry that must survive every later
+                    // edit of it — a re-sequenced id is a reordered registry.
+                    entry.entries.set(i, new Entry(registry, id, block, existing.seq()));
                     save();
                 }
                 return;
             }
         }
-        entry.entries.add(new Entry(registry, id, block));
+        entry.entries.add(new Entry(registry, id, block, nextSeq++));
         save();
+    }
+
+    // ------------------------------------------------------------------ the order of record
+
+    /**
+     * Every recorded id in the whole installation, in sequence order.
+     *
+     * <p>Across mods, not per mod, and that is the point: the numeric ids a
+     * boot mints come out in one global sequence, so the order that has to be
+     * reproduced is one global list. This is what a Lane A manifest is built
+     * from and what {@link #orderHash} is hashed over.
+     *
+     * <p>Includes tombstoned and pinned mods' entries, because they are part of
+     * the same sequence — a pinned block id really is registered again on every
+     * boot, as a stub, before any live mod runs.
+     */
+    public synchronized List<Entry> orderedEntries() {
+        List<Entry> out = new ArrayList<>();
+        for (ModEntry mod : mods.values()) {
+            out.addAll(mod.entries);
+        }
+        out.sort(Comparator.comparingInt(Entry::seq));
+        return out;
+    }
+
+    /**
+     * Mod names in the order a boot should restore them: earliest first
+     * recorded id first.
+     *
+     * <p>Boot restore follows this rather than {@code ModStore.all()}, whose
+     * order is a directory listing. A mod store that happens to hand back its
+     * mods in a different order after a rename, a rollback or a filesystem that
+     * does not sort is not a bug in the store — it is only a bug if something
+     * downstream was quietly depending on it, and registry order is exactly
+     * that something.
+     *
+     * <p>A mod with no recorded ids is not here at all: it registered nothing,
+     * so its position in the sequence cannot matter.
+     */
+    public synchronized List<String> restoreOrder() {
+        record Ranked(String name, int seq) {
+        }
+        List<Ranked> ranked = new ArrayList<>();
+        mods.forEach((name, mod) -> mod.entries.stream()
+                .mapToInt(Entry::seq)
+                .min()
+                .ifPresent(min -> ranked.add(new Ranked(name, min))));
+        ranked.sort(Comparator.comparingInt(Ranked::seq));
+        return ranked.stream().map(Ranked::name).toList();
+    }
+
+    /**
+     * {@code modNames}, sorted into this file's order, with anything the file
+     * has never seen appended in the order it was given.
+     *
+     * <p>The shape boot restore actually wants: a store hands back the mods it
+     * has, and this says which order to load them in. Unknown mods go last
+     * rather than first because they have registered nothing yet — whatever ids
+     * they mint are new, so they belong at the end of the sequence, which is
+     * where {@link #record} will put them anyway.
+     */
+    public synchronized List<String> inRestoreOrder(List<String> modNames) {
+        List<String> known = restoreOrder();
+        List<String> out = new ArrayList<>(modNames.size());
+        for (String name : known) {
+            if (modNames.contains(name)) {
+                out.add(name);
+            }
+        }
+        for (String name : modNames) {
+            if (!out.contains(name)) {
+                out.add(name);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Why {@code modName} registering {@code id} into {@code registry} right
+     * now disagrees with this file — or null when it does not.
+     *
+     * <p>Called on the near side of the registration, so a refusal costs a mod
+     * load rather than a wrong id. The rule, and both halves of it are
+     * deliberate:
+     *
+     * <ul>
+     *   <li>An id this file has <b>never seen</b> is always fine. It is
+     *       appended, it takes the next sequence, and there is nothing for it
+     *       to disagree with.</li>
+     *   <li>An id this file <b>has</b> seen must come no earlier than the
+     *       cursor. Registering it out of turn is refused by name.</li>
+     * </ul>
+     *
+     * <p>Skipping <em>forward</em> is allowed on purpose: an edited mod that no
+     * longer registers one of its old ids is a normal thing to do, and the ids
+     * it does register are still in recorded order. What is refused is the case
+     * that cannot be recovered from — the same set of ids minted in a different
+     * sequence, which silently renumbers everything downstream of the swap.
+     */
+    public synchronized String orderProblem(String modName, String registry, String id) {
+        ModEntry mod = mods.get(modName);
+        if (mod == null) {
+            return null;
+        }
+        int cursor = replayCursor.getOrDefault(modName, 0);
+        int found = -1;
+        for (int i = 0; i < mod.entries.size(); i++) {
+            Entry entry = mod.entries.get(i);
+            if (entry.registry().equals(registry) && entry.id().equals(id)) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            // A new id, appended after everything recorded. Nothing recorded
+            // can follow it, so the cursor goes to the end.
+            replayCursor.put(modName, mod.entries.size());
+            return null;
+        }
+        if (found < cursor) {
+            // The cursor can sit one past the end, when the last thing recorded
+            // was a brand-new id; then there is no "expected next" to name and
+            // the honest answer says so rather than reading off the end.
+            String expected = cursor < mod.entries.size()
+                    ? mod.entries.get(cursor).id() + " was expected next"
+                    : "nothing was expected after it";
+            return "mod " + modName + " registered " + id + " into " + registry
+                    + " out of order: the registry ledger records it at position " + (found + 1)
+                    + " and this boot has already registered up to position " + cursor + " ("
+                    + expected + "). Registry order is the order of record "
+                    + "because the numeric ids a boot mints follow it, and a mod that mints the "
+                    + "same ids in a different sequence renumbers everything after the swap — no "
+                    + "silent drops. Register your content from onInitialize() in a fixed order, "
+                    + "or generate the mod under a new name";
+        }
+        replayCursor.put(modName, found + 1);
+        return null;
+    }
+
+    /**
+     * {@code "<registry>|<id>"} — the one string form both ends of a Lane A
+     * connection hash, defined once, here, so the server and the client cannot
+     * drift apart on the formatting of the thing they are comparing.
+     */
+    public static String orderKey(String registry, String id) {
+        return registry + "|" + id;
+    }
+
+    /**
+     * A short hash over an ordered list of {@link #orderKey} strings.
+     *
+     * <p>SHA-256, truncated to 16 hex characters, and order-sensitive by
+     * construction: this is the value a joining client computes over what it
+     * actually registered and sends back, so a server whose content the client
+     * did not reproduce exactly can refuse the connection <em>at the door</em>
+     * rather than kicking the player ten minutes later over a wire id nobody
+     * can trace back to here.
+     *
+     * <p>Truncation is safe for what it is used for. This is a mismatch
+     * detector between two ends that are trying to agree, not a signature: the
+     * failure it defends against is drift, and the refusal path names the
+     * differing ids anyway.
+     */
+    public static String orderHash(List<String> orderedKeys) {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            // Every JRE ships SHA-256; this catch exists because the checked
+            // exception does, not because the branch is reachable.
+            throw new IllegalStateException("SHA-256 is missing from this JRE", e);
+        }
+        for (String key : orderedKeys) {
+            digest.update(key.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) '\n');
+        }
+        byte[] bytes = digest.digest();
+        StringBuilder out = new StringBuilder(16);
+        for (int i = 0; i < 8; i++) {
+            out.append(Character.forDigit((bytes[i] >> 4) & 0xF, 16));
+            out.append(Character.forDigit(bytes[i] & 0xF, 16));
+        }
+        return out.toString();
     }
 
     /**
@@ -273,7 +542,7 @@ public final class RegistryLedger {
      * wrong stub this whole mechanism exists to avoid.
      */
     public synchronized List<BlockSchema> pinnedBlockSchemas() {
-        List<BlockSchema> out = new ArrayList<>();
+        List<Entry> pinned = new ArrayList<>();
         mods.forEach((name, mod) -> {
             if (!mod.pinned()) {
                 return;
@@ -288,10 +557,15 @@ public final class RegistryLedger {
                             + "Chunks holding it will lose it from their palette on load");
                     continue;
                 }
-                out.add(entry.block());
+                pinned.add(entry);
             }
         });
-        return out;
+        // Sequence order, not map order. Since V4 Phase 2 the sequence is what
+        // "first-assigned" means; the map's iteration order is only the order
+        // the file happened to list mods in, which is the same thing until the
+        // day a mod is renamed and it stops being.
+        pinned.sort(Comparator.comparingInt(Entry::seq));
+        return pinned.stream().map(Entry::block).toList();
     }
 
     /** The block ids {@code modName} registered; empty when it registered none. */
@@ -307,6 +581,18 @@ public final class RegistryLedger {
     public synchronized List<Entry> entriesOf(String modName) {
         ModEntry entry = mods.get(modName);
         return entry == null ? List.of() : entry.entries();
+    }
+
+    /**
+     * The version recorded for {@code modName}, or 0 when it has no entries.
+     *
+     * <p>Informational: a Lane A manifest carries it so a client-side log line
+     * and a refusal message can say which version of which mod an id came from.
+     * Nothing is registered from it.
+     */
+    public synchronized int versionOf(String modName) {
+        ModEntry entry = mods.get(modName);
+        return entry == null ? 0 : entry.version();
     }
 
     /** Mod names with at least one recorded id. */
@@ -344,6 +630,8 @@ public final class RegistryLedger {
     // ------------------------------------------------------------------ io
 
     private static final class Document {
+        String installationId;
+        int nextSeq;
         Map<String, ModEntry> mods = new LinkedHashMap<>();
     }
 
@@ -355,6 +643,8 @@ public final class RegistryLedger {
             Document document = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8),
                     Document.class);
             if (document != null && document.mods != null) {
+                installationId = document.installationId;
+                nextSeq = Math.max(1, document.nextSeq);
                 document.mods.forEach((name, entry) -> {
                     if (entry != null) {
                         if (entry.entries == null) {
@@ -368,6 +658,7 @@ public final class RegistryLedger {
                         mods.put(name, entry);
                     }
                 });
+                numberUnsequencedEntries();
             }
         } catch (IOException | RuntimeException e) {
             // A corrupt ledger must not stop the host booting. Losing a
@@ -382,8 +673,42 @@ public final class RegistryLedger {
         }
     }
 
+    /**
+     * Gives a sequence to every entry a pre-Phase-2 ledger left unnumbered.
+     *
+     * <p>File order is used, and it is the only defensible choice: it is the
+     * order those ids were appended in, because the only writer that ever
+     * appended them wrote them in registration order. Guessing anything else —
+     * sorting by id, say — would invent an ordering for ids that already exist
+     * in somebody's world, which is the exact failure this sequence exists to
+     * prevent.
+     */
+    private void numberUnsequencedEntries() {
+        boolean changed = false;
+        for (ModEntry mod : mods.values()) {
+            for (int i = 0; i < mod.entries.size(); i++) {
+                Entry entry = mod.entries.get(i);
+                if (entry.seq() > 0) {
+                    nextSeq = Math.max(nextSeq, entry.seq() + 1);
+                    continue;
+                }
+                mod.entries.set(i, new Entry(entry.registry(), entry.id(), entry.block(),
+                        nextSeq++));
+                changed = true;
+            }
+        }
+        if (changed) {
+            LOG.info("Numbered the registry ledger's existing entries in file order: it was "
+                    + "written before the ledger became the order of record, and file order is "
+                    + "the order they were appended in");
+            save();
+        }
+    }
+
     private void save() {
         Document document = new Document();
+        document.installationId = installationId;
+        document.nextSeq = nextSeq;
         document.mods.putAll(mods);
         try {
             Files.createDirectories(file.getParent());

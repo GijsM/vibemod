@@ -1,11 +1,6 @@
 package com.gijsm.vibemod.fabric.client;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -15,7 +10,6 @@ import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import net.minecraft.DetectedVersion;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.packs.PackLocationInfo;
@@ -31,10 +25,7 @@ import net.minecraft.server.packs.repository.RepositorySource;
 import com.gijsm.vibemod.fabric.mixin.client.PackRepositoryAccessor;
 import com.gijsm.vibemod.loader.content.ClientReloader;
 import com.gijsm.vibemod.loader.content.ClientResourceSink;
-import com.gijsm.vibemod.loader.content.LoaderModContent;
-import com.gijsm.vibemod.store.ModResources;
-import com.gijsm.vibemod.store.PixelGrid;
-import com.gijsm.vibemod.util.Ids;
+import com.gijsm.vibemod.loader.content.PackTree;
 
 /**
  * One runtime resource pack, shared by every live mod (V3 Phase 2 §D).
@@ -47,15 +38,15 @@ import com.gijsm.vibemod.util.Ids;
  * disassembly). An empty pack contributes nothing, so "always present" costs
  * nothing when no mod ships assets.
  *
- * <p>One tree with a per-mod manifest, rather than one pack per mod. A pack per
- * mod would mean N entries in the player's resource pack screen appearing and
- * vanishing as mods load; a manifest file listing exactly what each mod wrote
- * gives the same exact cleanup with one pack.
- *
- * <p>{@code .png.grid} files are decoded to real PNGs here — see
- * {@link PixelGrid}. The grid itself was validated at generation time, so a
- * broken one is a self-heal round rather than a texture the client rejects;
- * this end still refuses to write a file it cannot decode, and says which one.
+ * <p>V4 Phase 3 halved this class. Everything that was file I/O over a directory
+ * of {@code assets/**} — the per-mod manifests, the {@code .png.grid} decode,
+ * the empty-parent pruning — moved to {@link PackTree} in {@code loader-common},
+ * because the pack server needs exactly the same tree written exactly the same
+ * way and two writers is two manifest formats waiting to drift. What is left
+ * here is what genuinely needs a client and could not move: joining a
+ * {@code PackRepository} that has no public API for it, building a {@code Pack}
+ * through {@code Pack.readMetaAndCreate}, and holding mutations back while a
+ * reload is reading the files.
  */
 public final class FabricClientPacks implements ClientResourceSink, ClientReloader, RepositorySource {
 
@@ -64,9 +55,7 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
     /** The pack id the player would see in the resource pack screen, and the gates assert on. */
     public static final String PACK_ID = "vibemod/respack";
 
-    private final Path root;
-    private final Path manifests;
-    private final Set<String> mods = new LinkedHashSet<>();
+    private final PackTree tree;
 
     /**
      * File mutations that arrived while a reload was in flight, and the flag
@@ -90,12 +79,7 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
     private boolean reloading;
 
     public FabricClientPacks(Path dataFolder) {
-        this.root = dataFolder.resolve("respack");
-        // Beside the pack, never inside it: a stray directory next to `assets/`
-        // is harmless to a PathPackResources, but "harmless" is a claim about
-        // vanilla's directory walk that would be somebody else's problem to
-        // re-check every version.
-        this.manifests = dataFolder.resolve("respack-manifests");
+        this.tree = new PackTree(dataFolder, "VibeMod generated mods", PACK_ID);
     }
 
     /**
@@ -108,19 +92,7 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
      * strongest form.
      */
     public void resetOnClientInit() {
-        try {
-            LoaderModContent.deleteRecursively(root);
-            LoaderModContent.deleteRecursively(manifests);
-            Files.createDirectories(root.resolve("assets"));
-            Files.createDirectories(manifests);
-            Files.writeString(root.resolve("pack.mcmeta"),
-                    LoaderModContent.packMeta("VibeMod generated mods",
-                            DetectedVersion.BUILT_IN.packVersion(PackType.CLIENT_RESOURCES)),
-                    StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
-        mods.clear();
+        tree.reset();
     }
 
     /**
@@ -161,9 +133,10 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
 
     @Override
     public void loadPacks(Consumer<Pack> consumer) {
-        if (!Files.isRegularFile(root.resolve("pack.mcmeta"))) {
+        if (!tree.hasMeta()) {
             return;
         }
+        Path root = tree.root();
         PackLocationInfo location = new PackLocationInfo(PACK_ID,
                 Component.literal("VibeMod mods"), PackSource.BUILT_IN, Optional.empty());
         Pack.ResourcesSupplier supplier = new Pack.ResourcesSupplier() {
@@ -190,91 +163,28 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
 
     @Override
     public boolean install(String modName, Map<String, String> assets) {
-        if (deferIfReloading(() -> doInstall(modName, assets))) {
+        if (deferIfReloading(() -> tree.install(modName, assets))) {
             return true;
         }
-        return doInstall(modName, assets);
-    }
-
-    private boolean doInstall(String modName, Map<String, String> assets) {
-        doRemove(modName);
-        List<String> written = new ArrayList<>();
-        try {
-            Files.createDirectories(root.resolve("assets"));
-            for (Map.Entry<String, String> entry : assets.entrySet()) {
-                String relative = entry.getKey();
-                Path target;
-                if (ModResources.isGridPath(relative)) {
-                    relative = relative.substring(0,
-                            relative.length() - ModResources.GRID_SUFFIX.length()) + ".png";
-                    target = root.resolve(relative);
-                    Files.createDirectories(target.getParent());
-                    Files.write(target, PixelGrid.parse(entry.getValue()).toPng());
-                } else {
-                    target = root.resolve(relative);
-                    Files.createDirectories(target.getParent());
-                    Files.writeString(target, entry.getValue(), StandardCharsets.UTF_8);
-                }
-                written.add(relative);
-            }
-            if (written.isEmpty()) {
-                return false;
-            }
-            Files.createDirectories(manifests);
-            Files.writeString(manifests.resolve(manifestName(modName)),
-                    String.join("\n", written) + "\n", StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException badGrid) {
-            LOG.warning("Could not decode a texture for " + modName + ": " + badGrid.getMessage());
-            return !written.isEmpty();
-        } catch (IOException e) {
-            LOG.log(Level.WARNING, "Could not write client resources for " + modName, e);
-            return !written.isEmpty();
-        }
-        mods.add(modName);
-        LOG.info(modName + " contributed " + written.size() + " file(s) to " + PACK_ID);
-        return true;
+        return tree.install(modName, assets);
     }
 
     @Override
     public boolean remove(String modName) {
-        if (!Files.isRegularFile(manifests.resolve(manifestName(modName)))) {
-            mods.remove(modName);
+        if (!tree.knows(modName)) {
+            tree.forget(modName);
             return false;
         }
-        if (deferIfReloading(() -> doRemove(modName))) {
-            mods.remove(modName);
+        if (deferIfReloading(() -> tree.remove(modName))) {
+            tree.forget(modName);
             return true;
         }
-        return doRemove(modName);
-    }
-
-    private boolean doRemove(String modName) {
-        Path manifest = manifests.resolve(manifestName(modName));
-        if (!Files.isRegularFile(manifest)) {
-            mods.remove(modName);
-            return false;
-        }
-        try {
-            for (String relative : Files.readAllLines(manifest, StandardCharsets.UTF_8)) {
-                if (relative.isBlank()) {
-                    continue;
-                }
-                Path file = root.resolve(relative);
-                Files.deleteIfExists(file);
-                pruneEmptyParents(file.getParent());
-            }
-            Files.deleteIfExists(manifest);
-        } catch (IOException e) {
-            LOG.log(Level.WARNING, "Could not remove client resources for " + modName, e);
-        }
-        mods.remove(modName);
-        LOG.info(modName + " removed its files from " + PACK_ID);
-        return true;
+        return tree.remove(modName);
     }
 
     @Override
     public String describeState() {
-        return "respackMods=" + mods.size() + " respackFiles=" + countFiles();
+        return tree.describeState();
     }
 
     // ------------------------------------------------------------ ClientReloader
@@ -341,58 +251,6 @@ public final class FabricClientPacks implements ClientResourceSink, ClientReload
 
     /** The pack-relative paths one mod currently owns, for gates and diagnostics. */
     public List<String> filesOf(String modName) {
-        Path manifest = manifests.resolve(manifestName(modName));
-        if (!Files.isRegularFile(manifest)) {
-            return List.of();
-        }
-        try {
-            return Files.readAllLines(manifest, StandardCharsets.UTF_8).stream()
-                    .filter(line -> !line.isBlank()).toList();
-        } catch (IOException e) {
-            return List.of();
-        }
-    }
-
-    private static String manifestName(String modName) {
-        return Ids.sanitize(modName, "mod") + ".files";
-    }
-
-    private int countFiles() {
-        Path assets = root.resolve("assets");
-        if (!Files.isDirectory(assets)) {
-            return 0;
-        }
-        try (var walk = Files.walk(assets)) {
-            return (int) walk.filter(Files::isRegularFile).count();
-        } catch (IOException e) {
-            return 0;
-        }
-    }
-
-    /**
-     * Removes now-empty directories up to (but never including) {@code assets/}.
-     *
-     * <p>{@code assets/} itself stays: a {@code PathPackResources} whose
-     * {@code assets/} directory has vanished is a pack that has to be
-     * special-cased, and keeping one empty directory is cheaper than that.
-     */
-    private void pruneEmptyParents(Path from) {
-        Path stopAt = root.resolve("assets");
-        Path current = from;
-        while (current != null && current.startsWith(stopAt) && !current.equals(stopAt)) {
-            try (var entries = Files.list(current)) {
-                if (entries.findAny().isPresent()) {
-                    return;
-                }
-            } catch (IOException e) {
-                return;
-            }
-            try {
-                Files.deleteIfExists(current);
-            } catch (IOException e) {
-                return;
-            }
-            current = current.getParent();
-        }
+        return tree.filesOf(modName);
     }
 }

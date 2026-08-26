@@ -57,6 +57,22 @@ public final class LoaderConfig {
         DEFAULTS.put("errors.stack-frames", 10);
         DEFAULTS.put("debug.default-echo", false);
         DEFAULTS.put("ui.force-chat", false);
+        // V4 Phase 3, the pack server. No Paper counterpart — Paper has no
+        // resource-pack channel of VibeMod's to serve — so these are the first
+        // keys in this file that are Fabric-only, and they are grouped here
+        // rather than interleaved so that stays visible.
+        //
+        // `port` rather than `shared`: sharing the game port works (Polymer
+        // AutoHost does it) and puts an unauthenticated HTTP server on the game
+        // port of every server that installs the mod. `public-url` empty
+        // because there is no safe guess — see FabricPackServer.
+        DEFAULTS.put("packserver.mode", "port");
+        DEFAULTS.put("packserver.port", 25569);
+        DEFAULTS.put("packserver.bind", "0.0.0.0");
+        DEFAULTS.put("packserver.public-url", "");
+        DEFAULTS.put("packserver.required", false);
+        DEFAULTS.put("packserver.prompt", "");
+        DEFAULTS.put("packserver.max-bytes", 33554432);
     }
 
     private final Path file;

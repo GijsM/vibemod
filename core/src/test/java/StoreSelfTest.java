@@ -48,6 +48,7 @@ public class StoreSelfTest {
         testRegistryLedger();
         testBlockSchemaRoundTrip();
         testBlockModIsPinnedNotTombstoned();
+        testLedgerIsTheOrderOfRecord();
         testNullFieldMetaJsonNormalized();
         testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
@@ -374,6 +375,123 @@ public class StoreSelfTest {
 
         System.out.println("PASS: a block schema round-trips through the ledger with order "
                 + "intact, and refuses itself when its state count disagrees");
+    }
+
+    /**
+     * The V4 Phase 2 rule: the ledger, not the disk, is the order of record.
+     *
+     * <p>Lane A works only if a dedicated server and a VibeMod client build the
+     * same registries in the same sequence, and the sequence is only meaningful
+     * if it survives a restart and is enforced against the mod that claims it.
+     * So four things are asserted here, and each one is a different failure:
+     * that a sequence is assigned once and never reassigned; that the order
+     * outlives the file and does not come from the map's iteration order; that a
+     * mod registering out of turn is <em>refused</em> rather than tolerated; and
+     * that the hash both ends compare is order-sensitive, which is the only
+     * property that makes it worth sending.
+     */
+    private static void testLedgerIsTheOrderOfRecord() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "order")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        ledger.record("Alpha", 1, "minecraft:item", "vibemod_alpha:one");
+        ledger.record("Beta", 2, "minecraft:item", "vibemod_beta:two");
+        ledger.record("Alpha", 1, "minecraft:block", "vibemod_alpha:three");
+
+        check("every entry gets a sequence, 1-based and monotonic across mods",
+                ledger.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2, 3)));
+        check("and the global order interleaves mods, because the ids were minted interleaved",
+                ledger.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList()
+                        .equals(List.of("vibemod_alpha:one", "vibemod_beta:two",
+                                "vibemod_alpha:three")));
+        check("restore order is by first recorded id, not by mod name",
+                ledger.restoreOrder().equals(List.of("Alpha", "Beta")));
+        check("a mod's version is readable, for the manifest's log lines",
+                ledger.versionOf("Beta") == 2 && ledger.versionOf("Nobody") == 0);
+
+        String installationId = ledger.installationId();
+        check("an installation id is minted and is a real one", installationId.length() > 8);
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("the installation id survives a restart — it is what tells two servers apart",
+                installationId.equals(reopened.installationId()));
+        check("and so does the sequence, unchanged",
+                reopened.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2, 3)));
+
+        // Re-recording an id must not renumber it: a re-sequenced id IS a
+        // reordered registry, which is the thing the sequence exists to prevent.
+        reopened.record("Alpha", 2, "minecraft:item", "vibemod_alpha:one");
+        check("re-recording an existing id keeps its sequence",
+                reopened.orderedEntries().get(0).seq() == 1);
+        reopened.record("Alpha", 2, "minecraft:item", "vibemod_alpha:four");
+        check("and a genuinely new id is appended at the end of the sequence",
+                reopened.orderedEntries().get(3).id().equals("vibemod_alpha:four")
+                        && reopened.orderedEntries().get(3).seq() == 4);
+
+        // The refusal. A fresh ledger object is a fresh boot, which is exactly
+        // when the replay cursor starts over.
+        com.gijsm.vibemod.store.RegistryLedger booting =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("registering in recorded order is not a problem",
+                booting.orderProblem("Alpha", "minecraft:item", "vibemod_alpha:one") == null);
+        check("nor is skipping an id the mod no longer registers",
+                booting.orderProblem("Alpha", "minecraft:item", "vibemod_alpha:four") == null);
+        String drift = booting.orderProblem("Alpha", "minecraft:block", "vibemod_alpha:three");
+        check("but going back to an earlier id is refused, by name (" + drift + ")",
+                drift != null && drift.contains("vibemod_alpha:three")
+                        && drift.contains("out of order"));
+        check("a mod the ledger has never seen cannot be out of order",
+                booting.orderProblem("BrandNew", "minecraft:item", "vibemod_brandnew:x") == null);
+
+        // The hash both ends compare. Order-sensitive is the whole property.
+        List<String> forward = List.of(
+                com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:one"),
+                com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:two"));
+        List<String> swapped = List.of(forward.get(1), forward.get(0));
+        check("the order hash is stable for the same list",
+                com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)
+                        .equals(com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)));
+        check("and different for the same ids in a different order",
+                !com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)
+                        .equals(com.gijsm.vibemod.store.RegistryLedger.orderHash(swapped)));
+        check("the same path in two registries is two different keys",
+                !com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:x")
+                        .equals(com.gijsm.vibemod.store.RegistryLedger
+                                .orderKey("minecraft:block", "a:x")));
+        check("an empty list still hashes to something a client can send",
+                com.gijsm.vibemod.store.RegistryLedger.orderHash(List.of()).length() == 16);
+
+        // A ledger written before the sequence existed: numbered in FILE order,
+        // because that is the order those ids were appended in and any other
+        // guess would invent an ordering for ids already in somebody's world.
+        java.nio.file.Path legacyFile = Files.createTempDirectory(scratchRoot, "legacy-order")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        Files.writeString(legacyFile, """
+                {"mods":{"Old":{"state":"live","version":1,"entries":[
+                  {"registry":"minecraft:item","id":"vibemod_old:first"},
+                  {"registry":"minecraft:item","id":"vibemod_old:second"}]}}}
+                """, StandardCharsets.UTF_8);
+        com.gijsm.vibemod.store.RegistryLedger legacy =
+                new com.gijsm.vibemod.store.RegistryLedger(legacyFile);
+        check("a pre-sequence ledger is numbered in file order",
+                legacy.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList()
+                        .equals(List.of("vibemod_old:first", "vibemod_old:second")));
+        check("and the numbering is written back, so it is the same next boot",
+                new com.gijsm.vibemod.store.RegistryLedger(legacyFile).orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2)));
+
+        System.out.println("PASS: the registry ledger is the order of record — sequences survive "
+                + "a restart, a mod registering out of turn is refused, and the order hash both "
+                + "ends compare changes when the order does");
     }
 
     /**

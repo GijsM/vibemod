@@ -42,6 +42,19 @@ public final class ReloadCoordinator {
     private final MinecraftServer server;
     /** Null on a dedicated server: there is no client repository to reload. */
     private final ClientReloader clientReloader;
+    /**
+     * The pack server (V4 Phase 3), or null when there is none.
+     *
+     * <p>Shares the client channel rather than getting a third one, because it
+     * is the same event with a different delivery: a mod's {@code assets/**}
+     * changed, and something has to rebuild. On a client that something is a
+     * resource reload; on a dedicated server it is a re-zip. Both cost real work
+     * per call and both are triggered by the same eight-mod boot restore, so
+     * both want the same {@value #DEBOUNCE_TICKS}-tick coalescing — and giving
+     * the pack server its own timer would mean two timers that always fire
+     * together and can never both be non-null.
+     */
+    private final ServerResourceSink serverSink;
 
     /**
      * World datapack folder names VibeMod currently owns. Folder names rather
@@ -62,13 +75,24 @@ public final class ReloadCoordinator {
     private String lastReason = "-";
 
     public ReloadCoordinator(MinecraftServer server, ClientReloader clientReloader) {
+        this(server, clientReloader, null);
+    }
+
+    public ReloadCoordinator(MinecraftServer server, ClientReloader clientReloader,
+                             ServerResourceSink serverSink) {
         this.server = server;
         this.clientReloader = clientReloader;
+        this.serverSink = serverSink;
     }
 
     /** True when this host can reload the client's resource packs at all. */
     public boolean hasClient() {
         return clientReloader != null;
+    }
+
+    /** True when this host publishes {@code assets/**} to connecting clients (V4 Phase 3). */
+    public boolean hasPackServer() {
+        return serverSink != null;
     }
 
     /** Records that VibeMod owns the world datapack folder {@code folderName}. */
@@ -88,9 +112,14 @@ public final class ReloadCoordinator {
         lastReason = reason;
     }
 
-    /** Arms (or re-arms) the client-side resource reload. No-op with no client. */
+    /**
+     * Arms (or re-arms) whatever this host does when {@code assets/**} change:
+     * a client resource reload, or a pack-server re-zip (V4 Phase 3). No-op on a
+     * host with neither, which is a dedicated server running
+     * {@code packserver.mode=off}.
+     */
     public synchronized void markClientDirty(String reason) {
-        if (clientReloader == null) {
+        if (clientReloader == null && serverSink == null) {
             return;
         }
         clientDirty = true;
@@ -135,6 +164,7 @@ public final class ReloadCoordinator {
                 + " serverPending=" + Math.max(0, serverDirty ? serverTimer : 0)
                 + " clientPending=" + Math.max(0, clientDirty ? clientTimer : 0)
                 + " ownedPacks=" + ownedPacks.size()
+                + (serverSink == null ? "" : " " + serverSink.describeState())
                 + " lastReload=" + lastReason;
     }
 
@@ -227,11 +257,35 @@ public final class ReloadCoordinator {
 
     // ------------------------------------------------------------------ client
 
+    /**
+     * The debounced answer to "a mod's assets changed".
+     *
+     * <p>On a client that is a resource reload. On a dedicated server it is the
+     * pack server rebuilding its zip — which is where V3's early return used to
+     * be, and the early return was the whole reason `assets/**` were inert
+     * there. The rebuild deliberately does <em>not</em> push to anybody who is
+     * already playing: a mid-play push is a full client resource-stack reload,
+     * 2 to 30 seconds of frozen game (MC-12257), for a texture that will be
+     * there next time they join anyway.
+     */
     private void flushClient() {
         ClientReloader reloader = clientReloader;
         if (reloader == null) {
+            ServerResourceSink sink = serverSink;
+            if (sink != null) {
+                LOG.info("Rebuilding the served resource pack (" + lastReason + ")");
+                try {
+                    sink.rebuild();
+                } catch (Throwable t) {
+                    LOG.log(Level.WARNING, "Rebuilding the served resource pack threw", t);
+                }
+            }
             synchronized (this) {
                 clientReloading = false;
+                clientReloads++;
+                if (clientDirty) {
+                    clientTimer = DEBOUNCE_TICKS;
+                }
             }
             return;
         }
