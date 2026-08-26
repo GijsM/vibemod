@@ -37,6 +37,7 @@ import com.gijsm.vibemod.loader.ModAttribution;
 import com.gijsm.vibemod.loader.content.ReloadCoordinator;
 import com.gijsm.vibemod.platform.Registration;
 import com.gijsm.vibemod.runtime.ModHandle;
+import com.gijsm.vibemod.store.BlockSchema;
 import com.gijsm.vibemod.store.ModResources;
 import com.gijsm.vibemod.store.RegistryLedger;
 
@@ -93,6 +94,17 @@ import com.gijsm.vibemod.store.RegistryLedger;
  * <p>See {@link RegistryLedger}. Draining a mod removes its items from the
  * creative tabs and drains everything they could <em>do</em>; the id itself
  * stays, and the ledger is the honest record of that.
+ *
+ * <h2>4. A block id is not even revocable at the next boot (V4 Phase 1)</h2>
+ *
+ * <p>Deleting a mod tombstones its ids, on the premise that vanilla drops an
+ * unknown id from a save. That premise holds for items and fails for
+ * blockstates: a section palette is a {@code ListCodec}, which drops what it
+ * cannot decode and hands the <em>shortened</em> list to {@code promotePartial},
+ * and packed data indexes that palette by position — so one missing block
+ * renumbers everything after it. A deleted block mod is therefore <b>pinned</b>
+ * rather than tombstoned, and {@link #replayPinnedBlocks} registers an inert
+ * {@link StubBlock} for each of its block ids on every subsequent boot.
  */
 public final class RegistrySeam implements RegistryTarget {
 
@@ -180,6 +192,15 @@ public final class RegistrySeam implements RegistryTarget {
      * do not either.
      */
     private final AtomicInteger blockStatesAppended = new AtomicInteger();
+    /**
+     * Inert stubs registered for pinned block ids this boot (V4 Phase 1).
+     *
+     * <p>Separate from {@code live} on purpose: a stub has no mod behind it, so
+     * it is not one mod's live entry and must not fall out of the count when
+     * some mod is disabled. It is closer in kind to {@link #blockStatesAppended}
+     * — a fact about the process, monotonic for the life of it.
+     */
+    private final AtomicInteger pinnedStubs = new AtomicInteger();
     private int windowDepth;
     private int registeredInWindow;
     /** {@code DATA_COMPONENT_INITIALIZERS} size when the window opened, or -1 if unreadable. */
@@ -474,7 +495,15 @@ public final class RegistrySeam implements RegistryTarget {
         Live entry = new Live(handle.name(), registryKey.identifier().toString(), canonical, value);
         live.computeIfAbsent(handle.name(), ignored -> new ArrayList<>()).add(entry);
         if (book != null) {
-            book.record(handle.name(), handle.version(), entry.registry(), canonical.toString());
+            // Registration time is the ONLY moment the state schema can be read:
+            // the live StateDefinition is the only copy of it, and the class that
+            // built it goes away with the mod. Recorded now so that deleting the
+            // mod later has something to pin. See BlockSchema and StubBlock.
+            BlockSchema schema = value instanceof Block block && Registries.BLOCK.equals(registryKey)
+                    ? StubBlock.schemaOf(canonical, block)
+                    : null;
+            book.record(handle.name(), handle.version(), entry.registry(), canonical.toString(),
+                    schema);
         }
         handle.track(ModHandle.Kind.CONTENT, Registration.of(() -> forget(entry)));
         if (value instanceof EntityType<?> type) {
@@ -640,11 +669,117 @@ public final class RegistrySeam implements RegistryTarget {
         }
     }
 
-    /** Called when a mod is unloaded from the store: its ids are never coming back. */
+    /**
+     * Called when a mod is unloaded from the store: its ids are never coming
+     * back as <em>its</em> ids.
+     *
+     * <p>Whether that means {@code tombstone} or {@code pinned} is the ledger's
+     * decision and not this seam's, deliberately: the rule is a property of what
+     * was registered ("did any of it land in {@code minecraft:block}?"), so it
+     * belongs where the record of what was registered lives, and no caller can
+     * get it wrong by passing the wrong flag. See {@link RegistryLedger#tombstone}.
+     */
     public void tombstone(String modName) {
         RegistryLedger book = ledger;
         if (book != null) {
             book.tombstone(modName);
+        }
+    }
+
+    // ------------------------------------------------------------------ pinned replay
+
+    /**
+     * Registers an inert stub for every pinned block id (V4 Phase 1).
+     *
+     * <p>This is the other half of the pin. A deleted block mod's ids cannot
+     * simply be absent at the next boot: a section palette is a
+     * {@code ListCodec}, which drops an entry it cannot decode and hands the
+     * <em>shortened</em> list to {@code promotePartial}, and packed chunk data
+     * indexes that palette by position — so one missing block renumbers every
+     * entry after it and rewrites that section's terrain, quietly. See
+     * {@link RegistryLedger}'s class comment.
+     *
+     * <p>Three things about where this is called from are load-bearing:
+     *
+     * <ul>
+     *   <li><b>Inside the registration window.</b> {@code Block.<init>} calls
+     *       {@code createIntrusiveHolder}, which throws once the registry is
+     *       frozen — a stub is constructed exactly the way a mod's block is, so
+     *       it needs exactly the same window. {@link #withWindow} is reused
+     *       rather than reimplemented, so the close does the tag refresh, the
+     *       component lookup rebuild and the coordinator's reload for stubs too.</li>
+     *   <li><b>Before any live mod is restored</b>, so the pinned ids are minted
+     *       in first-assigned order. Ledger order, not disk order.</li>
+     *   <li><b>Through {@link BlockRegistration#admit}</b>, the same path a live
+     *       block takes. A stub's states are real blockstates and cost real
+     *       budget; skipping the guard here would be the one place the palette
+     *       arithmetic silently stopped adding up.</li>
+     * </ul>
+     *
+     * <p>Failures are per-id and loud rather than fatal. A stub that cannot be
+     * built is one id whose chunks will shift; a throw out of here is a server
+     * that will not start, which repairs nothing and loses the rest of the pins
+     * as well.
+     *
+     * @return how many stubs were registered
+     */
+    public int replayPinnedBlocks(RegistryLedger book) {
+        if (book == null) {
+            return 0;
+        }
+        List<BlockSchema> pinned = book.pinnedBlockSchemas();
+        if (pinned.isEmpty()) {
+            return 0;
+        }
+        int[] registered = {0};
+        withWindow(() -> {
+            for (BlockSchema schema : pinned) {
+                if (replayPinnedBlock(schema)) {
+                    registered[0]++;
+                }
+            }
+        });
+        LOG.info("Replayed " + registered[0] + " of " + pinned.size() + " pinned block id(s) as "
+                + "inert stubs, so chunks holding them still decode");
+        return registered[0];
+    }
+
+    /** One pinned id. Returns false, having said why, when it could not be replayed. */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private boolean replayPinnedBlock(BlockSchema schema) {
+        Identifier id;
+        try {
+            id = Identifier.parse(schema.id());
+        } catch (RuntimeException e) {
+            LOG.log(Level.SEVERE, "Pinned block id " + schema.id() + " is not a valid Identifier, "
+                    + "so no stub can be registered for it; chunks holding it will lose it from "
+                    + "their palette on load", e);
+            return false;
+        }
+        if (BuiltInRegistries.BLOCK.containsKey(id)) {
+            // Not reachable through the normal path — a pinned mod is
+            // isTombstoned, so register() refuses its ids — but a vanilla or
+            // third-party mod could own this id now, and overwriting it would be
+            // strictly worse than the shift this replay exists to prevent.
+            LOG.warning("Pinned block " + id + " is already registered by something else; "
+                    + "leaving it alone rather than replacing it with a stub");
+            return false;
+        }
+        try {
+            ResourceKey<Block> key = ResourceKey.create(Registries.BLOCK, id);
+            StubBlock stub = StubBlock.create(schema, key);
+            BlockRegistration.admit(paletteGuard, "(pinned)", id, stub);
+            ((MappedRegistry) BuiltInRegistries.BLOCK).register(key, stub, RegistrationInfo.BUILT_IN);
+            registeredInWindow++;
+            blockStatesAppended.addAndGet(BlockRegistration.appendStates(stub));
+            pinnedStubs.incrementAndGet();
+            LOG.info("Pinned block " + id + " is back as an inert stub (" + schema + ")");
+            return true;
+        } catch (Throwable t) {
+            LOG.log(Level.SEVERE, "Could not replay pinned block " + id + "; chunks holding it "
+                    + "will lose it from their palette on load, which shifts every palette entry "
+                    + "after it", t);
+            return false;
         }
     }
 
@@ -769,8 +904,9 @@ public final class RegistrySeam implements RegistryTarget {
     /**
      * Counts for the gates:
      * {@code "registryMods=1 registryItems=1 registryBlocks=1 registryBlockStates=1
-     * registryEntityTypes=0 registryAttributes=0 tabRebuilds=1 ledgerMods=1 ledgerIds=1
-     * ledgerTombstones=0 paletteBits=15 paletteBudget=402 paletteRepacks=0"}.
+     * registryPinnedStubs=0 registryEntityTypes=0 registryAttributes=0 tabRebuilds=1
+     * ledgerMods=1 ledgerIds=1 ledgerTombstones=0 ledgerPinned=0 paletteBits=15
+     * paletteBudget=402 paletteRepacks=0"}.
      *
      * <p>{@code name=value} throughout, and the names stay stable, because the
      * gates match on full prefixes of this string rather than parsing it.
@@ -807,10 +943,12 @@ public final class RegistrySeam implements RegistryTarget {
                 + " registryItems=" + items
                 + " registryBlocks=" + blocks
                 + " registryBlockStates=" + blockStatesAppended.get()
+                + " registryPinnedStubs=" + pinnedStubs.get()
                 + " registryEntityTypes=" + entities
                 + " registryAttributes=" + suppliers
                 + " tabRebuilds=" + tabRebuilds.get()
-                + " " + (book == null ? "ledgerMods=0 ledgerIds=0 ledgerTombstones=0"
+                + " " + (book == null
+                        ? "ledgerMods=0 ledgerIds=0 ledgerTombstones=0 ledgerPinned=0"
                         : book.describeState())
                 + (guard == null ? "" : " " + guard.describeState());
     }

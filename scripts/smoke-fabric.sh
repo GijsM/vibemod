@@ -493,6 +493,70 @@ open(sys.argv[1], "w").write(json.dumps({
 }, indent=2))
 META5
 
+# ------------------------------------------------------------------ V4 Phase 1
+#
+# BlockCanary: the same claim as RegistryCanary, one registry over. Blocks are
+# the new content type in V4 Phase 1 and they are refused here for exactly the
+# reason items are — this host is dedicated — but the refusal has to NAME the
+# block registry, because a block is the one entry whose id can never be taken
+# back: a saved section indexes its palette by position, so an id that stops
+# existing renumbers every entry after it and scrambles terrain (finding 3c).
+# "Refused, and we said which registry" is the difference between an operator
+# who can act and one who files a bug about missing blocks.
+mkdir -p "$RUN/vibemod/mods/BlockCanary/v1"
+cat > "$RUN/vibemod/mods/BlockCanary/v1/BlockCanary.java" <<'BLOCK'
+package vibemod.blockcanary;
+
+import net.fabricmc.api.ModInitializer;
+
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+
+/** No VibeMod import: an ordinary Fabric mod that registers an ordinary block. */
+public final class BlockCanary implements ModInitializer {
+
+    public static final Identifier ID =
+            Identifier.fromNamespaceAndPath("vibemod_blockcanary", "canary_block");
+
+    public static Block canaryBlock;
+
+    @Override
+    public void onInitialize() {
+        // A plain cube with no properties: exactly one blockstate, which is the
+        // shape the prompt profile teaches. The Block is CONSTRUCTED before the
+        // refusal is reached — Block.<init> takes an intrusive holder the same
+        // way Item.<init> does — so this also proves the window discards the
+        // orphan instead of failing the next freeze over it.
+        canaryBlock = Registry.register(BuiltInRegistries.BLOCK, ID, new Block(
+                BlockBehaviour.Properties.of()
+                        .strength(1.0F)
+                        .setId(ResourceKey.create(Registries.BLOCK, ID))));
+        System.out.println("block-canary-registered");
+    }
+}
+BLOCK
+
+python3 - "$RUN/vibemod/mods/BlockCanary/meta.json" <<'META6'
+import json, sys, time
+open(sys.argv[1], "w").write(json.dumps({
+    "schema": 3, "platform": "fabric", "mcVersion": "26.2", "side": "server",
+    "name": "BlockCanary",
+    "description": "A plain Fabric mod that registers a real block; refused on a dedicated server.",
+    "usage": "", "manual": "", "icon": "STONE",
+    "mainClass": "vibemod.blockcanary.BlockCanary",
+    "currentVersion": 1, "enabled": True, "creator": "smoke",
+    "versions": [{"version": 1, "prompt": "the V4 block canary", "model": "none",
+                  "createdAt": int(time.time() * 1000), "changelog": "First block canary.",
+                  "kind": "create", "costUsd": 0.0, "requester": "smoke"}],
+    "config": [], "configValues": {},
+}, indent=2))
+META6
+
 # A second mod, stamped for the WRONG platform, so the §5 refusal is gated too.
 mkdir -p "$RUN/vibemod/mods/WrongPlatform/v1"
 cat > "$RUN/vibemod/mods/WrongPlatform/v1/WrongPlatform.java" <<'WRONG'
@@ -576,6 +640,11 @@ for i in $(seq 1 180); do
     && { note "registry canary refused after ${i}s"; break; }
   sleep 1
 done
+for i in $(seq 1 180); do
+  grep -q 'Refusing registry content from BlockCanary' "$LOG" 2>/dev/null \
+    && { note "block canary refused after ${i}s"; break; }
+  sleep 1
+done
 # V3 Phase 2 §C: the datapack is materialized during the load, but the reload
 # that makes it LIVE is debounced by 40 ticks and only runs once the server is
 # ticking. Nothing below is true until it has.
@@ -605,6 +674,41 @@ assert "the foreign-platform mod was skipped, not compiled" \
   in_file "$LOG" 'Skipping mod WrongPlatform: generated for paper'
 assert "no mixin failed to apply" not_in_file "$LOG" 'Mixin apply failed'
 assert "nothing threw during boot" not_in_file "$LOG" 'Exception in thread'
+
+# ------------------------------------------------- V4 Phase 1: the palette probe
+#
+# The probe is the honest replacement for a headroom figure computed from data
+# dumps, so the assertion has to be about ARITHMETIC and not about a number:
+# states + spare == 2^bits is true on every version, and 32366 is true on
+# exactly one. Hard-coding the count here would turn the next Mojang release
+# into a red gate that says nothing about VibeMod.
+note "asserting on the V4 palette probe (V4 Phase 1)"
+PROBE_LINE="$(grep -m1 -oE 'blockStates=[0-9]+ paletteBits=[0-9]+ paletteBudget=[0-9]+' "$LOG" || true)"
+P_STATES="${PROBE_LINE#blockStates=}"; P_STATES="${P_STATES%% *}"
+P_REST="${PROBE_LINE#*paletteBits=}"; P_BITS="${P_REST%% *}"
+P_BUDGET="${PROBE_LINE##*paletteBudget=}"
+assert "the palette probe ran at server start" in_file "$LOG" 'block palette: blockStates='
+assert "and its three numbers parsed" test -n "$PROBE_LINE"
+assert "the probe's arithmetic is self-consistent (${P_STATES:-?} + ${P_BUDGET:-?} == 2^${P_BITS:-?})" \
+  test "$((P_STATES + P_BUDGET))" -eq "$((1 << P_BITS))"
+assert "the probe says how many states are left before the palette has to widen" \
+  in_file "$LOG" 'before the global palette has to widen to'
+# Informational, deliberately: a version bump that moves the blockstate count
+# must be VISIBLE without being a failure, because the budget is measured at
+# runtime and the gate above already proves it adds up.
+if [[ "$P_STATES" == "32366" ]]; then
+  note "blockstate count is 32366, the 26.2 figure this phase was designed against"
+else
+  note "NOTE: blockstate count is ${P_STATES:-unknown}, not the 32366 that V4 Phase 1 was"
+  note "      designed against. Not a failure — the budget is read live off the registry —"
+  note "      but the headroom table in the V4 plan is now describing a different version."
+fi
+# Nothing in this gate registers a block, so nothing may cross the boundary. If
+# this ever fires, some other assertion below is measuring a widened palette.
+assert "nothing in this gate crossed the palette boundary" \
+  not_in_file "$LOG" 'crossing the global block palette boundary'
+assert "so the straggler watch never armed either" \
+  not_in_file "$LOG" 'watching for straggler chunk sections'
 
 note "asserting on the V3 native canary (the thesis test)"
 assert "the bytecode seam was installed" in_file "$LOG" 'Bytecode seams:'
@@ -898,9 +1002,28 @@ assert "so no later datapack reload was poisoned by it" \
 assert "and the orphaned item object was discarded, loudly" \
   in_file "$LOG" 'constructed-but-unregistered minecraft:item object(s)'
 
+# V4 Phase 1: the same policy, one registry over. Extended here rather than in a
+# section of its own, because it IS the same refusal — what is new is that it
+# has to name the block registry, and that a refused Block leaves the same kind
+# of orphan a refused Item does.
+assert "the same refusal covers blocks" \
+  in_file "$LOG" 'Refusing registry content from BlockCanary'
+assert "the block registration failed the mod's LOAD too" \
+  in_file "$LOG" 'Failed to start BlockCanary: onInitialize failed for mod BlockCanary'
+assert "the block canary's onInitialize never got past the refusal" \
+  not_in_file "$LOG" 'block-canary-registered'
+# The orphan a refused BLOCK leaves. Block.<init> takes an intrusive holder
+# exactly as Item.<init> does, so the window has to discard one of these too —
+# and vanilla would fail the next freeze over it rather than ignore it.
+assert "the refused block's orphaned intrusive holder was discarded, loudly, and NAMED as a block" \
+  in_file "$LOG" 'constructed-but-unregistered minecraft:block object(s)'
+assert "no blockstate id was minted for a block that was refused" \
+  not_in_file "$LOG" 'crossing the global block palette boundary'
+
 RRCON="$RUN/registry.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" \
-  "vibe errors RegistryCanary" "vibe info RegistryCanary" | tee "$RRCON"
+  "vibe errors RegistryCanary" "vibe info RegistryCanary" \
+  "vibe errors BlockCanary" "vibe info BlockCanary" | tee "$RRCON"
 assert "the refusal is journalled where /vibe errors can show it" \
   in_file "$RRCON" 'singleplayer/LAN-host only'
 assert "and it is journalled as an onInitialize failure, not a crash" \
@@ -910,6 +1033,12 @@ assert "and it is journalled as an onInitialize failure, not a crash" \
 # What must be true is that nothing is LIVE, which the install card says.
 assert "and the refused mod is not live" \
   in_file "$RRCON" 'not currently loaded'
+# The half that matters for V4: the journalled refusal has to say WHICH registry
+# it refused. "Registry content is refused here" leaves an operator guessing;
+# "into minecraft:block" tells them the mod wanted a block and this host cannot
+# have one.
+assert "the block refusal names the block registry, not just 'registry content'" \
+  in_file "$RRCON" 'into minecraft:block on a dedicated server'
 
 cleanup
 trap - EXIT

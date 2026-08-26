@@ -26,6 +26,7 @@ import net.minecraft.world.level.chunk.Strategy;
 import com.gijsm.vibemod.fabric.mixin.ChunkMapAccessor;
 import com.gijsm.vibemod.fabric.mixin.LevelChunkSectionAccessor;
 import com.gijsm.vibemod.fabric.mixin.StrategyAccessor;
+import com.gijsm.vibemod.loader.content.ReloadCoordinator;
 
 /**
  * The one thing that stands between a generated block and a corrupted world
@@ -96,6 +97,25 @@ import com.gijsm.vibemod.fabric.mixin.StrategyAccessor;
  * rebuilds at the current width on load. Staleness only bites on a live write or
  * a live send, and the crossing closes both.
  *
+ * <h2>The straggler watch</h2>
+ *
+ * <p>One gap is left over, and it is stated here rather than hidden. The sweep
+ * in step 3 walks the chunks reachable from {@code ChunkMap}; a
+ * {@code ProtoChunk} that a worldgen worker has <em>already</em> promoted past 8
+ * bits is not one of them. Widening the {@code Strategy} fixes every
+ * <em>future</em> promotion — that is the point of mutating the strategy rather
+ * than swapping the Level's factory — but a container that promoted before the
+ * crossing still holds a {@code SimpleBitStorage} sized at the old width, and
+ * the next wide write into it throws out of
+ * {@code Validate.inclusiveBetween}.
+ *
+ * <p>Such a chunk is invisible only for as long as the worker owns it: the
+ * moment it is handed back it appears in {@code ChunkMap} like any other. So
+ * {@link #tick} re-runs the same sweep predicate for
+ * {@value #WATCH_TICKS} ticks after a crossing and repacks whatever surfaces,
+ * naming each one. Disarmed — which is every tick of a normal server's life —
+ * it is a single volatile read.
+ *
  * <p><b>Threading:</b> server thread only, inside the registration window, where
  * chunk ticking is not concurrent. {@code PalettedContainer.pack} goes through
  * the container's own {@code ThreadingDetector}, so a worker that touches one
@@ -119,10 +139,41 @@ public final class PaletteGuard {
     /** Below this much remaining headroom, say so: the next block is likely to cross. */
     private static final int LOW_BUDGET_WARNING = 64;
 
+    /**
+     * How long the straggler watch stays armed after a crossing.
+     *
+     * <p>Borrowed from {@link ReloadCoordinator#DEBOUNCE_TICKS} rather than
+     * chosen, because it is the same two seconds and the same question: how long
+     * does a burst of work take to settle before it is safe to stop looking?
+     * Reading it from there means the two budgets cannot drift apart by
+     * accident.
+     */
+    private static final int WATCH_TICKS = ReloadCoordinator.DEBOUNCE_TICKS;
+
     private final Supplier<MinecraftServer> server;
 
     /** Sections re-encoded across every crossing this process has done. */
     private int repacks;
+
+    /**
+     * Ticks left on the straggler watch, or 0 when it is disarmed.
+     *
+     * <p>Volatile, and that is the whole per-tick cost when nothing is armed:
+     * one read of a field that is almost always 0, and a return. It is written
+     * from the crossing (server thread, inside the registration window) and read
+     * and decremented from {@code END_SERVER_TICK} (server thread), so the
+     * non-atomic decrement is safe by confinement rather than by luck.
+     */
+    private volatile int watchTicks;
+
+    /** The width the armed watch is repacking stragglers to. */
+    private int watchBits;
+
+    /** Sections the watch caught after a crossing had already swept, since boot. */
+    private volatile int watchRepacks;
+
+    /** The same, for the window currently armed — what the closing line reports. */
+    private int watchWindowRepacks;
 
     public PaletteGuard(Supplier<MinecraftServer> server) {
         this.server = server;
@@ -229,9 +280,62 @@ public final class PaletteGuard {
         cross(live, oldBits, newBits, who);
     }
 
-    /** e.g. {@code "paletteBits=15 paletteBudget=402 paletteRepacks=0"}. */
+    /**
+     * One tick of the post-crossing straggler watch, from the host's existing
+     * {@code END_SERVER_TICK} subscription.
+     *
+     * <p>Disarmed, this is a volatile read and a return — it rides that
+     * subscription for the same reason {@link ReloadCoordinator#tick()} does,
+     * and must cost a server that never crosses the boundary nothing at all.
+     *
+     * <p>Armed, it re-runs the crossing's own sweep predicate over the chunks
+     * {@code ChunkMap} can reach <em>now</em>. That is the entire mechanism: a
+     * {@code ProtoChunk} the sweep could not see was invisible only because a
+     * worldgen worker held it, and it becomes reachable the moment the worker
+     * hands it back. Each catch is named, because a silent repack here would be
+     * the one piece of evidence that the gap is real.
+     */
+    public void tick() {
+        if (watchTicks <= 0) {
+            return;
+        }
+        MinecraftServer live = server.get();
+        if (live == null) {
+            // The world went away under the watch. Nothing left to sweep, and
+            // the next crossing arms a fresh one against a fresh set of levels.
+            watchTicks = 0;
+            return;
+        }
+
+        int caught = 0;
+        for (ServerLevel level : live.getAllLevels()) {
+            caught += repack(level, watchBits, true);
+        }
+        if (caught > 0) {
+            // Counted apart from `repacks` on purpose: the two numbers answer
+            // different questions. `paletteRepacks` is how much work the
+            // crossing itself did; `paletteWatchRepacks` is how often the sweep
+            // was not enough, which is the only evidence that this watch earns
+            // its place.
+            watchRepacks += caught;
+            watchWindowRepacks += caught;
+        }
+
+        if (--watchTicks <= 0) {
+            LOG.info("block palette straggler watch closed after " + WATCH_TICKS + " ticks at "
+                    + watchBits + " bits: " + watchWindowRepacks + " late section(s) re-encoded"
+                    + " (" + watchRepacks + " since boot)");
+        }
+    }
+
+    /**
+     * e.g. {@code "paletteBits=15 paletteBudget=402 paletteRepacks=0
+     * paletteWatchRepacks=0"}.
+     */
     public String describeState() {
-        return "paletteBits=" + bits() + " paletteBudget=" + budget() + " paletteRepacks=" + repacks;
+        return "paletteBits=" + bits() + " paletteBudget=" + budget()
+                + " paletteRepacks=" + repacks
+                + " paletteWatchRepacks=" + watchRepacks;
     }
 
     // ------------------------------------------------------------- crossing
@@ -267,7 +371,7 @@ public final class PaletteGuard {
         //    rebuilds at the current width on load.
         int repacked = 0;
         for (ServerLevel level : live.getAllLevels()) {
-            repacked += repack(level, newBits);
+            repacked += repack(level, newBits, false);
         }
         repacks += repacked;
 
@@ -280,6 +384,17 @@ public final class PaletteGuard {
 
         LOG.info("global block palette is now " + newBits + " bits: " + repacked
                 + " sections re-encoded, " + resent + " chunk sends queued");
+
+        // 5. And keep looking, because step 3 could only see the chunks
+        //    ChunkMap holds. A ProtoChunk a worldgen worker had already promoted
+        //    past 8 bits is still carrying an old-width SimpleBitStorage, and it
+        //    only becomes reachable when the worker hands it back.
+        watchBits = newBits;
+        watchWindowRepacks = 0;
+        watchTicks = WATCH_TICKS;
+        LOG.info("watching for straggler chunk sections for " + WATCH_TICKS + " ticks: a ProtoChunk a"
+                + " worldgen worker had already promoted past 8 bits was not reachable from ChunkMap"
+                + " and still holds a " + oldBits + "-bit storage until it is handed back");
     }
 
     private static void widen(Strategy<BlockState> strategy, int newBits) {
@@ -297,8 +412,12 @@ public final class PaletteGuard {
      * container is on a local palette holding object references and cannot care
      * what the global width is. {@code != newBits} skips the ones a previous
      * crossing already fixed.
+     *
+     * <p>{@code logEach} is off for the crossing's own sweep, which can touch
+     * thousands of sections and reports one total, and on for the straggler
+     * watch, where every catch is news.
      */
-    private int repack(ServerLevel level, int newBits) {
+    private int repack(ServerLevel level, int newBits, boolean logEach) {
         Strategy<BlockState> strategy = level.palettedContainerFactory().blockStatesStrategy();
         int repacked = 0;
 
@@ -308,7 +427,8 @@ public final class PaletteGuard {
                     continue;
                 }
                 PalettedContainer<BlockState> states = section.getStates();
-                if (states.bitsPerEntry() <= 8 || states.bitsPerEntry() == newBits) {
+                int wasBits = states.bitsPerEntry();
+                if (wasBits <= 8 || wasBits == newBits) {
                     continue;
                 }
                 PalettedContainerRO.PackedData<BlockState> packed = states.pack(strategy);
@@ -319,6 +439,11 @@ public final class PaletteGuard {
                                 + level.dimension().identifier() + " at " + chunk.getPos() + ": " + reason));
                 ((LevelChunkSectionAccessor) section).setStates(rebuilt);
                 repacked++;
+                if (logEach) {
+                    LOG.info("straggler chunk section re-encoded: " + level.dimension().identifier()
+                            + " " + chunk.getPos() + " was " + wasBits + " bits, now " + newBits
+                            + " — a worldgen worker had promoted it before the crossing swept");
+                }
             }
         }
         return repacked;

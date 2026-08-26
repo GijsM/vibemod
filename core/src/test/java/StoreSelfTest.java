@@ -46,6 +46,8 @@ public class StoreSelfTest {
         testResourceFilesRoundTripAndNamespaceRewrite();
         testPixelGridEncoding();
         testRegistryLedger();
+        testBlockSchemaRoundTrip();
+        testBlockModIsPinnedNotTombstoned();
         testNullFieldMetaJsonNormalized();
         testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
@@ -306,6 +308,142 @@ public class StoreSelfTest {
 
         System.out.println("PASS: the registry ledger records ids, tombstones an unloaded mod, "
                 + "and survives a restart");
+    }
+
+    /**
+     * The block state schema (V4 Phase 1): it survives the ledger's JSON
+     * round-trip with property AND value order intact, and it refuses itself
+     * when the recorded state count disagrees with the recorded properties.
+     *
+     * <p>Order is the point. A save records a state as its property names and
+     * value strings, and the stub rebuilt from this record has to decode those
+     * to the same state — so a round-trip that preserved the names but scrambled
+     * the value order would pass a naive equality check and still hand a player
+     * the wrong block. The count check is the other half: it is the only thing
+     * that can catch a schema that is internally well-formed and still not the
+     * original's, and a wrong stub is worse than a missing one.
+     */
+    private static void testBlockSchemaRoundTrip() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "schema")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        // Deliberately NOT alphabetical within the property: "north" before
+        // "east" is what a real EnumProperty's declaration order can look like,
+        // and it is exactly what a sort would silently destroy.
+        com.gijsm.vibemod.store.BlockSchema schema = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault",
+                List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("facing",
+                                List.of("north", "east", "south", "west")),
+                        new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                                List.of("false", "true"))),
+                8);
+        check("a well-formed schema has no problems (" + schema.problems() + ")", schema.usable());
+        check("and its recorded count is the cartesian product",
+                schema.cartesianStateCount() == 8);
+
+        ledger.record("GlowVault", 1, "minecraft:block", schema.id(), schema);
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        com.gijsm.vibemod.store.BlockSchema back = reopened.entriesOf("GlowVault").get(0).block();
+        check("the schema survives the ledger's JSON round-trip", schema.equals(back));
+        check("with property order preserved",
+                back.properties().stream()
+                        .map(com.gijsm.vibemod.store.BlockSchema.Prop::name).toList()
+                        .equals(List.of("facing", "lit")));
+        check("and value order preserved, which is what decodes a save to the right state",
+                back.properties().get(0).values()
+                        .equals(List.of("north", "east", "south", "west")));
+
+        com.gijsm.vibemod.store.BlockSchema miscounted = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault", schema.properties(), 6);
+        check("a schema whose recorded count disagrees with its properties is refused",
+                !miscounted.usable() && miscounted.problems().stream()
+                        .anyMatch(reason -> reason.contains("wrong state index")));
+        check("a property with one value is refused, because StateDefinition rejects it",
+                !new com.gijsm.vibemod.store.BlockSchema("a:b",
+                        List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                                List.of("true"))), 1).usable());
+        check("and so is a value name vanilla's NAME_PATTERN would reject",
+                !new com.gijsm.vibemod.store.BlockSchema("a:b",
+                        List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("facing",
+                                List.of("North", "east"))), 2).usable());
+        check("a block with no properties at all is one state, and is fine",
+                new com.gijsm.vibemod.store.BlockSchema("a:b", List.of(), 1).usable());
+
+        System.out.println("PASS: a block schema round-trips through the ledger with order "
+                + "intact, and refuses itself when its state count disagrees");
+    }
+
+    /**
+     * Teardown, the V4 Phase 1 rule: a mod that registered a block is PINNED and
+     * never tombstoned, because a blockstate id that is simply absent at the
+     * next boot shifts every palette entry after it and rewrites terrain.
+     */
+    private static void testBlockModIsPinnedNotTombstoned() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "pinned")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        com.gijsm.vibemod.store.BlockSchema schema = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault",
+                List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                        List.of("false", "true"))),
+                2);
+        ledger.record("GlowVault", 1, "minecraft:block", schema.id(), schema);
+        ledger.record("GlowVault", 1, "minecraft:item", "vibemod_glowvault:glow_vault");
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+
+        ledger.tombstone("GlowVault");
+        ledger.tombstone("RubySword");
+
+        check("a block mod is pinned, never tombstoned (" + ledger.describeState() + ")",
+                ledger.isPinned("GlowVault")
+                        && ledger.describeState().contains("ledgerPinned=1"));
+        check("an item-only mod is still tombstoned",
+                !ledger.isPinned("RubySword")
+                        && ledger.describeState().contains("ledgerTombstones=1"));
+        check("isTombstoned is true for both, so the re-registration guard refuses both",
+                ledger.isTombstoned("GlowVault") && ledger.isTombstoned("RubySword"));
+
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("the pin survives a restart, which is the only thing it is for",
+                reopened.isPinned("GlowVault") && reopened.isTombstoned("GlowVault"));
+        check("and the replay reads back exactly the block schemas, not the item ids",
+                reopened.pinnedBlockSchemas().equals(List.of(schema)));
+        check("a tombstoned mod contributes no schema to the replay",
+                reopened.pinnedBlockSchemas().size() == 1);
+        check("the ledger can name a mod's block ids for the delete card",
+                reopened.blockIdsOf("GlowVault").equals(List.of(schema.id()))
+                        && reopened.blockIdsOf("RubySword").isEmpty());
+
+        // The delete confirmation is where a player is told the id outlives the
+        // world, not just the mod.
+        com.gijsm.vibemod.ui.InstallCard.setRegisteredBlocks(reopened::blockIdsOf);
+        try {
+            ModStore store = new ModStore(tempDir("pinned-card"));
+            GeneratedProject project = new GeneratedProject("GlowVault", "a vault", "place it",
+                    "manual", null, "STONE", "GlowVault", List.of(
+                    new GeneratedProject.GeneratedFile("GlowVault.java",
+                            "package vibemod.glowvault;\n\npublic class GlowVault {}\n")),
+                    List.of(), null);
+            store.saveNewVersion("GlowVault", "a vault", "GlowVault", "tester",
+                    "make a vault", "model-x", null, null, 0.0, null, project);
+            java.util.List<String> lines = com.gijsm.vibemod.ui.InstallCard.verifiedFactLines(
+                    store.get("GlowVault"), null, java.util.Map.of());
+            check("/vibe info says a block id is claimed forever",
+                    lines.stream().anyMatch(line -> line.startsWith("blocks: ")
+                            && line.contains("claimed forever")
+                            && line.contains("corrupt the chunks they sit in")));
+        } finally {
+            com.gijsm.vibemod.ui.InstallCard.setRegisteredBlocks(null);
+        }
+
+        System.out.println("PASS: deleting a block mod pins its ids instead of tombstoning them, "
+                + "and the card says so");
     }
 
     private static void testPixelGridEncoding() {

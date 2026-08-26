@@ -322,6 +322,15 @@ public final class VibeModFabric implements ModInitializer {
                 // its "null between worlds" lifetime for free.
                 live.reloads().tick();
             }
+            // V4 Phase 1: the post-crossing straggler watch rides it for the
+            // same reason. Outside the `live != null` guard because the guard
+            // outlives any one server (it is per-JVM, like the id space it
+            // watches), and disarmed it is one volatile read — which is every
+            // tick of a server that never crosses the palette boundary.
+            PaletteGuard palette = paletteGuard;
+            if (palette != null) {
+                palette.tick();
+            }
         });
 
         // Fires at startup AND after every /reload, each time with a fresh
@@ -583,6 +592,17 @@ public final class VibeModFabric implements ModInitializer {
                 lifecycle.onUnload(registrySeam::tombstone);
                 InstallCard.setRegisteredContent(name -> ledger.entriesOf(name).stream()
                         .map(RegistryLedger.Entry::id).toList());
+                InstallCard.setRegisteredBlocks(ledger::blockIdsOf);
+                // V4 Phase 1. A deleted mod's BLOCK ids are pinned rather than
+                // tombstoned, and this is the half that makes the pin mean
+                // something: every pinned id comes back as an inert stub before
+                // a single live mod is restored, so a saved chunk that names one
+                // still decodes. Without this line the id is simply absent, the
+                // section palette's ListCodec drops it, and every entry after it
+                // shifts — which rewrites that chunk's terrain and says almost
+                // nothing in the log. It runs here, not later, because
+                // restoreModsFromDisk() below must find the ids already claimed.
+                registrySeam.replayPinnedBlocks(ledger);
             }
 
             // V3 Phase 2 §B/§C. Both halves are loader-neutral: the datapack

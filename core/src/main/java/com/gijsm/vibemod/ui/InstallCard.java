@@ -38,12 +38,43 @@ public final class InstallCard {
     private static volatile java.util.function.Function<String, List<String>> registeredContent =
             name -> List.of();
 
+    /**
+     * Mod name -&gt; the {@code minecraft:block} ids it owns (V4 Phase 1).
+     *
+     * <p>A second hook rather than a richer return type on the first, because
+     * the first one's shape is what three UI surfaces and two hosts already
+     * agree on, and because the question is genuinely a different one. "What did
+     * this mod register" is a list for the player to read. "Did it register a
+     * block" decides whether deleting it is reversible at all — a block id can
+     * never be released, so a mod that has one is pinned forever rather than
+     * tombstoned, and the delete confirmation has to say so before the click,
+     * not after.
+     */
+    private static volatile java.util.function.Function<String, List<String>> registeredBlocks =
+            name -> List.of();
+
     private InstallCard() {
     }
 
     /** Installs the registry-ledger lookup. Hosts with no registry channel never call this. */
     public static void setRegisteredContent(java.util.function.Function<String, List<String>> lookup) {
         registeredContent = lookup == null ? name -> List.of() : lookup;
+    }
+
+    /** Installs the block-id lookup, alongside {@link #setRegisteredContent}. */
+    public static void setRegisteredBlocks(java.util.function.Function<String, List<String>> lookup) {
+        registeredBlocks = lookup == null ? name -> List.of() : lookup;
+    }
+
+    /**
+     * The block ids {@code modName} registered; empty on a host with no registry
+     * channel, and empty for the overwhelmingly common mod that registered none.
+     *
+     * <p>Read by the delete confirmation, which is the one screen that has to
+     * tell the truth about this before the player commits.
+     */
+    public static List<String> registeredBlocks(String modName) {
+        return registeredBlocks.apply(modName);
     }
 
     /**
@@ -149,6 +180,16 @@ public final class InstallCard {
         if (!registered.isEmpty()) {
             lines.add("registered content: " + String.join(", ", registered)
                     + "  (stays registered until the world is restarted)");
+        }
+        // And a block does not even come back at the restart: the id is claimed
+        // for good. Said here, beside the line above, because the two facts
+        // differ only in how permanent they are and a player reading one should
+        // not have to go looking for the other.
+        List<String> blocks = registeredBlocks.apply(mod.name());
+        if (!blocks.isEmpty()) {
+            lines.add("blocks: " + String.join(", ", blocks)
+                    + "  (deleting this mod keeps these ids claimed forever - they come back as "
+                    + "inert stubs, because releasing them would corrupt the chunks they sit in)");
         }
         if (values != null && !values.isEmpty()) {
             lines.add("knobs:");
