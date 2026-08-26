@@ -341,7 +341,7 @@ that produced unverifiable bytecode, or pointed at a method that does not exist,
 rather than passing a constant-pool check and exploding in someone's world.
 
 The full design, including every seam's descriptor, the teardown matrix and the list of things
-deliberately not built, is in [`docs/ARCHITECTURE-V3.md`](docs/ARCHITECTURE-V3.md).
+deliberately not built, is in [`docs/ARCHITECTURE-V4.md`](docs/ARCHITECTURE-V4.md).
 
 ## Building
 
@@ -457,8 +457,8 @@ neoforge/       the NeoForge host (ModDevGradle). One jar, no mixins
 
 Two architecture documents, both authoritative for their own half:
 
-- **`docs/ARCHITECTURE-V3.md`** — the seam architecture: the decision log, the table of 26.2 facts
-  each one was read off the jars with `javap`, the surgeon's policy and all seventeen seams, the
+- **`docs/ARCHITECTURE-V4.md`** — the seam architecture: the decision log, the table of 26.2 facts
+  each one was read off the jars with `javap`, the surgeon's policy and all eighteen seams, the
   shim semantics, the **teardown matrix** (what `disable` and `delete` each take away and what
   documented residue remains), what every gate found, and the out-of-scope list with the mechanism
   behind each refusal.

@@ -115,10 +115,27 @@ public final class RegistrySeam implements RegistryTarget {
      *
      * <p>Registration would technically succeed on a dedicated server — no
      * vanilla client is attached at the moment a mod loads, so nothing desyncs
-     * right then. It is refused anyway, deterministically, because the next
-     * client to join negotiates a registry sync that does not contain the id,
-     * and "it worked until somebody logged in" is the worst possible failure
-     * mode for a feature whose whole promise is that generated content is real.
+     * right then. It is refused anyway, deterministically, because
+     * "it worked until somebody logged in" is the worst possible failure mode
+     * for a feature whose whole promise is that generated content is real.
+     *
+     * <p><b>What actually happens to that next client is harder than this
+     * comment used to claim.</b> V3 said the client "negotiates a registry sync
+     * that does not contain the id" — a desync at sync time. Disassembling
+     * {@code fabric-registry-sync-v0} 7.1.0 says the kick lands earlier and is
+     * not ours: {@code RegistrySyncManager.configureClient} calls
+     * {@code createAndPopulateRegistryMap()}, which walks {@code BuiltInRegistries}
+     * live and keeps everything {@code SYNCED} and {@code MODDED}; a vanilla
+     * client cannot receive Fabric's payload, so unless every affected registry
+     * is {@code OPTIONAL} it calls {@code disconnect(...)} <em>during the
+     * configuration phase</em>, with a message naming neither VibeMod nor the
+     * block. And {@code MappedRegistryMixin} marks a registry MODDED on any
+     * non-{@code minecraft} namespace registration, so our entries land in that
+     * map whether we like it or not.
+     *
+     * <p>That is why lifting this refusal is a phase of its own rather than a
+     * flag: it needs our entries hidden from that map for a vanilla connection,
+     * which is somebody else's implementation class.
      */
     public static final String DEDICATED_REFUSAL =
             "registry content is singleplayer/LAN-host only in v1; applies after restart on dedicated";

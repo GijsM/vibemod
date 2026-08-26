@@ -1,5 +1,11 @@
 # VibeMod v3 Architecture — The Anything Engine
 
+*Superseded by `docs/ARCHITECTURE-V4.md`, which carries this document forward whole. Kept as
+history because the log's value is that it records what was believed and why it changed: Decision
+8 and §10's first row refuse blocks on a fact — "adding block states mid-session … does not
+necessarily throw" — that disassembly later overturned, and §4.10's tombstone premise is true for
+items and false for blockstates. V4 §2.1 is the list. Nothing below is contract any more.*
+
 *Status: authoritative for V3 on Fabric. Written by the Phase 4 agent, 2026-08-26, from the
 record left by Phases 0–3 (`docs/phases/PHASE-{0,1,2,3}-RESULT.md`). Companion documents:
 `docs/ARCHITECTURE-V2.md` (still authoritative for everything V3 did not touch — the module
