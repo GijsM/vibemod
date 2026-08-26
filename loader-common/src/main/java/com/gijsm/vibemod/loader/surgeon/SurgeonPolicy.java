@@ -115,8 +115,16 @@ public record SurgeonPolicy(List<String> allowedRoots, List<Denial> denials) {
             // `new Thread(...)` shows up as invokespecial Thread.<init>, so the
             // constructor denial catches construction and `start` catches the
             // case where a Thread arrives from somewhere else.
-            new Denial("java/lang/Thread", "<init>", "creating threads (mod code runs on the server thread)"),
-            new Denial("java/lang/Thread", "start", "starting threads (mod code runs on the server thread)"),
+            // "java/lang/Thread" is a PREFIX, so these two also caught
+            // ThreadLocal and ThreadGroup — and told a model it was "creating
+            // threads" when a ThreadLocal is thread *confinement*, the opposite
+            // of the hazard the rule exists for. The palette gate's canary hit
+            // it. A wrong diagnostic is worse than a missing one: it sends the
+            // repair round somewhere there is nothing to fix.
+            new Denial("java/lang/Thread", "<init>", List.of("java/lang/ThreadLocal"),
+                    "creating threads (mod code runs on the server thread)"),
+            new Denial("java/lang/Thread", "start", List.of("java/lang/ThreadLocal"),
+                    "starting threads (mod code runs on the server thread)"),
             new Denial("java/util/concurrent/Executors", null, "thread pools"),
             new Denial("java/util/concurrent/ForkJoinPool", null, "thread pools"),
             new Denial("java/util/concurrent/CompletableFuture", "*Async", "off-thread work"),

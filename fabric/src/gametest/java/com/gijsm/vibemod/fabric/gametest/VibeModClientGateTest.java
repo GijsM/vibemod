@@ -13,22 +13,45 @@ import com.mojang.blaze3d.platform.InputConstants;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import net.fabricmc.fabric.api.client.gametest.v1.world.TestWorldSave;
 import net.fabricmc.loader.api.FabricLoader;
 
 import net.minecraft.client.gui.screens.dialog.DialogScreen;
 import net.minecraft.client.renderer.entity.PigRenderer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.core.RegistrationInfo;
+import net.minecraft.core.WritableRegistry;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.StateDefinition;
+import net.minecraft.world.level.block.state.properties.BooleanProperty;
+import net.minecraft.world.level.chunk.Strategy;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
 import com.gijsm.vibemod.fabric.client.FabricClientEventBridge;
 import com.gijsm.vibemod.fabric.client.FabricClientPacks;
 import com.gijsm.vibemod.fabric.client.VibeModFabricClient;
+import com.gijsm.vibemod.fabric.mixin.StrategyAccessor;
 import com.gijsm.vibemod.fabric.shim.CreativeTabs;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
+import com.gijsm.vibemod.fabric.shim.PaletteGuard;
 import com.gijsm.vibemod.fabric.shim.RegistrySeam;
+import com.gijsm.vibemod.fabric.shim.StubBlock;
 import com.gijsm.vibemod.runtime.ModHandle;
+import com.gijsm.vibemod.store.BlockSchema;
+import com.gijsm.vibemod.store.RegistryLedger;
 
 /**
  * The CLIENT half of the Phase D acceptance gate (ARCHITECTURE-V2 §9), driving a
@@ -57,6 +80,51 @@ import com.gijsm.vibemod.runtime.ModHandle;
  * <p>Both canned mods are written into the store <em>before</em> the world is
  * created, so restore-on-boot compiles and hot-loads them exactly as generated
  * ones would — no LLM and no API key, the same trick the server gate uses.
+ *
+ * <h2>V4 Phase 1: blocks</h2>
+ *
+ * <p>Four more things were added for blocks, and every one of them is here
+ * because it is here or nowhere. {@code smoke-fabric.sh} runs on a dedicated
+ * server, where registry content is refused outright, so its entire block
+ * coverage is the refusal path; {@code scripts/palette-gate.sh} drives real
+ * chunks through a real crossing but its canary bypasses the registry seam on
+ * purpose and — as its own header says — cannot see steps 2 and 4 of
+ * {@code PaletteGuard.cross()} at all, because {@code Shims.clientSeam()} is
+ * null there and {@code level.players()} is empty. So:
+ *
+ * <ol>
+ *   <li>a block registered through the <em>real</em> seam path registers,
+ *       places, breaks, drops and survives a save/evict/reload round trip —
+ *       the happy path, which exists in no other gate;</li>
+ *   <li>{@code initCache()} is not optional, asserted both directly (the fields
+ *       it fills are read off a live state) and by placing the block beside a
+ *       light source and letting the light engine run over it;</li>
+ *   <li>the block renders with its <em>own</em> baked model rather than the
+ *       missing one, which only a client with real GL and a real model bake can
+ *       say;</li>
+ *   <li>a palette crossing is two-sided: the client level's own
+ *       {@code Strategy} lands on the new width in lockstep with the server's,
+ *       the connection survives, and nothing in the client log says the decoder
+ *       disagreed about how many longs a section takes.</li>
+ * </ol>
+ *
+ * <p>And the world-protecting one (§9): a block is placed with a known vanilla
+ * block two away, the mod is deleted, the world is <b>closed and reopened off
+ * disk</b>, and the neighbour has to be exactly what it was. That neighbour
+ * assertion is the palette-shift detector.
+ *
+ * <p><b>What even this gate cannot see</b>, said out loud rather than skipped:
+ * a deleted block mod's id cannot actually be made to <em>disappear</em> inside
+ * one JVM — {@code MappedRegistry} has no remove and {@code IdMapper} has no
+ * remove — so the reopened world decodes its sections against a registry that
+ * still holds the original {@code Block} object. What the restart proves is
+ * that the pin survives a real save/load of a real world and that nothing
+ * shifted; what it cannot reproduce is a fresh process in which the id would be
+ * absent unless {@code replayPinnedBlocks} minted a stub for it. That half is
+ * covered instead by registering a pinned stub for an id nothing owns and
+ * round-tripping a chosen state of it through disk, which is the same codec
+ * path a saved chunk takes. A cross-process version of this needs a second
+ * launch, which no gate in this repo has.
  */
 public final class VibeModClientGateTest implements FabricClientGameTest {
 
@@ -74,49 +142,75 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
     public void runTest(ClientGameTestContext context) {
         seedMods();
 
-        try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
-            context.waitTicks(20);
+        // Hoisted out of the try-with-resources because the V4 pin gate needs
+        // the world AFTER it has been closed: the only honest way to ask "did
+        // the pin survive a restart" is to shut the integrated server down, let
+        // it write its chunks, and open the same save again.
+        TestWorldSave save = null;
 
-            check("the host initialised inside the client's integrated server",
-                    VibeModFabric.services() != null);
-            if (VibeModFabric.services() == null) {
-                report();
-                return;
+        try {
+            try (TestSingleplayerContext singleplayer = context.worldBuilder().create()) {
+                save = singleplayer.getWorldSave();
+                context.waitTicks(20);
+
+                check("the host initialised inside the client's integrated server",
+                        VibeModFabric.services() != null);
+                if (VibeModFabric.services() == null) {
+                    return;
+                }
+                check("the platform reports a physical client",
+                        VibeModFabric.services().platform().hasClient());
+                check("the platform does NOT report a dedicated server",
+                        !VibeModFabric.services().platform().isDedicatedServer());
+
+                FabricClientEventBridge bridge = VibeModFabricClient.bridge();
+                check("the client bridge was installed at client init", bridge != null);
+                if (bridge == null) {
+                    return;
+                }
+
+                awaitLoaded(context, "HudCanary");
+                awaitLoaded(context, "AngryHud");
+                awaitLoaded(context, "NativeCanary");
+
+                // Order matters, and not for convenience. Both canned mods register a
+                // HUD renderer, and the angry one un-registers ITSELF the first frame
+                // it throws — so any assertion on the dispatcher's size has to happen
+                // on a known side of that event. The storm test waits for it; only
+                // then is "huds" a number about HudCanary alone. (The first version of
+                // this test asserted huds=2 and failed, because by the time it looked
+                // the system had already done the right thing.)
+                testThrowingHudAutoDisables(context, bridge);
+                testLeasedKeyFires(context);
+                testVibecRoutes(context);
+                testNativeModRoundTrips(context);
+                testRegistrationAndTeardown(context, bridge);
+                testKeySlotIsReusableAfterReload(context, bridge);
+                testDialogOpensForARealPlayer(context);
+                testRenderWatchdogTrips(context, bridge);
+                testNativeClientCanary(context, bridge);
+                testResourceCanary(context);
+                testRegistryCanary(context);
+
+                // ---- V4 Phase 1 ----
+                //
+                // Order is load-bearing, for one reason: a palette crossing is
+                // IRREVERSIBLE for the life of the JVM, because IdMapper has no
+                // remove. Everything that wants to measure an un-widened palette
+                // — and everything that has to fit inside 26.2's four hundred
+                // spare blockstates — runs before it.
+                testBlockCanary(context, singleplayer);
+                testBlockRendersWithItsOwnModel(context);
+                testPinnedStubRoundTripsThroughDisk(context, singleplayer);
+                testDeletingABlockModPinsIt(context, singleplayer);
+                testPaletteCrossingReachesTheClient(context, singleplayer);
             }
-            check("the platform reports a physical client",
-                    VibeModFabric.services().platform().hasClient());
-            check("the platform does NOT report a dedicated server",
-                    !VibeModFabric.services().platform().isDedicatedServer());
 
-            FabricClientEventBridge bridge = VibeModFabricClient.bridge();
-            check("the client bridge was installed at client init", bridge != null);
-            if (bridge == null) {
-                report();
-                return;
-            }
-
-            awaitLoaded(context, "HudCanary");
-            awaitLoaded(context, "AngryHud");
-            awaitLoaded(context, "NativeCanary");
-
-            // Order matters, and not for convenience. Both canned mods register a
-            // HUD renderer, and the angry one un-registers ITSELF the first frame
-            // it throws — so any assertion on the dispatcher's size has to happen
-            // on a known side of that event. The storm test waits for it; only
-            // then is "huds" a number about HudCanary alone. (The first version of
-            // this test asserted huds=2 and failed, because by the time it looked
-            // the system had already done the right thing.)
-            testThrowingHudAutoDisables(context, bridge);
-            testLeasedKeyFires(context);
-            testVibecRoutes(context);
-            testNativeModRoundTrips(context);
-            testRegistrationAndTeardown(context, bridge);
-            testKeySlotIsReusableAfterReload(context, bridge);
-            testDialogOpensForARealPlayer(context);
-            testRenderWatchdogTrips(context, bridge);
-            testNativeClientCanary(context, bridge);
-            testResourceCanary(context);
-            testRegistryCanary(context);
+            // Outside the try-with-resources, and therefore after the integrated
+            // server has actually stopped and flushed its chunks: the same save
+            // directory is opened again. That is as close to a restart as one
+            // JVM gets, and it is what §9 asks for.
+            testPinSurvivesAWorldRestart(context, save);
         } finally {
             report();
         }
@@ -1102,6 +1196,990 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         }
     }
 
+    // ------------------------------------------------------------------ V4 Phase 1
+
+    /** The canonical namespace the block canary's ids land in; the seam rewrites to it anyway. */
+    private static final String BLOCK_NS = "vibemod_blockclientcanary";
+
+    /**
+     * The section every far-chunk round trip writes into.
+     *
+     * <p>Air in every overworld and well clear of terrain, so the round trip is
+     * measuring the codec rather than whatever the generator happened to put
+     * there.
+     */
+    private static final int FAR_Y = 200;
+
+    /** The id of the block the canary registers, and of its {@code BlockItem}. */
+    private static Identifier blockId() {
+        return Identifier.fromNamespaceAndPath(BLOCK_NS, "ruby_block");
+    }
+
+    /**
+     * A real block, registered through the real seam path, then placed, read
+     * back on both sides, lit, broken, dropped and round-tripped through disk
+     * (V4 Phase 1 §2.3, §9).
+     *
+     * <p>This is the phase's happy path and <b>no other gate has it</b>.
+     * {@code smoke-fabric.sh} runs on a dedicated server, where
+     * {@code RegistrySeam.refuseOnDedicatedServer} turns every block
+     * registration into a refusal, so its block coverage is the refusal and
+     * nothing else; {@code palette-gate.sh} registers blocks by calling
+     * {@code WritableRegistry.register} directly, on purpose, precisely so that
+     * it is testing the palette machinery rather than the policy above it. Here
+     * a plain Fabric mod with no VibeMod import in it calls
+     * {@code Registry.register}, the surgeon's rewrite carries it into the seam,
+     * and everything downstream of that is the real thing.
+     *
+     * <p>Three of the assertions are here because their failure mode is silent:
+     *
+     * <ul>
+     *   <li><b>{@code initCache()}.</b> Without it the fields that call fills —
+     *       {@code fluidState}, {@code occlusionShape},
+     *       {@code occlusionShapesByFace} — stay null on every state, and the
+     *       first thing to touch one is the light engine, on the first
+     *       placement, with an NPE. Asserted twice: directly, by reading two of
+     *       those fields off a live state, and then by putting the block beside
+     *       a glowstone and letting a real lighting update run over it.</li>
+     *   <li><b>{@code Item.BY_BLOCK}.</b> {@code Items.registerItem} puts a
+     *       {@code BlockItem} in that map before it registers anything, and
+     *       generated code never reaches that private helper. Without the link
+     *       {@code Block.asItem()} falls through to air and pick-block hands
+     *       back nothing — with nothing thrown, anywhere.</li>
+     *   <li><b>The drop.</b> {@code BlockBehaviour.<init>} bakes the loot-table
+     *       key out of the id, so a block whose namespace was rewritten after
+     *       construction would drop nothing and say nothing about it.</li>
+     * </ul>
+     */
+    private void testBlockCanary(ClientGameTestContext context, TestSingleplayerContext singleplayer) {
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        PaletteGuard guard = VibeModFabric.paletteGuard();
+        check("the palette guard was installed at mod init", guard != null);
+        if (seam == null || guard == null) {
+            check("the registry seam and palette guard are both installed for the block gate", false);
+            return;
+        }
+        check("the seam holds no blocks before the block canary (" + seam.describeState() + ")",
+                seam.describeState().contains("registryBlocks=0"));
+        check("and no blockstates have been appended yet (" + seam.describeState() + ")",
+                seam.describeState().contains("registryBlockStates=0"));
+
+        int statesBefore = guard.states();
+        int budgetBefore = guard.budget();
+        check("the probe's arithmetic is self-consistent: states + budget == 2^bits ("
+                        + guard.describeState() + ")",
+                statesBefore + budgetBefore == (1 << guard.bits()));
+
+        seedWithResources("BlockClientCanary", BLOCK_CANARY_SOURCE, BLOCK_CANARY_META,
+                java.util.Map.of(
+                        "assets/" + BLOCK_NS + "/blockstates/ruby_block.json",
+                        "{\"variants\": {\"\": {\"model\": \"" + BLOCK_NS + ":block/ruby_block\"}}}\n",
+                        "assets/" + BLOCK_NS + "/models/block/ruby_block.json",
+                        "{\"parent\": \"minecraft:block/cube_all\", \"textures\": {\"all\": \""
+                                + BLOCK_NS + ":block/ruby_block\"}}\n",
+                        "assets/" + BLOCK_NS + "/items/ruby_block.json",
+                        "{\"model\": {\"type\": \"minecraft:model\", \"model\": \""
+                                + BLOCK_NS + ":item/ruby_block\"}}\n",
+                        "assets/" + BLOCK_NS + "/models/item/ruby_block.json",
+                        "{\"parent\": \"" + BLOCK_NS + ":block/ruby_block\"}\n",
+                        "assets/" + BLOCK_NS + "/textures/block/ruby_block.png.grid", BLOCK_CANARY_GRID,
+                        "assets/" + BLOCK_NS + "/lang/en_us.json",
+                        "{\"block." + BLOCK_NS + ".ruby_block\": \"Ruby Block\"}\n",
+                        "data/" + BLOCK_NS + "/loot_table/blocks/ruby_block.json",
+                        BLOCK_CANARY_LOOT.replace("NS", BLOCK_NS)));
+
+        VibeModFabric.services().scheduler().runOnMain(() -> VibeModFabric.services().router()
+                .run(consoleSender(), new String[] {"enable", "BlockClientCanary"}));
+        awaitLoaded(context, "BlockClientCanary");
+
+        Identifier id = blockId();
+
+        // ---- the registry itself ----
+        check("the block is in the game's own block registry",
+                BuiltInRegistries.BLOCK.containsKey(id));
+        Block block = BuiltInRegistries.BLOCK.getValue(id);
+        check("and it is not air", block != null && block != Blocks.AIR);
+        if (block == null || block == Blocks.AIR) {
+            return;
+        }
+        // The blockId seam, observed through the one thing that proves it ran
+        // BEFORE construction: BlockBehaviour.<init> reads the id twice, once
+        // for the descriptionId and once for the loot-table key. A namespace
+        // rewritten afterwards would leave both wrong and throw nothing.
+        check("its description id came from the canonical namespace, so setId was seamed "
+                        + "before construction (" + block.getDescriptionId() + ")",
+                ("block." + BLOCK_NS + ".ruby_block").equals(block.getDescriptionId()));
+
+        java.util.List<BlockState> states = block.getStateDefinition().getPossibleStates();
+        check("a plain cube block costs exactly one blockstate (" + states.size() + ")",
+                states.size() == 1);
+        BlockState state = block.defaultBlockState();
+
+        String seamState = seam.describeState();
+        check("the seam counts the block (" + seamState + ")", seamState.contains("registryBlocks=1"));
+        check("and counts the blockstates it appended, matching the state definition ("
+                        + seamState + ")",
+                seamState.contains("registryBlockStates=" + states.size()));
+        check("the guard's live state count grew by exactly that many",
+                guard.states() == statesBefore + states.size());
+
+        // vanilla's own loop out of Blocks.<clinit>, asserted from the far side:
+        // the state has a global id and the id maps back to the same object.
+        int globalId = Block.getId(state);
+        check("the state was appended to BLOCK_STATE_REGISTRY (id=" + globalId + ")", globalId > 0);
+        check("and that id maps back to the same state object",
+                Block.BLOCK_STATE_REGISTRY.byId(globalId) == state);
+
+        // ---- initCache(), read directly off the state ----
+        //
+        // Both of these are plain field reads of fields only initCache() ever
+        // writes (javap: initCache stores fluidState, occlusionShape,
+        // occlusionShapesByFace, solidRender, legacySolid). Skip the call and
+        // the first is null and the second is an aaload on a null array.
+        check("initCache() filled the state's fluidState (it is null until initCache runs)",
+                safely(() -> state.getFluidState() != null));
+        check("initCache() filled the state's per-face occlusion shapes — the array the "
+                        + "light engine indexes, and an NPE without it",
+                safely(() -> state.getFaceOcclusionShape(Direction.UP) != null));
+
+        // ---- Item.BY_BLOCK ----
+        Item blockItem = BuiltInRegistries.ITEM.getValue(id);
+        check("the mod's BlockItem is in the item registry", blockItem != null && blockItem != Items.AIR);
+        check("Item.byBlock resolves the block to an item rather than to air — the "
+                        + "Items.registerItem branch generated code never reaches",
+                Item.byBlock(block) != Items.AIR);
+        check("and it resolves to the very item the mod registered",
+                Item.byBlock(block) == blockItem);
+        check("so Block.asItem() answers with it too (pick-block's whole path)",
+                block.asItem() == blockItem);
+
+        // ---- the creative menu ----
+        check("the block item is in the creative INGREDIENTS tab",
+                awaitTrue(context, () -> tabContains(id)));
+
+        // ---- placed, read back on BOTH sides, and lit ----
+        BlockPos work = workArea(context);
+        check("the gate found a spot near the player to build in", work != null);
+        if (work == null) {
+            return;
+        }
+        BlockPos placed = work;
+        BlockPos lamp = work.east();
+
+        check("setBlockAndUpdate placed the runtime-registered block",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server -> {
+                    ServerLevel level = server.overworld();
+                    // The light source first, so the placement below is the one
+                    // that makes the light engine walk into the new state.
+                    level.setBlockAndUpdate(lamp, Blocks.GLOWSTONE.defaultBlockState());
+                    return level.setBlockAndUpdate(placed, state);
+                })));
+        check("the server world reads it back as the block that was placed",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(placed) == state)));
+
+        // The client half: a chunk update packet had to be encoded, sent,
+        // decoded and merged for this to be true, which is the only reason a
+        // gate with a real client asks it at all.
+        check("and the CLIENT sees it too, so the block update packet decoded",
+                awaitClient(context, client -> client.level != null
+                        && client.level.getBlockState(placed).getBlock() == block, true));
+
+        // ---- the light engine, over a state that was registered minutes ago ----
+        context.waitTicks(20);
+        check("the light engine drained its queue with the new block in it",
+                awaitTrue(context, () -> Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> !server.overworld().getLightEngine().hasLightWork()))));
+        check("block light from the neighbouring glowstone reached the new block's position",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getLightEngine().getLayerListener(LightLayer.BLOCK)
+                                .getLightValue(placed.above()) > 0)));
+        check("and the client is still running after the light engine walked over it",
+                context.computeOnClient(client -> client.player != null));
+
+        // ---- broken, and dropped ----
+        check("destroyBlock broke the runtime-registered block",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().destroyBlock(placed, true, null, 512))));
+        check("the world is air where it stood",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(placed).isAir())));
+        check("breaking it dropped ITS OWN item, through the loot table its id derived",
+                awaitTrue(context, () -> Boolean.TRUE.equals(singleplayer.getServer()
+                        .computeOnServer(server -> {
+                            for (net.minecraft.world.entity.item.ItemEntity dropped
+                                    : server.overworld().getEntitiesOfClass(
+                                            net.minecraft.world.entity.item.ItemEntity.class,
+                                            new net.minecraft.world.phys.AABB(placed).inflate(4.0))) {
+                                if (dropped.getItem().getItem() == blockItem) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }))));
+
+        // ---- and a real disk round trip ----
+        //
+        // Far outside the player's view, so dropping the force ticket really
+        // evicts the chunk and the reload comes off the region file rather than
+        // straight back out of the chunk map.
+        BlockPos far = farChunkOrigin(singleplayer, 0);
+        BlockPos farNeighbour = far.offset(2, 0, 0);
+        boolean evicted = roundTripFarChunk(context, singleplayer, far, level -> {
+            level.setBlock(far, state, Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+            level.setBlock(farNeighbour, Blocks.GOLD_BLOCK.defaultBlockState(),
+                    Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS);
+        });
+        // A hard failure, not a skip: a chunk that never left memory makes the
+        // two assertions below say nothing at all.
+        check("the test chunk really left memory, so the reload comes off disk", evicted);
+        check("the runtime-registered block came back off disk as itself",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(far) == state)));
+        check("and the known vanilla block two away came back unchanged (the shift detector)",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getBlockState(farNeighbour).getBlock() == Blocks.GOLD_BLOCK)));
+    }
+
+    /**
+     * The one assertion in the whole phase that needs real GL and a real model
+     * bake: the block draws as <em>itself</em> (V4 Phase 1 §4.15).
+     *
+     * <p>{@code BlockStateModelSet.get(state)} is
+     * {@code modelByState.getOrDefault(state, missingModel)} — verified with
+     * {@code javap} — so a state the last bake never saw comes back as the
+     * missing model with nothing thrown. That is deliberate on Mojang's part
+     * and it is why blocks have no analogue of the entity-renderer NPE V3's
+     * gate found; it is also why "it rendered" cannot be inferred from anything
+     * short of asking the baked map.
+     *
+     * <p>A block registered after the last bake therefore IS the missing model
+     * until the coordinator's debounced client reload rebakes it — about two
+     * seconds. So this waits for that reload the way the resource canary does,
+     * by counting completed reloads rather than by looking for "not zero", and
+     * only then asks.
+     *
+     * <p>Render layers are deliberately not asserted, because in 26.2 there is
+     * nothing to assert: there is no {@code ItemBlockRenderTypes}, no
+     * {@code render_type} model key and no {@code fabric-blockrenderlayer} in
+     * this dependency set — the layer is derived from the texture's own alpha
+     * ({@code BakedQuad$MaterialInfo} → {@code ChunkSectionLayer.byTransparency}).
+     * A correct texture is the whole story, and the texture is asserted below.
+     */
+    private void testBlockRendersWithItsOwnModel(ClientGameTestContext context) {
+        Block block = BuiltInRegistries.BLOCK.getValue(blockId());
+        if (block == null || block == Blocks.AIR) {
+            check("the block canary registered a block for the render gate to look at", false);
+            return;
+        }
+        BlockState state = block.defaultBlockState();
+
+        Identifier blockstates = Identifier.fromNamespaceAndPath(BLOCK_NS, "blockstates/ruby_block.json");
+        Identifier texture = Identifier.fromNamespaceAndPath(BLOCK_NS, "textures/block/ruby_block.png");
+
+        check("the client is quiet again, so the model bake this asserts on is the last one",
+                awaitQuietClient(context));
+        check("its blockstate definition resolves through the game's own resource manager",
+                awaitClient(context, client -> client.getResourceManager()
+                        .getResource(blockstates).isPresent(), true));
+        check("and its block texture is a real PNG the client can find",
+                context.computeOnClient(client -> client.getResourceManager()
+                        .getResource(texture).isPresent()));
+        check("its name translates from the block lang key its id derives",
+                "Ruby Block".equals(context.computeOnClient(client ->
+                        net.minecraft.client.resources.language.I18n.get(
+                                "block." + BLOCK_NS + ".ruby_block"))));
+
+        // The assertion this whole gate exists for.
+        check("the baked model for its state is NOT the missing model — the debounced "
+                        + "client reload really rebaked a block registered after the last bake",
+                awaitClient(context, client -> {
+                    net.minecraft.client.renderer.block.BlockStateModelSet models =
+                            client.getModelManager().getBlockStateModelSet();
+                    return models.get(state) != models.missingModel();
+                }, true));
+        check("and its break/particle material came off its own model rather than the "
+                        + "missing one — cube_all is what declares \"particle\": \"#all\"",
+                context.computeOnClient(client -> {
+                    net.minecraft.client.renderer.block.BlockStateModelSet models =
+                            client.getModelManager().getBlockStateModelSet();
+                    return models.getParticleMaterial(state)
+                            != models.missingModel().particleMaterial();
+                }));
+        check("the client is still running after baking and drawing it",
+                context.computeOnClient(client -> client.player != null));
+    }
+
+    /**
+     * A palette crossing with a real client on the other end of it (finding 3b,
+     * §4.13 step 2 and step 4).
+     *
+     * <p><b>This is the half {@code scripts/palette-gate.sh} says out loud that
+     * it cannot see.</b> On a dedicated server {@code Shims.clientSeam()} is
+     * null and {@code level.players()} is empty, so steps 2 and 4 of
+     * {@code PaletteGuard.cross()} — widening the client level's own
+     * {@code Strategy}, and the drop-then-mark chunk resend — are no-ops there.
+     * Here both are real.
+     *
+     * <p>Why it matters: {@code ClientLevel} builds its own
+     * {@code PalettedContainerFactory}, so its {@code globalPaletteBitsInMemory}
+     * is a <em>separate int</em> from the server's even when the server is the
+     * integrated one two objects away. And the integrated server genuinely
+     * serialises chunk packets — {@code Connection.configureInMemoryPipeline}
+     * delegates to {@code configureSerialization(…, memoryConnection=true, …)} —
+     * while {@code PalettedContainer.read} sizes its long array from the
+     * <em>receiving</em> container's own strategy. A disagreement is therefore a
+     * decoder exception and a dropped world, in singleplayer included. That is
+     * the one failure mode in this phase that kicks a real player.
+     *
+     * <p>The synthetic blocks are registered the way {@code palette-gate.sh}
+     * does it and for the same stated reason: straight into
+     * {@code WritableRegistry}, guard first, sized from the <em>measured</em>
+     * budget. The policy above the palette is already gated elsewhere; what is
+     * under test here is the machinery underneath it, and sizing from a constant
+     * would make this gate wrong the day the version bumps.
+     *
+     * <p>Everything after this runs against a widened palette, permanently:
+     * {@code IdMapper} has no remove.
+     */
+    private void testPaletteCrossingReachesTheClient(ClientGameTestContext context,
+                                                     TestSingleplayerContext singleplayer) {
+        PaletteGuard guard = VibeModFabric.paletteGuard();
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        if (guard == null || seam == null) {
+            check("the palette guard and seam are installed for the crossing gate", false);
+            return;
+        }
+
+        int oldBits = guard.bits();
+        int oldCeiling = 1 << oldBits;
+        check("the two sides agree on the palette width BEFORE the crossing ("
+                        + oldBits + " bits)",
+                clientPaletteBits(context) == serverPaletteBits(singleplayer));
+        check("and that width is the one the guard derives from the live registry",
+                serverPaletteBits(singleplayer) == oldBits);
+
+        // Sized from the measured budget, so this works on a version with 402
+        // spare blockstates and on one with thirty thousand.
+        int need = guard.budget() + 1;
+        int size = 1;
+        while (size < need) {
+            size <<= 1;
+        }
+        final int crosserStates = size;
+        Identifier crosserId = Identifier.fromNamespaceAndPath(BLOCK_NS, "wide_block");
+
+        Block crosser = singleplayer.getServer().computeOnServer(server -> {
+            Block[] made = {null};
+            try {
+                // Block.<init> takes an intrusive holder, which throws once the
+                // registry is frozen — so even a harness needs the window a mod
+                // gets. Reusing it also means the close does the tag refresh and
+                // the component rebuild, exactly as a real registration would.
+                seam.withWindow(() -> {
+                    ResourceKey<Block> key = ResourceKey.create(Registries.BLOCK, crosserId);
+                    Block wide = WideBlock.of(crosserStates,
+                            BlockBehaviour.Properties.of().strength(1.0F).setId(key));
+                    java.util.List<BlockState> possible =
+                            wide.getStateDefinition().getPossibleStates();
+                    // BEFORE a single state is appended. IdMapper.add stores at
+                    // nextId++ and there is no remove, so a block that would not
+                    // fit has to be stopped on this side of the append.
+                    guard.admit("clientgate", crosserId.toString(), possible.size());
+                    ((WritableRegistry<Block>) BuiltInRegistries.BLOCK)
+                            .register(key, wide, RegistrationInfo.BUILT_IN);
+                    for (BlockState appended : possible) {
+                        Block.BLOCK_STATE_REGISTRY.add(appended);
+                        appended.initCache();
+                    }
+                    made[0] = wide;
+                });
+            } catch (Throwable refused) {
+                // Reported rather than rethrown: a refusal here is a finding
+                // about the guard, and rethrowing would take the rest of the
+                // gate's assertions down with it.
+                System.out.println("  (the crossing threw: " + refused + ")");
+            }
+            return made[0];
+        });
+
+        int newBits = guard.bits();
+        check("the synthetic block really crossed the global palette boundary ("
+                        + oldBits + " -> " + newBits + " bits, " + crosserStates + " states)",
+                newBits > oldBits);
+        check("the gate is reading the client's live log file, so the two absence "
+                        + "assertions below mean something",
+                logIsLive());
+
+        // ---- the two assertions palette-gate.sh cannot make ----
+        int serverBits = serverPaletteBits(singleplayer);
+        int clientBits = clientPaletteBits(context);
+        check("the SERVER level's strategy is on the new width (" + serverBits + ")",
+                serverBits == newBits);
+        check("the CLIENT level's own strategy is on the new width too — a separate int, "
+                        + "widened through ClientSeam (" + clientBits + ")",
+                clientBits == newBits);
+        check("so the two sides are in lockstep, which is what PalettedContainer.read "
+                        + "sizes its long array from",
+                clientBits == serverBits);
+        check("the guard counted the sections it re-encoded (" + guard.describeState() + ")",
+                guard.describeState().contains("paletteRepacks="));
+
+        // ---- the client survived it ----
+        check("the client is still connected after the crossing and the chunk resend",
+                context.computeOnClient(client -> client.getConnection() != null
+                        && client.level != null && client.player != null));
+        check("no chunk section failed to decode on the client "
+                        + "(PalettedContainer.read's fixed-size long array)",
+                !logContains("readFixedSizeLongArray"));
+        check("and nothing was silently shortened on the way in (finding 3c)",
+                !logContains("Recoverable errors when loading section"));
+
+        // ---- and a wide id actually travels ----
+        //
+        // SimpleBitStorage.set opens with Validate.inclusiveBetween(0, mask,
+        // value), so writing the highest state of the crossing block is that
+        // check exactly — and then the CLIENT has to decode it at the new width,
+        // which is the part only this gate can ask.
+        if (crosser == null) {
+            check("the crossing block was constructed", false);
+            return;
+        }
+        java.util.List<BlockState> possible = crosser.getStateDefinition().getPossibleStates();
+        BlockState widest = possible.get(possible.size() - 1);
+        int wideId = Block.getId(widest);
+        check("the widest new state's id really is past the old boundary (" + wideId
+                        + " >= " + oldCeiling + ")",
+                wideId >= oldCeiling);
+
+        BlockPos work = workArea(context);
+        if (work == null) {
+            check("the gate found a spot near the player to write a wide id into", false);
+            return;
+        }
+        BlockPos widePos = work.north(2);
+        check("writing a past-the-boundary state into a live section did not throw",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server -> {
+                    try {
+                        return server.overworld().setBlockAndUpdate(widePos, widest);
+                    } catch (Throwable t) {
+                        System.out.println("  (wide write threw: " + t + ")");
+                        return false;
+                    }
+                })));
+        check("and it reads back on the server as the state that was written",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(widePos) == widest)));
+        check("and the CLIENT decoded it at the new width — the resend and the widen, "
+                        + "end to end",
+                awaitClient(context, client -> client.level != null
+                        && client.level.getBlockState(widePos) == widest, true));
+        check("the client is STILL connected after receiving a wide id",
+                context.computeOnClient(client -> client.getConnection() != null
+                        && client.player != null));
+    }
+
+    /**
+     * A pinned block id comes back as an inert stub, and a saved chunk that
+     * names one decodes to the same state it was saved as (§4.14).
+     *
+     * <p>The pin exists because of finding 3c: {@code SerializableChunkData}'s
+     * section palette is a {@code ListCodec}, which <em>drops</em> an element it
+     * cannot decode and hands the shortened list to {@code promotePartial},
+     * while the packed data indexes that palette by position. One missing id
+     * renumbers every entry after it and rewrites that section's terrain, with
+     * one recoverable-error line in the log. A block id can therefore never be
+     * tombstoned the way an item id is.
+     *
+     * <p>Why this test uses a <b>ghost id</b> — one no mod in this session ever
+     * registered — rather than the canary's own: {@code MappedRegistry} has no
+     * remove, so inside one JVM a deleted mod's block is still sitting in the
+     * registry and {@code replayPinnedBlocks} correctly declines to replace it.
+     * The only way to see a stub actually mint an id in this process is to pin
+     * an id that nothing owns. The schema is taken off a real vanilla block with
+     * real properties ({@code StubBlock.schemaOf}), so the rebuild is exercising
+     * a mixed enum/boolean state definition and not a one-state special case.
+     *
+     * <p>The state placed is deliberately <b>not</b> the default one: a save
+     * records a state by property names and value strings, and the whole claim
+     * of §4.14 is that the stub decodes back to the same state <em>index</em>.
+     * A default state would pass that test by accident.
+     */
+    private void testPinnedStubRoundTripsThroughDisk(ClientGameTestContext context,
+                                                     TestSingleplayerContext singleplayer) {
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        RegistryLedger book = seam == null ? null : seam.ledger();
+        check("the ledger is installed for the pin gate", book != null);
+        if (seam == null || book == null) {
+            return;
+        }
+
+        Identifier ghostId = Identifier.fromNamespaceAndPath("vibemod_pinnedghost", "ghost_block");
+        // Two properties, one an enum with three values and one a boolean: six
+        // states, cheap against 26.2's budget, and enough that a state index is
+        // a real claim rather than a coincidence.
+        BlockSchema schema = StubBlock.schemaOf(ghostId, Blocks.STONE_SLAB);
+        check("a schema read off a live block is internally consistent (" + schema + ")",
+                schema.usable() && schema.problems().isEmpty());
+        check("and it records more than one property, so the state index means something",
+                schema.properties().size() > 1 && schema.stateCount() > 1);
+
+        book.record("PinnedGhost", 1, RegistryLedger.BLOCK_REGISTRY, ghostId.toString(), schema);
+        book.tombstone("PinnedGhost");
+        check("the ledger PINNED the mod rather than tombstoning it, because it "
+                        + "registered a minecraft:block",
+                book.isPinned("PinnedGhost"));
+        check("and the pin is on disk, so a real next boot would find it",
+                ledgerFileSays("pinned"));
+        check("the ledger counts it apart from tombstones (" + book.describeState() + ")",
+                book.describeState().contains("ledgerPinned=1"));
+
+        int replayed = singleplayer.getServer().computeOnServer(
+                server -> seam.replayPinnedBlocks(book));
+        check("the boot-time replay registered a stub for the pinned id", replayed == 1);
+        Block stub = BuiltInRegistries.BLOCK.getValue(ghostId);
+        check("and the id is claimed by an inert StubBlock", stub instanceof StubBlock);
+        if (!(stub instanceof StubBlock)) {
+            return;
+        }
+        java.util.List<BlockState> stubStates = stub.getStateDefinition().getPossibleStates();
+        check("the rebuilt state definition has exactly the recorded number of states ("
+                        + stubStates.size() + " vs " + schema.stateCount() + ")",
+                stubStates.size() == schema.stateCount());
+        check("and every one of them reached BLOCK_STATE_REGISTRY",
+                Block.getId(stubStates.get(stubStates.size() - 1)) > 0);
+        check("the seam reports the stub it minted (" + seam.describeState() + ")",
+                seam.describeState().contains("registryPinnedStubs=1"));
+
+        // ---- the round trip that is the actual claim ----
+        BlockState chosen = stubStates.get(stubStates.size() - 1);
+        check("the state chosen for the round trip is NOT the default one",
+                chosen != stub.defaultBlockState());
+
+        BlockPos far = farChunkOrigin(singleplayer, 1);
+        BlockPos neighbour = far.offset(2, 0, 0);
+        BlockPos filler = far.offset(1, 0, 0);
+        boolean evicted = roundTripFarChunk(context, singleplayer, far, level -> {
+            int flags = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
+            level.setBlock(far, chosen, flags);
+            // A third palette entry between the stub and the witness: if an
+            // entry ever were dropped, the witness is what moves.
+            level.setBlock(filler, Blocks.IRON_BLOCK.defaultBlockState(), flags);
+            level.setBlock(neighbour, Blocks.GOLD_BLOCK.defaultBlockState(), flags);
+        });
+        check("the stub's test chunk really left memory, so the reload comes off disk", evicted);
+        check("the stub came back off disk as the SAME state it was saved as — the "
+                        + "state index the schema exists to reproduce",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(far) == chosen)));
+        check("the vanilla block two away is unchanged (the palette-shift detector)",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getBlockState(neighbour).getBlock() == Blocks.GOLD_BLOCK)));
+        check("and the one between them is unchanged too",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getBlockState(filler).getBlock() == Blocks.IRON_BLOCK)));
+        check("the gate is reading the live log file", logIsLive());
+        check("no section reported a recoverable decode error while loading it (finding 3c)",
+                !logContains("Recoverable errors when loading section"));
+    }
+
+    /**
+     * Deleting a block mod pins its ids instead of tombstoning them, and leaves
+     * a witness in the world for the restart to check (Decision 15, §4.14).
+     *
+     * <p>The distinction is the whole point and it is structural rather than
+     * conventional: {@code RegistryLedger.tombstone} refuses to write
+     * {@code tombstone} for an entry whose registry is {@code minecraft:block},
+     * so no caller can get it wrong by passing the wrong flag. An item id can be
+     * tombstoned because vanilla drops an unknown item id out of a save and the
+     * world heals; a block id cannot, because a dropped blockstate renumbers the
+     * section palette around it.
+     *
+     * <p>What this leaves behind is deliberate: the mod's block at a known
+     * position, a known vanilla block two away, and a third block between them,
+     * all near spawn so the reopened world loads them without being asked.
+     * {@link #testPinSurvivesAWorldRestart} is what reads them back.
+     */
+    private void testDeletingABlockModPinsIt(ClientGameTestContext context,
+                                             TestSingleplayerContext singleplayer) {
+        RegistrySeam seam = VibeModFabric.registrySeam();
+        RegistryLedger book = seam == null ? null : seam.ledger();
+        Block block = BuiltInRegistries.BLOCK.getValue(blockId());
+        if (seam == null || book == null || block == null || block == Blocks.AIR) {
+            check("the block canary and ledger are both live for the delete gate", false);
+            return;
+        }
+
+        BlockPos witness = restartWitness(singleplayer);
+        check("the gate found a spot near world spawn for the restart witness", witness != null);
+        if (witness == null) {
+            return;
+        }
+        BlockState state = block.defaultBlockState();
+        singleplayer.getServer().runOnServer(server -> {
+            ServerLevel level = server.overworld();
+            int flags = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
+            level.setBlock(witness, state, flags);
+            level.setBlock(witness.offset(1, 0, 0), Blocks.IRON_BLOCK.defaultBlockState(), flags);
+            level.setBlock(witness.offset(2, 0, 0), Blocks.GOLD_BLOCK.defaultBlockState(), flags);
+        });
+        check("the mod's block is standing at the witness position",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(witness) == state)));
+        check("with a known vanilla block two away",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
+                        server.overworld().getBlockState(witness.offset(2, 0, 0)).getBlock()
+                                == Blocks.GOLD_BLOCK)));
+
+        check("the ledger recorded the block id as this mod's",
+                book.blockIdsOf("BlockClientCanary").contains(blockId().toString()));
+
+        // /vibe delete, by the path the command takes.
+        VibeModFabric.services().scheduler().runOnMain(() ->
+                VibeModFabric.services().lifecycle().unload("BlockClientCanary"));
+        context.waitTicks(20);
+
+        check("deleting a block mod PINNED it rather than tombstoning it",
+                awaitTrue(context, () -> book.isPinned("BlockClientCanary")));
+        check("and the pin reached disk, which is the only copy a next boot has",
+                ledgerFileSays("pinned"));
+        check("the ledger counts two pinned mods now (" + book.describeState() + ")",
+                book.describeState().contains("ledgerPinned=2"));
+        // The honest half, same as the item story: there is no remove, so the id
+        // stays. The difference is that for a block the id staying is the POINT.
+        check("the block id is still in the registry, because releasing it would "
+                        + "corrupt the chunks it sits in",
+                BuiltInRegistries.BLOCK.containsKey(blockId()));
+        check("and the block placed in the world is still standing",
+                Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                        server -> server.overworld().getBlockState(witness) == state)));
+        check("the seam holds nothing live for the deleted mod (" + seam.describeState() + ")",
+                seam.describeState().contains("registryBlocks=0"));
+    }
+
+    /**
+     * The world-protecting test §9 asks for: close the world, open it again off
+     * disk, and check that a known vanilla block two away from a deleted mod's
+     * block is exactly what it was.
+     *
+     * <p>That neighbour assertion is the palette-shift detector. If a section's
+     * palette ever loses an entry, everything after it renumbers — stone becomes
+     * dirt, dirt becomes gravel — for that whole 16³ section, and the only thing
+     * vanilla says about it is one recoverable-error line. A checksum of the mod
+     * block alone would not catch it; a known block <em>beside</em> it is what
+     * does.
+     *
+     * <p><b>The limit, stated rather than implied.</b> This is a world restart,
+     * not a process restart. {@code MappedRegistry} has no remove and
+     * {@code IdMapper} has no remove, so the reopened world decodes against a
+     * registry that still holds the deleted mod's {@code Block} object. What is
+     * proved here is that the pin, the save and the load all survive a real
+     * shutdown-and-reopen with nothing shifted. What is <em>not</em> proved is
+     * the fresh-process case in which the id would be absent unless
+     * {@code replayPinnedBlocks} minted a stub for it — that half is
+     * {@link #testPinnedStubRoundTripsThroughDisk}, and a genuine cross-process
+     * version needs a second launch, which no gate in this repo has. It is owed,
+     * the way {@code palette-gate.sh}'s header owes the client half.
+     */
+    private void testPinSurvivesAWorldRestart(ClientGameTestContext context, TestWorldSave save) {
+        check("the gate kept a handle on the world save to reopen", save != null);
+        if (save == null) {
+            return;
+        }
+        Block block = BuiltInRegistries.BLOCK.getValue(blockId());
+        check("the deleted mod's block id is still claimed between worlds",
+                block != null && block != Blocks.AIR);
+        if (block == null || block == Blocks.AIR) {
+            return;
+        }
+        BlockState state = block.defaultBlockState();
+
+        try (TestSingleplayerContext reopened = save.open()) {
+            context.waitTicks(40);
+            check("the host initialised again in the reopened world",
+                    VibeModFabric.services() != null && VibeModFabric.services().server() != null);
+            if (VibeModFabric.services() == null) {
+                return;
+            }
+            check("and the client is in it, with a player",
+                    awaitClient(context, client -> client.level != null && client.player != null, true));
+
+            RegistrySeam seam = VibeModFabric.registrySeam();
+            RegistryLedger book = seam == null ? null : seam.ledger();
+            check("the ledger came back off disk still pinning the deleted mod",
+                    book != null && book.isPinned("BlockClientCanary"));
+            check("the pinned block id is claimed in the reopened world, so a saved "
+                            + "section that names it still decodes",
+                    BuiltInRegistries.BLOCK.containsKey(blockId()));
+
+            BlockPos witness = restartWitness(reopened);
+            check("the gate found the witness position again", witness != null);
+            if (witness == null) {
+                return;
+            }
+            // The chunk is at world spawn, so the reopened server loads it
+            // without being asked; waiting for it anyway keeps this from racing
+            // a slow start.
+            check("the witness chunk came back",
+                    awaitTrue(context, () -> Boolean.TRUE.equals(reopened.getServer()
+                            .computeOnServer(server -> server.overworld().getChunkSource()
+                                    .hasChunk(witness.getX() >> 4, witness.getZ() >> 4)))));
+            check("the deleted mod's block came back off disk as itself",
+                    Boolean.TRUE.equals(reopened.getServer().computeOnServer(
+                            server -> server.overworld().getBlockState(witness) == state)));
+            check("THE KNOWN VANILLA BLOCK TWO AWAY IS UNCHANGED — the palette-shift "
+                            + "detector, and the one assertion that protects a player's world",
+                    Boolean.TRUE.equals(reopened.getServer().computeOnServer(server ->
+                            server.overworld().getBlockState(witness.offset(2, 0, 0)).getBlock()
+                                    == Blocks.GOLD_BLOCK)));
+            check("and the block between them is unchanged too",
+                    Boolean.TRUE.equals(reopened.getServer().computeOnServer(server ->
+                            server.overworld().getBlockState(witness.offset(1, 0, 0)).getBlock()
+                                    == Blocks.IRON_BLOCK)));
+            check("the gate is reading the live log file after the reopen", logIsLive());
+            check("no section was silently shortened on load (finding 3c)",
+                    !logContains("Recoverable errors when loading section"));
+            check("and no chunk section failed to decode on the client",
+                    !logContains("readFixedSizeLongArray"));
+        } catch (Throwable reopenFailed) {
+            check("reopening the world for the pin gate did not throw: " + reopenFailed, false);
+        }
+    }
+
+    // -------------------------------------------------------- V4 Phase 1 helpers
+
+    /**
+     * A loaded, empty spot a few blocks from the player.
+     *
+     * <p>Near the player on purpose: the render and client-read assertions both
+     * need the block to be inside the client's own view, which is the only place
+     * a chunk packet was ever sent for.
+     */
+    private static BlockPos workArea(ClientGameTestContext context) {
+        return context.computeOnClient(client -> client.player == null
+                ? null
+                : client.player.blockPosition().offset(3, 4, 3));
+    }
+
+    /**
+     * The fixed spot near world spawn that the delete/restart pair uses.
+     *
+     * <p>Anchored to the level's own respawn position rather than to the player,
+     * because the player is somewhere else entirely after the world is reopened
+     * and the two halves of that test have to agree on one block.
+     */
+    private static BlockPos restartWitness(TestSingleplayerContext singleplayer) {
+        return singleplayer.getServer().computeOnServer(server -> {
+            ServerLevel level = server.overworld();
+            BlockPos spawn = level.getRespawnData().pos();
+            return new BlockPos(spawn.getX() + 4, FAR_Y, spawn.getZ() + 4);
+        });
+    }
+
+    /**
+     * The origin of a chunk far enough out that dropping its force ticket really
+     * evicts it.
+     *
+     * <p>The offset is derived from the server's own view distance rather than
+     * hard-coded, because a chunk inside the player's view is kept loaded by a
+     * ticket this gate does not own, and the round trip below would then read
+     * straight back out of the chunk map and prove nothing.
+     */
+    private static BlockPos farChunkOrigin(TestSingleplayerContext singleplayer, int nth) {
+        return singleplayer.getServer().computeOnServer(server -> {
+            int away = server.getPlayerList().getViewDistance() + 12 + (nth * 4);
+            ServerLevel level = server.overworld();
+            BlockPos spawn = level.getRespawnData().pos();
+            int cx = (spawn.getX() >> 4) + away;
+            int cz = (spawn.getZ() >> 4) + away;
+            return new BlockPos(cx * 16 + 8, FAR_Y, cz * 16 + 8);
+        });
+    }
+
+    /**
+     * Force-loads a far chunk, writes into it, flushes it to disk, evicts it and
+     * loads it again.
+     *
+     * <p>The eviction is the point. Vanilla's {@code unpack} rebuilds a global
+     * container at the strategy's <em>current</em> width on load, and the
+     * section palette is the {@code ListCodec} finding 3c is about, so both of
+     * those are only exercised by a chunk that genuinely left memory. A reload
+     * that came out of the chunk map would assert nothing at all — hence the
+     * return value, which the callers turn into a failure rather than a skip.
+     *
+     * @return whether the chunk really left memory before it was asked for again
+     */
+    private boolean roundTripFarChunk(ClientGameTestContext context,
+                                      TestSingleplayerContext singleplayer,
+                                      BlockPos where,
+                                      java.util.function.Consumer<ServerLevel> write) {
+        int cx = where.getX() >> 4;
+        int cz = where.getZ() >> 4;
+
+        singleplayer.getServer().runOnServer(server -> {
+            ServerLevel level = server.overworld();
+            level.setChunkForced(cx, cz, true);
+            level.getChunk(cx, cz);
+            write.accept(level);
+        });
+        // saveEverything(suppressLog, flush, forced). flush, because the whole
+        // question is what is on disk — and suppressLog FALSE on purpose, so
+        // vanilla's own "Saving chunks for level" reaches logs/latest.log and
+        // gives {@link #logIsLive} something Minecraft wrote to key on.
+        singleplayer.getServer().runOnServer(server -> server.saveEverything(false, true, true));
+        singleplayer.getServer().runOnServer(server ->
+                server.overworld().setChunkForced(cx, cz, false));
+
+        boolean evicted = false;
+        for (int i = 0; i < 1200 && !evicted; i++) {
+            context.waitTick();
+            evicted = Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(
+                    server -> !server.overworld().getChunkSource().hasChunk(cx, cz)));
+        }
+        singleplayer.getServer().runOnServer(server -> {
+            ServerLevel level = server.overworld();
+            level.setChunkForced(cx, cz, true);
+            level.getChunk(cx, cz);
+        });
+        return evicted;
+    }
+
+    /** The width the SERVER's overworld strategy is on right now. */
+    private static int serverPaletteBits(TestSingleplayerContext singleplayer) {
+        return singleplayer.getServer().computeOnServer(server -> {
+            Strategy<BlockState> strategy =
+                    server.overworld().palettedContainerFactory().blockStatesStrategy();
+            return ((StrategyAccessor) strategy).getGlobalPaletteBitsInMemory();
+        });
+    }
+
+    /**
+     * The width the CLIENT's own strategy is on, which is a different {@code int}
+     * from the server's even in singleplayer — the whole reason
+     * {@code ClientSeam.widenBlockStatePalette} exists.
+     *
+     * @return the width, or -1 when there is no client level
+     */
+    private static int clientPaletteBits(ClientGameTestContext context) {
+        return context.computeOnClient(client -> {
+            if (client.level == null) {
+                return -1;
+            }
+            Strategy<BlockState> strategy =
+                    client.level.palettedContainerFactory().blockStatesStrategy();
+            return ((StrategyAccessor) strategy).getGlobalPaletteBitsInMemory();
+        });
+    }
+
+    /**
+     * Whether the client's own log file contains {@code needle}.
+     *
+     * <p>Used only for things whose evidence is a stack trace on some other
+     * thread — a decoder length mismatch, a shortened section palette. Every
+     * absence assertion built on this is paired with a presence one (that the
+     * crossing's own line IS there), so a log file that could not be read fails
+     * visibly instead of making every absence trivially true.
+     *
+     * <p>Read as ISO-8859-1 because a crash report can carry bytes that are not
+     * valid UTF-8, and a {@code MalformedInputException} here would be an
+     * assertion failing for a reason that has nothing to do with the assertion.
+     */
+    private static boolean logContains(String needle) {
+        Path log = FabricLoader.getInstance().getGameDir().resolve("logs").resolve("latest.log");
+        try {
+            return Files.isRegularFile(log)
+                    && Files.readString(log, java.nio.charset.StandardCharsets.ISO_8859_1)
+                            .contains(needle);
+        } catch (IOException unreadable) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether {@code logs/latest.log} is the file this run is actually writing.
+     *
+     * <p>Keyed on a line <b>Minecraft itself</b> emits through log4j —
+     * {@code MinecraftServer.saveAllChunks} logs "Saving chunks for level '…'"
+     * whenever it is called with {@code suppressLog=false}, which
+     * {@link #roundTripFarChunk} arranges. Deliberately not keyed on one of
+     * VibeMod's own lines: the host logs through {@code java.util.logging},
+     * which reaches the console but does <em>not</em> land in log4j's file
+     * (checked against {@code fabric/palette-gate/logs/latest.log}, which has
+     * the game's lines and none of VibeMod's).
+     *
+     * <p>Every {@code !logContains(...)} assertion is paired with this one, so a
+     * log that could not be read fails visibly instead of making an absence
+     * trivially true.
+     */
+    private static boolean logIsLive() {
+        return logContains("Saving chunks for level");
+    }
+
+    /** Runs a predicate that is allowed to throw, and counts a throw as false. */
+    private static boolean safely(java.util.function.BooleanSupplier test) {
+        try {
+            return test.getAsBoolean();
+        } catch (Throwable t) {
+            System.out.println("  (threw: " + t + ")");
+            return false;
+        }
+    }
+
+    /**
+     * A block with an arbitrary power-of-two number of states, for forcing a
+     * palette crossing.
+     *
+     * <p>Built from boolean properties rather than one wide
+     * {@code IntegerProperty} because the neighbour tables
+     * {@code StateDefinition} builds are {@code states * Σ(values - 1)} entries:
+     * twelve booleans give 4096 states for 49,152 entries, while one
+     * 4096-value integer property would ask for 16.7 million.
+     *
+     * <p>{@code createBlockStateDefinition} is called from {@code Block.<init>},
+     * before any subclass field exists, which is why the property count arrives
+     * through a {@code ThreadLocal} instead of a constructor argument — the same
+     * problem vanilla solves by making every property a {@code static final},
+     * and the same one {@code StubBlock} has.
+     */
+    public static final class WideBlock extends Block {
+
+        private static final BooleanProperty[] BITS = {
+            BooleanProperty.create("a"), BooleanProperty.create("b"),
+            BooleanProperty.create("c"), BooleanProperty.create("d"),
+            BooleanProperty.create("e"), BooleanProperty.create("f"),
+            BooleanProperty.create("g"), BooleanProperty.create("h"),
+            BooleanProperty.create("i"), BooleanProperty.create("j"),
+            BooleanProperty.create("k"), BooleanProperty.create("l"),
+        };
+
+        private static final ThreadLocal<Integer> PENDING = new ThreadLocal<>();
+
+        /** Builds one with exactly {@code states} states; {@code states} must be a power of two. */
+        static Block of(int states, BlockBehaviour.Properties properties) {
+            PENDING.set(Integer.numberOfTrailingZeros(states));
+            try {
+                return new WideBlock(properties);
+            } finally {
+                PENDING.remove();
+            }
+        }
+
+        private WideBlock(BlockBehaviour.Properties properties) {
+            super(properties);
+        }
+
+        @Override
+        protected void createBlockStateDefinition(StateDefinition.Builder<Block, BlockState> builder) {
+            Integer count = PENDING.get();
+            if (count == null) {
+                return;
+            }
+            for (int i = 0; i < count; i++) {
+                builder.add(BITS[i]);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ seeding
 
     /**
@@ -1698,6 +2776,154 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
               "result": {
                 "id": "NS:ruby_sword"
               }
+            }
+            """;
+
+    // ---------------------------------------------------------- V4 Phase 1
+
+    /**
+     * The V4 Phase 1 canary: a plain Fabric mod, with no VibeMod import in it,
+     * that registers a REAL block and the {@code BlockItem} you place it with.
+     *
+     * <p>Deliberately the same mod as the native profile's {@code RubyBlock}
+     * few-shot, down to the comments — so what the prompt teaches a model to
+     * write is literally what this gate compiles, hot-loads and then places,
+     * breaks and round-trips through disk.
+     *
+     * <p>Two lines carry the whole phase and neither of them looks like it:
+     * {@code setId(...)} runs BEFORE construction, because
+     * {@code BlockBehaviour.<init>} reads the id twice — once for the
+     * description id that becomes the lang key, once for the {@code drops} key
+     * that becomes {@code data/<ns>/loot_table/blocks/<path>.json}; and
+     * registering the {@code BlockItem} under the same id is what the seam
+     * turns into an {@code Item.BY_BLOCK} entry, without which
+     * {@code Block.asItem()} silently answers air.
+     */
+    private static final String BLOCK_CANARY_SOURCE = """
+            package vibemod.blockclientcanary;
+
+            import net.fabricmc.api.ModInitializer;
+
+            import net.minecraft.core.Registry;
+            import net.minecraft.core.registries.BuiltInRegistries;
+            import net.minecraft.core.registries.Registries;
+            import net.minecraft.resources.Identifier;
+            import net.minecraft.resources.ResourceKey;
+            import net.minecraft.world.item.BlockItem;
+            import net.minecraft.world.item.Item;
+            import net.minecraft.world.level.block.Block;
+            import net.minecraft.world.level.block.SoundType;
+            import net.minecraft.world.level.block.state.BlockBehaviour;
+            import net.minecraft.world.level.material.MapColor;
+
+            /** A real registered block: a plain red cube you can place, mine and get back. */
+            public final class BlockClientCanary implements ModInitializer {
+
+                // One id for the block AND its item, in the namespace the resource files use.
+                public static final Identifier ID =
+                        Identifier.fromNamespaceAndPath("vibemod_blockclientcanary", "ruby_block");
+
+                public static Block rubyBlock;
+
+                @Override
+                public void onInitialize() {
+                    // No properties at all, so this block costs exactly ONE blockstate.
+                    // setId(...) BEFORE construction: the Block constructor bakes the
+                    // description id and the loot-table path out of it.
+                    rubyBlock = Registry.register(BuiltInRegistries.BLOCK, ID, new Block(
+                            BlockBehaviour.Properties.of()
+                                    .mapColor(MapColor.COLOR_RED)
+                                    .strength(3.0F)
+                                    .sound(SoundType.STONE)
+                                    .setId(ResourceKey.create(Registries.BLOCK, ID))));
+                    // The item you hold and place, under the same id.
+                    Registry.register(BuiltInRegistries.ITEM, ID, new BlockItem(rubyBlock,
+                            new Item.Properties()
+                                    .useBlockDescriptionPrefix()
+                                    .setId(ResourceKey.create(Registries.ITEM, ID))));
+                }
+            }
+            """;
+
+    /**
+     * Stored DISABLED, like the registry canary: the block gate enables it
+     * mid-session on purpose, so registration, the resource reload and the model
+     * rebake all happen against a world that has been running for thousands of
+     * ticks rather than at a convenient moment during boot.
+     */
+    private static final String BLOCK_CANARY_META = """
+            {
+              "schema": 3,
+              "platform": "fabric",
+              "mcVersion": "26.2",
+              "side": "both",
+              "name": "BlockClientCanary",
+              "description": "A plain Fabric mod that registers a real block and its BlockItem.",
+              "usage": "",
+              "manual": "",
+              "icon": "REDSTONE_BLOCK",
+              "mainClass": "vibemod.blockclientcanary.BlockClientCanary",
+              "currentVersion": 1,
+              "enabled": false,
+              "creator": "gate",
+              "versions": [
+                {
+                  "version": 1,
+                  "prompt": "the V4 block canary",
+                  "model": "none",
+                  "createdAt": 0,
+                  "changelog": "First block canary.",
+                  "kind": "create",
+                  "costUsd": 0.0,
+                  "requester": "gate"
+                }
+              ],
+              "config": [],
+              "configValues": {}
+            }
+            """;
+
+    /**
+     * The loot table without which the block drops NOTHING when broken — and
+     * says nothing about it, because {@code BlockBehaviour.<init>} baked the
+     * key {@code <ns>:blocks/ruby_block} out of the id and vanilla simply finds
+     * no table there.
+     */
+    private static final String BLOCK_CANARY_LOOT = """
+            {
+              "type": "minecraft:block",
+              "pools": [
+                {
+                  "rolls": 1,
+                  "entries": [{"type": "minecraft:item", "name": "NS:ruby_block"}],
+                  "conditions": [{"condition": "minecraft:survives_explosion"}]
+                }
+              ]
+            }
+            """;
+
+    /** A full 16x16 grid: a block texture with no alpha, which is what makes it a solid layer. */
+    private static final String BLOCK_CANARY_GRID = """
+            {
+              "palette": {"d": "#5a1010", "r": "#b31c1c", "l": "#ff6b6b"},
+              "rows": [
+                "dddddddddddddddd",
+                "drrrrrrrrrrrrrrd",
+                "drlrrrrrrrrrrlrd",
+                "drrrrlrrrrlrrrrd",
+                "drrrrrrllrrrrrrd",
+                "drrrrrlrrlrrrrrd",
+                "drrrrlrrrrlrrrrd",
+                "drrrlrrrrrrlrrrd",
+                "drrrlrrrrrrlrrrd",
+                "drrrrlrrrrlrrrrd",
+                "drrrrrlrrlrrrrrd",
+                "drrrrrrllrrrrrrd",
+                "drrrrlrrrrlrrrrd",
+                "drlrrrrrrrrrrlrd",
+                "drrrrrrrrrrrrrrd",
+                "dddddddddddddddd"
+              ]
             }
             """;
 

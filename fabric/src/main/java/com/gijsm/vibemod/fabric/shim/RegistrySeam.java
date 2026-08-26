@@ -220,6 +220,8 @@ public final class RegistrySeam implements RegistryTarget {
     private final AtomicInteger pinnedStubs = new AtomicInteger();
     private int windowDepth;
     private int registeredInWindow;
+    /** {@code BLOCK_STATE_REGISTRY} size when the window opened; see {@link #open()}. */
+    private int blockStatesBefore;
     /** {@code DATA_COMPONENT_INITIALIZERS} size when the window opened, or -1 if unreadable. */
     private int initializersBefore = -1;
 
@@ -280,6 +282,16 @@ public final class RegistrySeam implements RegistryTarget {
             return;
         }
         registeredInWindow = 0;
+        // The counter above is what the seam COUNTED; this is what actually
+        // happened. Gating the repair on the counter alone was a latent server
+        // crash: anything that registers inside the window without going through
+        // this class's register() leaves every block holder's tags unbound,
+        // because refreshTagsInHolders only runs when the counter moved — and the
+        // next LeavesBlock.tick() then takes the server down with
+        // "IllegalStateException: Tags not bound". The palette gate's canary
+        // found it by bypassing the seam on purpose. Measuring the registry
+        // itself cannot be bypassed.
+        blockStatesBefore = Block.BLOCK_STATE_REGISTRY.size();
         // Item.<init> appends to this list as a side effect, and nothing else
         // ever removes an entry — see DataComponentInitializersAccessor for what
         // that does to every later datapack reload.
@@ -327,8 +339,19 @@ public final class RegistrySeam implements RegistryTarget {
         if (orphaned > 0) {
             rollBackComponentInitializers();
         }
-        if (registeredInWindow == 0) {
+        // Either the seam counted a registration, or the blockstate registry grew
+        // under it. The second half is the belt: see open() for the crash it
+        // prevents.
+        boolean statesGrew = Block.BLOCK_STATE_REGISTRY.size() != blockStatesBefore;
+        if (registeredInWindow == 0 && !statesGrew) {
             return;
+        }
+        if (registeredInWindow == 0) {
+            LOG.warning("The blockstate registry grew by "
+                    + (Block.BLOCK_STATE_REGISTRY.size() - blockStatesBefore)
+                    + " during a window in which this seam registered nothing. Repairing tags and "
+                    + "component lookups anyway — without it the next LeavesBlock.tick() would "
+                    + "fail with \"Tags not bound\" and take the server with it");
         }
         repairAfterRegistration();
     }

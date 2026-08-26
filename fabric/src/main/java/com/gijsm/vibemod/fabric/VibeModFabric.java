@@ -846,6 +846,15 @@ public final class VibeModFabric implements ModInitializer {
                 CompileResult compiled = compiler.compile(sources);
                 scheduler.runOnMain(() -> {
                     if (!compiled.success()) {
+                        // Logged as well as sent, and that is not double-reporting.
+                        // This runs on a worker and answers whoever asked — but over
+                        // RCON that connection was answered and closed long ago, so
+                        // the diagnostic goes nowhere at all: no reply, nothing in
+                        // the log, a mod that simply never appears. Every scripted
+                        // admin path has that shape, and the palette gate lost an
+                        // afternoon to it.
+                        LOG.warning("Stored version of " + mod.name() + " failed to compile: "
+                                + firstLine(compiled.diagnostics()));
                         feedback.audience().sendMessage(Style.err("Stored version failed to compile: "
                                 + firstLine(compiled.diagnostics())));
                         return;
@@ -861,6 +870,8 @@ public final class VibeModFabric implements ModInitializer {
                             onLive.run();
                         }
                     } catch (ModLoadException e) {
+                        // Same reason as the compile failure above.
+                        LOG.warning("Failed to start " + mod.name() + ": " + e.getMessage());
                         feedback.audience().sendMessage(
                                 Style.err("Failed to start " + mod.name() + ": " + e.getMessage()));
                     }

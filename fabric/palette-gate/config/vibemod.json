@@ -1,0 +1,20 @@
+{
+  "openrouter.api-key": "",
+  "openrouter.model": "anthropic/claude-sonnet-5",
+  "openrouter.timeout-seconds": 120,
+  "openrouter.streaming": true,
+  "openrouter.max-tokens": 0,
+  "openrouter.reasoning-effort": "off",
+  "generation.max-retries": 3,
+  "generation.concurrency": 4,
+  "watchdog.enabled": true,
+  "watchdog.single-invocation-ms": 250,
+  "watchdog.per-second-budget-ms": 500,
+  "commands.allow-top-level": true,
+  "errors.storm-threshold": 10,
+  "errors.storm-window-seconds": 60,
+  "errors.max-distinct": 25,
+  "errors.stack-frames": 10,
+  "debug.default-echo": false,
+  "ui.force-chat": false
+}

@@ -124,23 +124,58 @@ motd=VibeMod palette-boundary gate ($MC_VERSION)
 PROPS
 
 # ------------------------------------------------------------- the canary
-# A plain Fabric ModInitializer, stored DISABLED. The gate enables it by hand,
-# because everything below has to happen while a world is running and while the
-# registration window is open — and the window is open for exactly the duration
-# of a mod's onInitialize().
+# A plain Fabric ModInitializer, stored ENABLED — and the crossing deferred to a
+# command, which is the same ordering by a different mechanism.
 #
-# TWO DELIBERATE BYPASSES, both stated here because either one would be a bug in
-# a generated mod:
+# WHY ENABLED, when the ordering wants the crossing to happen LATE:
+#
+#   `/vibe enable` on a mod that has never been loaded does not enable anything
+#   synchronously — it falls through to applyStoredVersion, which compiles on a
+#   worker and reports the result to the SENDER's audience. Over RCON that
+#   sender's connection has already been answered and closed, so the reply is
+#   dropped on the floor: a compile error, a ModLoadException, "vN is live", all
+#   of it. The first cut of this gate stored the canary disabled and enabled it
+#   over RCON, and got "(no reply)" and a boot log that never mentions the mod
+#   again. Nothing was broken except the gate's ability to see.
+#
+#   restoreModsFromDisk() passes console() instead, and console() writes to the
+#   server log. So the canary ships enabled, is compiled and loaded at boot with
+#   every diagnostic visible, and arms a command — while the crossing itself
+#   still waits for `/pgcheck cross`, after the probe assertions below have
+#   measured a palette that nothing has moved yet.
+#
+# FOUR DELIBERATE BYPASSES, all stated here because any one of them would be a
+# bug in a generated mod:
 #
 #  * It calls WritableRegistry.register directly instead of Registry.register.
 #    The seam rewrites the latter, and on a dedicated server the seam REFUSES
 #    all registry content (smoke-fabric.sh gates exactly that). This gate is not
 #    testing the policy, it is testing the palette machinery underneath it, so
-#    it goes around the policy on purpose and does vanilla's own state-append
-#    loop itself.
+#    it goes around the policy on purpose and calls BlockRegistration.appendStates
+#    — vanilla's own state-append loop, which the seam uses too — itself.
+#    It cannot inline that loop, because StateDefinition.getPossibleStates()
+#    returns a Guava ImmutableList and com.google.* is outside the packages the
+#    surgeon lets a generated mod name at all.
 #  * It imports VibeModFabric and PaletteGuard. It is a harness, not a mod: it
 #    drives the guard directly and reports the guard's own numbers, which is the
 #    only way to size the test from the REAL budget rather than from a constant.
+#  * It opens the registration window itself, through
+#    Shims.registries().withWindow(...). FabricEntrypointAdapter wraps a mod's
+#    onInitialize() in that window and nothing else, so a block registered from
+#    a command would otherwise hit "Registry is already frozen" out of
+#    MappedRegistry.validateWrite. Reusing the host's own window rather than
+#    poking `frozen` directly means the refreeze, the intrusive-holder cleanup
+#    and the orphan report are the real ones.
+#  * It calls MappedRegistry.refreshTagsInHolders() itself, through the host's
+#    own accessor mixin. RegistrySeam.close() does that for a real registration
+#    — but only when `registeredInWindow > 0`, and that counter is incremented
+#    by the seam's OWN register(), which the first bypass above walks around. So
+#    this window closes with every block holder's tags unbound, and the next
+#    LeavesBlock.tick() dereferences them: "IllegalStateException: Tags not
+#    bound", one server tick after a crossing that had otherwise gone perfectly.
+#    (That crash is real and this gate caught it; it is an artefact of the
+#    bypass, not of the palette machinery, so the harness repairs what it broke
+#    instead of avoiding the blocks that notice.)
 #
 # It still calls guard.admit(...) before appending a single state, because that
 # is the contract the guard exists to enforce: IdMapper.add appends at nextId++
@@ -159,6 +194,7 @@ import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.WritableRegistry;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -179,7 +215,11 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
+import com.gijsm.vibemod.fabric.mixin.MappedRegistryAccessor;
+import com.gijsm.vibemod.fabric.shim.BlockRegistration;
 import com.gijsm.vibemod.fabric.shim.PaletteGuard;
+import com.gijsm.vibemod.fabric.shim.RegistryTarget;
+import com.gijsm.vibemod.fabric.shim.Shims;
 
 /**
  * Forces a global-palette boundary crossing against a real world and reports
@@ -234,20 +274,62 @@ public final class PaletteCanary implements ModInitializer {
     /** Where the past-the-old-boundary state gets written. */
     private static final BlockPos WIDE = new BlockPos(BASE_X + 2, SECTION_Y + 2, BASE_Z + 2);
 
-    /** The section's contents as of the last save, for the round-trip check. */
+    /**
+     * The section's contents as of the moment the chunk was let go, for the
+     * round-trip check.
+     *
+     * <p>Written twice, and the second write is the one that matters. The
+     * crossing sets it so a crash between here and the save still leaves a
+     * number to compare against; {@code pgcheck forget} <b>re-reads it</b>
+     * immediately before dropping the force ticket, and reports whether the two
+     * agreed.
+     *
+     * <p>They do not always agree, and that is a real world doing real work
+     * rather than a palette problem. Leaves decay is a <em>scheduled</em> tick,
+     * not a random one, so {@code gamerule randomTickSpeed 0} does not stop it,
+     * and leaves are among the first 300 blockstate ids this gate fills a
+     * section with. Comparing the reload against a number taken thirty seconds
+     * and several hundred ticks earlier would be asserting that a live world
+     * stands still. Comparing it against the section as it was actually let go
+     * is the round trip.
+     */
     private static volatile long savedChecksum;
 
+    /**
+     * Whether the crossing has already run.
+     *
+     * <p>A crossing is irreversible for the life of the JVM — {@code IdMapper}
+     * has no remove — so a second {@code /pgcheck cross} must decline rather than
+     * register a second batch of blocks against a budget that has already moved.
+     */
+    private static volatile boolean crossingRan;
+
+    /**
+     * Arms, and does nothing else.
+     *
+     * <p>This mod is stored enabled, so this runs from
+     * {@code restoreModsFromDisk()} while the server is starting. The crossing
+     * deliberately does NOT happen here: the gate has to measure the real
+     * palette budget against a world that nothing has touched before anything
+     * moves it, so the whole harness hangs off {@code /pgcheck cross} instead.
+     */
     @Override
     public void onInitialize() {
-        // Registered first, and outside the try: if the crossing throws, the
-        // gate still needs a way to ask what the world looks like.
         CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) ->
                 dispatcher.register(Commands.literal("pgcheck")
+                        .then(Commands.literal("cross").executes(ctx -> cross(ctx.getSource())))
                         .then(Commands.literal("forget").executes(ctx -> {
                             ServerLevel level = ctx.getSource().getServer().overworld();
+                            // Re-read BEFORE the ticket goes, so the round trip
+                            // below is measured against the section as it is let
+                            // go rather than as it was at the crossing.
+                            long atCrossing = savedChecksum;
+                            savedChecksum = checksum(level);
                             level.setChunkForced(TEST_CX, TEST_CZ, false);
                             level.setChunkForced(LOCAL_CX, LOCAL_CZ, false);
-                            say(ctx.getSource(), "pgcheck forget=ok");
+                            say(ctx.getSource(), "pgcheck forget=ok"
+                                    + " settled=" + (savedChecksum == atCrossing)
+                                    + " checksum=" + savedChecksum);
                             return 1;
                         }))
                         .then(Commands.literal("loaded").executes(ctx -> {
@@ -269,12 +351,72 @@ public final class PaletteCanary implements ModInitializer {
                             return 1;
                         }))));
 
+        // The gate waits for this line before it asserts that nothing has
+        // crossed yet: "the canary is loaded" and "the canary has not moved the
+        // palette" are two different claims and both have to be provable.
+        LOG.info("palette-gate: armed");
+    }
+
+    /**
+     * The trigger, and the whole reason this mod does nothing at load.
+     *
+     * <p>{@code FabricEntrypointAdapter} opens the registration window around
+     * {@code onInitialize()} and around nothing else, so this reopens it —
+     * through the host's own seam, so the refreeze and the intrusive-holder
+     * cleanup are the real ones — for the duration of the crossing.
+     */
+    private int cross(CommandSourceStack source) {
+        if (crossingRan) {
+            // Refused rather than repeated: the ids the first run minted are
+            // still there, and a second run would size itself from a budget the
+            // first one already spent.
+            say(source, "pgcheck cross=already-done");
+            return 1;
+        }
+        crossingRan = true;
         try {
-            run();
+            RegistryTarget registries = Shims.registries();
+            try {
+                if (registries == null) {
+                    run();
+                } else {
+                    registries.withWindow(this::run);
+                }
+            } finally {
+                // In a finally, not after the happy path: a run that threw
+                // halfway may still have registered a block, and a half-repaired
+                // registry crashes the tick loop either way.
+                rebindBlockTags();
+            }
+            say(source, "pgcheck cross=ok");
         } catch (Throwable t) {
-            // Logged rather than rethrown: a rethrow fails the mod load, which
-            // drains the command above and leaves the gate with nothing to ask.
+            // Logged AND answered: the log is what the gate asserts on, and the
+            // reply is what a human running this by hand sees.
             LOG.log(Level.SEVERE, "palette-gate: aborted", t);
+            say(source, "pgcheck cross=aborted " + t);
+        }
+        return 1;
+    }
+
+    /**
+     * The half of {@code MappedRegistry.freeze()} that {@code register()} does
+     * not do, done by hand because this harness registers around the seam.
+     *
+     * <p>{@code RegistrySeam.close()} runs this for a real registration, but
+     * only when its own {@code register()} counted one — and this canary calls
+     * {@code WritableRegistry.register} directly, on purpose, so that counter
+     * stays at zero and the repair is skipped. A {@code Holder.Reference} whose
+     * tags are unbound throws {@code IllegalStateException: Tags not bound} out
+     * of {@code is(TagKey)}, and the first thing to ask is
+     * {@code LeavesBlock.tick()} — which this gate schedules itself, because
+     * leaves are among the 300 vanilla states it fills a section with.
+     */
+    private static void rebindBlockTags() {
+        if (BuiltInRegistries.BLOCK instanceof MappedRegistry<?> mapped) {
+            ((MappedRegistryAccessor) mapped).invokeRefreshTagsInHolders();
+            LOG.info("palette-gate: tagsRebound=true");
+        } else {
+            LOG.info("palette-gate: tagsRebound=false (BLOCK is not a MappedRegistry)");
         }
     }
 
@@ -333,7 +475,6 @@ public final class PaletteCanary implements ModInitializer {
             size <<= 1;
         }
         Block crosser = registerSynthetic(guard, made++, size);
-        List<BlockState> crosserStates = crosser.getStateDefinition().getPossibleStates();
 
         int newBits = guard.bits();
         LOG.info("palette-gate: after states=" + guard.states() + " " + guard.describeState());
@@ -358,8 +499,17 @@ public final class PaletteCanary implements ModInitializer {
         // SimpleBitStorage.set opens with Validate.inclusiveBetween(0, mask,
         // value). Writing the highest state of the crossing block into a section
         // that is ALREADY on the global palette is that check, exactly.
-        BlockState widest = crosserStates.get(crosserStates.size() - 1);
+        //
+        // The highest id is read back off BLOCK_STATE_REGISTRY rather than taken
+        // from StateDefinition.getPossibleStates(), which returns a Guava
+        // ImmutableList that a generated mod may not so much as name. It is also
+        // the stronger question: "the last id that now exists" is what the old
+        // 15-bit storage cannot hold, whatever order the state definition
+        // happened to build its states in. Which block it belongs to is asserted
+        // rather than assumed.
+        BlockState widest = Block.BLOCK_STATE_REGISTRY.byId(guard.states() - 1);
         int wideId = Block.getId(widest);
+        LOG.info("palette-gate: widestBelongsToCrosser=" + (widest.getBlock() == crosser));
         try {
             level.setBlock(WIDE, widest, SET_FLAGS);
             LOG.info("palette-gate: wideWrite=ok wideId=" + wideId
@@ -385,6 +535,14 @@ public final class PaletteCanary implements ModInitializer {
     /**
      * Registers one synthetic block the way {@code Blocks.<clinit>} does, guard
      * first.
+     *
+     * <p>{@code states} is what {@link Synthetic} was asked to build and
+     * therefore what the guard is asked to admit, because the guard has to be
+     * asked <em>before</em> a single id is minted and the only way to count the
+     * states first is {@code getPossibleStates()}, which a generated mod may not
+     * name. {@code appendStates} returns the real number, and the two are logged
+     * side by side so a mismatch is a visible failure rather than a silent
+     * miscount of the budget.
      */
     @SuppressWarnings("unchecked")
     private static Block registerSynthetic(PaletteGuard guard, int index, int states) {
@@ -392,19 +550,16 @@ public final class PaletteCanary implements ModInitializer {
         ResourceKey<Block> key = ResourceKey.create(Registries.BLOCK, id);
         Block block = Synthetic.of(states,
                 BlockBehaviour.Properties.of().strength(1.0F).setId(key));
-        List<BlockState> possible = block.getStateDefinition().getPossibleStates();
 
         // BEFORE anything is appended. IdMapper.add stores at nextId++ and there
         // is no remove, so a block that would not fit has to be stopped here.
-        guard.admit("PaletteCanary", id.toString(), possible.size());
+        guard.admit("PaletteCanary", id.toString(), states);
 
         ((WritableRegistry<Block>) BuiltInRegistries.BLOCK)
                 .register(key, block, RegistrationInfo.BUILT_IN);
-        for (BlockState state : possible) {
-            Block.BLOCK_STATE_REGISTRY.add(state);
-            state.initCache();
-        }
-        LOG.info("palette-gate: synthetic " + id + " states=" + possible.size());
+        int appended = BlockRegistration.appendStates(block);
+        LOG.info("palette-gate: synthetic " + id + " states=" + appended
+                + " admitted=" + states + " countMatched=" + (appended == states));
         return block;
     }
 
@@ -486,8 +641,8 @@ public final class PaletteCanary implements ModInitializer {
      *
      * <p>{@code createBlockStateDefinition} is called from {@code Block.<init>},
      * before any subclass field exists, which is why the property count arrives
-     * through a thread-local instead of a constructor argument — the same
-     * problem vanilla solves by making every property a static final.
+     * through a static instead of a constructor argument — the same problem
+     * vanilla solves by making every property a static final.
      */
     public static final class Synthetic extends Block {
 
@@ -500,14 +655,29 @@ public final class PaletteCanary implements ModInitializer {
             BooleanProperty.create("k"), BooleanProperty.create("l"),
         };
 
-        private static final ThreadLocal<Integer> PENDING = new ThreadLocal<>();
+        /**
+         * How many of {@link #BITS} the block currently under construction wants,
+         * or -1 between constructions.
+         *
+         * <p>A plain static and not a {@code ThreadLocal}, for two reasons and
+         * the first one is the real one: block registration is server-thread
+         * only, inside the registration window, which is the same confinement
+         * vanilla relies on to build every block in {@code Blocks.<clinit>} out
+         * of static finals. The second is that the surgeon's forbidden-API
+         * policy denies {@code java/lang/Thread} + {@code <init>} by
+         * <em>prefix</em>, and {@code java.lang.ThreadLocal} starts with
+         * {@code java/lang/Thread} — so a canary built on one is refused at
+         * compile time with "forbidden API: java.lang.ThreadLocal.&lt;init&gt;
+         * — creating threads". That refusal is how this gate first failed.
+         */
+        private static int pending = -1;
 
         static Block of(int states, BlockBehaviour.Properties properties) {
-            PENDING.set(Integer.numberOfTrailingZeros(states));
+            pending = Integer.numberOfTrailingZeros(states);
             try {
                 return new Synthetic(properties);
             } finally {
-                PENDING.remove();
+                pending = -1;
             }
         }
 
@@ -518,8 +688,8 @@ public final class PaletteCanary implements ModInitializer {
         @Override
         protected void createBlockStateDefinition(
                 StateDefinition.Builder<Block, BlockState> builder) {
-            Integer count = PENDING.get();
-            if (count == null) {
+            int count = pending;
+            if (count < 0) {
                 return;
             }
             for (int i = 0; i < count; i++) {
@@ -539,9 +709,13 @@ open(sys.argv[1], "w").write(json.dumps({
     "usage": "", "manual": "", "icon": "STONE",
     "mainClass": "vibemod.palettecanary.PaletteCanary",
     "currentVersion": 1,
-    # Stored DISABLED on purpose: the crossing needs a running world, and the
-    # gate wants to snapshot the palette probe before anything moves it.
-    "enabled": False,
+    # Stored ENABLED on purpose. restoreModsFromDisk() compiles and loads it with
+    # console() as the feedback sender, so the compile diagnostics and the "v1 is
+    # live" line reach the server log; an RCON `vibe enable` on a never-loaded mod
+    # compiles asynchronously and answers a connection that has already closed.
+    # The ordering the gate needs is preserved by the canary itself: onInitialize
+    # only arms /pgcheck, and the crossing waits for `pgcheck cross`.
+    "enabled": True,
     "creator": "palette-gate",
     "versions": [{"version": 1, "prompt": "the V4 palette boundary canary", "model": "none",
                   "createdAt": int(time.time() * 1000), "changelog": "First palette canary.",
@@ -581,6 +755,31 @@ for i in $(seq 1 "$BOOT_TIMEOUT"); do
 done
 grep -q 'Done (' "$LOG" || { echo "!! server never booted; tail:" >&2; tail -60 "$LOG" >&2; exit 1; }
 
+# --------------------------------------------- the canary, loaded but not fired
+# The store restores it at boot, which is the only path whose feedback sender is
+# console() and therefore the only path whose compile diagnostics reach this log
+# at all. Loading it must not move the palette: onInitialize registers /pgcheck
+# and stops, so the budget assertions below still measure an untouched world.
+note "waiting for the canary to compile and load from the store"
+CANARY_LIVE=no
+for i in $(seq 1 300); do
+  if grep -q 'PaletteCanary v1 is live' "$LOG" 2>/dev/null; then
+    CANARY_LIVE=yes
+    note "canary live after ${i}s"
+    break
+  fi
+  grep -q 'PaletteCanary' "$LOG" 2>/dev/null \
+    && grep -qE 'failed to compile|Failed to start' "$LOG" 2>/dev/null && break
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "!! server died while the canary was loading; tail:" >&2
+    tail -60 "$LOG" >&2
+    exit 1
+  fi
+  sleep 1
+done
+assert "the canary compiled and hot-loaded from the store" test "$CANARY_LIVE" = yes
+assert "and its entrypoint armed the trigger" in_file "$LOG" 'palette-gate: armed'
+
 # ------------------------------------------------- the budget, before anything
 note "reading the real palette budget at boot"
 PROBE_LINE="$(grep -m1 -oE 'blockStates=[0-9]+ paletteBits=[0-9]+ paletteBudget=[0-9]+' "$LOG" || true)"
@@ -591,8 +790,10 @@ assert "the palette probe reported a budget to size the test from" test -n "$PRO
 assert "and it adds up (${P_STATES:-?} + ${P_BUDGET:-?} == 2^${P_BITS:-?})" \
   test "$((P_STATES + P_BUDGET))" -eq "$((1 << P_BITS))"
 note "measured budget: $P_BUDGET states of headroom at $P_BITS bits"
-assert "nothing has crossed the boundary yet" \
+assert "nothing has crossed the boundary yet, the loaded canary included" \
   not_in_file "$LOG" 'crossing the global block palette boundary'
+assert "and the canary has registered no blocks yet" \
+  not_in_file "$LOG" 'palette-gate: synthetic '
 
 # Random ticks would grow, break or drop some of the 300 vanilla states this
 # gate places in one section, and the checksum would move for a reason that has
@@ -601,16 +802,23 @@ assert "nothing has crossed the boundary yet" \
   "gamerule randomTickSpeed 0" "gamerule doFireTick false" > /dev/null
 
 # ------------------------------------------------------------- the crossing
-note "enabling the palette canary (this registers blocks and forces a crossing)"
-ERCON="$RUN/enable.log"
-"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "vibe enable PaletteCanary" | tee "$ERCON"
+# NOW, and by an explicit command, so everything above measured a palette that
+# nothing had moved. `pgcheck cross` runs the whole harness synchronously on the
+# server thread inside a reopened registration window; the reply is a
+# convenience and the log is the evidence, which is why an RCON read timeout is
+# a note rather than an abort.
+note "triggering the crossing (this registers blocks and forces a boundary crossing)"
+XRCON="$RUN/cross.log"
+"$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "pgcheck cross" | tee "$XRCON" \
+  || note "the trigger outran the RCON read timeout; the server log is the evidence"
 
 for i in $(seq 1 180); do
   grep -q 'palette-gate: done' "$LOG" 2>/dev/null && { note "crossing finished after ${i}s"; break; }
   grep -q 'palette-gate: aborted' "$LOG" 2>/dev/null && break
   sleep 1
 done
-assert "the canary compiled, loaded and ran to completion" in_file "$LOG" 'palette-gate: done'
+assert "the trigger command reached the canary" in_file "$XRCON" 'pgcheck cross=ok'
+assert "and the harness ran to completion" in_file "$LOG" 'palette-gate: done'
 assert "and nothing in it aborted" not_in_file "$LOG" 'palette-gate: aborted'
 
 note "asserting the witnesses were the right shape before the crossing"
@@ -626,6 +834,12 @@ assert "and reported the new width" in_file "$LOG" 'global block palette is now'
 assert "paletteBits moved" in_file "$LOG" 'palette-gate: crossed=true'
 assert "the synthetic blocks were sized from the measured budget, not a constant" \
   in_file "$LOG" 'palette-gate: synthetic vibemod_palettecanary:synthetic_0'
+# The guard has to be asked BEFORE the first id is minted, so it is asked for the
+# count the block was BUILT to have. If that ever stopped matching the count the
+# append loop actually added, every budget number above would be measuring one
+# world and admitting another.
+assert "and the guard admitted exactly the number of states that were appended" \
+  not_in_file "$LOG" 'countMatched=false'
 
 note "asserting object-reference immunity (the claim, not the assumption)"
 # The one that would be easy to assume and wrong to assume: LinearPalette and
@@ -644,6 +858,8 @@ assert "the known vanilla neighbour block is unchanged (the palette-shift detect
   in_file "$LOG" 'palette-gate: neighbour=minecraft:gold_block'
 
 note "asserting the Validate.inclusiveBetween regression is closed"
+assert "the highest id that now exists belongs to the block that crossed" \
+  in_file "$LOG" 'palette-gate: widestBelongsToCrosser=true'
 assert "writing a state past the old boundary into a global section did not throw" \
   in_file "$LOG" 'palette-gate: wideWrite=ok'
 assert "and the id really was past the old boundary" in_file "$LOG" 'pastOldBoundary=true'
@@ -676,6 +892,16 @@ note "round-tripping the test chunk through disk"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "save-all flush" > /dev/null
 RRCON="$RUN/roundtrip.log"
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "pgcheck forget" | tee "$RRCON"
+if grep -q 'settled=false' "$RRCON"; then
+  note "the section changed between the crossing and the save, and that is the"
+  note "  world simulating rather than the palette moving: leaves decay is a"
+  note "  SCHEDULED tick, not a random one, so gamerule randomTickSpeed 0 does"
+  note "  not stop it, and leaves are among the first 300 blockstate ids this"
+  note "  gate fills a section with. The round trip below is measured against the"
+  note "  section as it was let go — which is the claim it is making. That the"
+  note "  crossing itself changed nothing is the checksumHeld assertion above,"
+  note "  taken before and after inside a single tick."
+fi
 
 EVICTED=no
 for i in $(seq 1 90); do
@@ -692,7 +918,7 @@ done
 assert "the test chunk really left memory, so the reload comes off disk" test "$EVICTED" = yes
 
 "$ROOT/scripts/smoke-rcon.py" "$RCON_PORT" "$RCON_PASSWORD" "pgcheck reload" | tee -a "$RRCON"
-assert "pre-existing content survived the save/load round trip" \
+assert "the section as it was let go came back off disk unchanged" \
   in_file "$RRCON" 'checksumHeld=true'
 assert "the vanilla neighbour block survived it too" \
   in_file "$RRCON" 'neighbour=minecraft:gold_block'
@@ -704,6 +930,15 @@ assert "no section was silently shortened on load (finding 3c)" \
 note "asserting nothing else broke"
 assert "no mixin failed to apply" not_in_file "$LOG" 'Mixin apply failed'
 assert "nothing threw on a worker thread" not_in_file "$LOG" 'Exception in thread'
+# The one that only a real world can answer. Everything above is a snapshot taken
+# inside the crossing's own call stack; this asks whether the server kept ticking
+# afterwards, with those blocks in those chunks. The first run that got this far
+# died here one tick later, on unbound block tags.
+assert "the server kept ticking after the crossing" \
+  not_in_file "$LOG" 'Encountered an unexpected exception'
+assert "and no crash report was written" not_in_file "$LOG" 'This crash report has been saved'
+assert "the harness rebound the tags its bypass left unbound" \
+  in_file "$LOG" 'palette-gate: tagsRebound=true'
 # ThreadingDetector builds its message with an invokedynamic string template, so
 # there is no stable literal to grep for — but the crash report it attaches
 # always carries a "Thread dumps" category, and that IS a literal (verified in
