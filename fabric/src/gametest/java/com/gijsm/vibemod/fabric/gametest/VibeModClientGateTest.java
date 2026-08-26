@@ -60,8 +60,13 @@ import com.gijsm.vibemod.runtime.ModHandle;
  */
 public final class VibeModClientGateTest implements FabricClientGameTest {
 
-    /** How long to give an async compile + hot-load before calling it a failure. */
-    private static final int LOAD_TIMEOUT_TICKS = 400;
+    /**
+     * How long to give an async compile + hot-load before calling it a failure.
+     * 400 ticks flaked once under machine contention (another Minecraft running;
+     * the mod loaded ~15s past the window — STRESS-RESULT.md). This is a patience
+     * budget, not an assertion: a genuinely broken load still fails, just later.
+     */
+    private static final int LOAD_TIMEOUT_TICKS = 1600;
 
     private final List<String> failures = new ArrayList<>();
 
