@@ -1261,8 +1261,11 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         }
         check("the seam holds no blocks before the block canary (" + seam.describeState() + ")",
                 seam.describeState().contains("registryBlocks=0"));
+        // The trailing space is not decoration: registryBlockStates is followed
+        // by " registryPinnedStubs=" in describeState, and without it
+        // contains("…=1") would also match "…=10" once a second block lands.
         check("and no blockstates have been appended yet (" + seam.describeState() + ")",
-                seam.describeState().contains("registryBlockStates=0"));
+                seam.describeState().contains("registryBlockStates=0 "));
 
         int statesBefore = guard.states();
         int budgetBefore = guard.budget();
@@ -1319,7 +1322,7 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         check("the seam counts the block (" + seamState + ")", seamState.contains("registryBlocks=1"));
         check("and counts the blockstates it appended, matching the state definition ("
                         + seamState + ")",
-                seamState.contains("registryBlockStates=" + states.size()));
+                seamState.contains("registryBlockStates=" + states.size() + " "));
         check("the guard's live state count grew by exactly that many",
                 guard.states() == statesBefore + states.size());
 
@@ -1398,6 +1401,25 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
                 context.computeOnClient(client -> client.player != null));
 
         // ---- broken, and dropped ----
+        //
+        // The loot table has to be IN the server before the block is broken,
+        // and it does not arrive synchronously: the mod's data/** becomes a
+        // world datapack and the coordinator debounces one server reload for it,
+        // about two seconds later. Breaking inside that window drops nothing and
+        // says nothing — which is exactly §7.4's "the demo tore down inside the
+        // debounce window", and is what the first run of this gate did.
+        java.util.Optional<ResourceKey<net.minecraft.world.level.storage.loot.LootTable>> lootKey =
+                block.getLootTable();
+        check("the block carries a loot-table key baked from its id ("
+                        + lootKey.map(key -> key.identifier().toString()).orElse("none") + ")",
+                lootKey.isPresent()
+                        && lootKey.get().identifier().equals(
+                                Identifier.fromNamespaceAndPath(BLOCK_NS, "blocks/ruby_block")));
+        check("and the debounced server reload carried that loot table into the game",
+                lootKey.isPresent() && awaitTrue(context, () -> Boolean.TRUE.equals(
+                        singleplayer.getServer().computeOnServer(server ->
+                                server.reloadableRegistries().getLootTable(lootKey.get())
+                                        != net.minecraft.world.level.storage.loot.LootTable.EMPTY))));
         check("destroyBlock broke the runtime-registered block",
                 Boolean.TRUE.equals(singleplayer.getServer().computeOnServer(server ->
                         server.overworld().destroyBlock(placed, true, null, 512))));
@@ -1503,8 +1525,17 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
                 context.computeOnClient(client -> {
                     net.minecraft.client.renderer.block.BlockStateModelSet models =
                             client.getModelManager().getBlockStateModelSet();
-                    return models.getParticleMaterial(state)
-                            != models.missingModel().particleMaterial();
+                    try {
+                        return models.getParticleMaterial(state)
+                                != models.missingModel().particleMaterial();
+                    } catch (Throwable unbaked) {
+                        // A model that resolved but whose particle reference did
+                        // not is exactly the failure this asserts against, and a
+                        // throw here would take the gate down instead of failing
+                        // one line of it.
+                        System.out.println("  (particle material threw: " + unbaked + ")");
+                        return false;
+                    }
                 }));
         check("the client is still running after baking and drawing it",
                 context.computeOnClient(client -> client.player != null));
@@ -1818,6 +1849,11 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
         BlockState state = block.defaultBlockState();
         singleplayer.getServer().runOnServer(server -> {
             ServerLevel level = server.overworld();
+            // A force ticket rather than a hope: the witness has to be readable
+            // again in the reopened world, where the player may be anywhere, and
+            // a forced chunk is recorded in the save so the reopen restores it.
+            level.setChunkForced(witness.getX() >> 4, witness.getZ() >> 4, true);
+            level.getChunk(witness.getX() >> 4, witness.getZ() >> 4);
             int flags = Block.UPDATE_CLIENTS | Block.UPDATE_SKIP_ALL_SIDEEFFECTS;
             level.setBlock(witness, state, flags);
             level.setBlock(witness.offset(1, 0, 0), Blocks.IRON_BLOCK.defaultBlockState(), flags);
@@ -1917,10 +1953,16 @@ public final class VibeModClientGateTest implements FabricClientGameTest {
             if (witness == null) {
                 return;
             }
-            // The chunk is at world spawn, so the reopened server loads it
-            // without being asked; waiting for it anyway keeps this from racing
-            // a slow start.
-            check("the witness chunk came back",
+            // Asked for explicitly rather than assumed: the force ticket the
+            // other half left is restored from the save, but re-asserting it
+            // means this test does not depend on where the player happens to
+            // respawn.
+            reopened.getServer().runOnServer(server -> {
+                ServerLevel level = server.overworld();
+                level.setChunkForced(witness.getX() >> 4, witness.getZ() >> 4, true);
+                level.getChunk(witness.getX() >> 4, witness.getZ() >> 4);
+            });
+            check("the witness chunk came back off disk",
                     awaitTrue(context, () -> Boolean.TRUE.equals(reopened.getServer()
                             .computeOnServer(server -> server.overworld().getChunkSource()
                                     .hasChunk(witness.getX() >> 4, witness.getZ() >> 4)))));

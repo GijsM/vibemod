@@ -593,7 +593,10 @@ stub's states are real states and cost real budget. Failures are per-id and loud
 one unbuildable stub is one id whose chunks will shift, while a throw out of here is a server that
 will not start, which repairs nothing and loses the other pins too.
 
-**It is not yet wired.** Nothing calls it. §6.13 and §9.
+It is called from `VibeModFabric` beside `setLedger`, before `restoreModsFromDisk()` — which is
+where all three of those requirements are satisfied at once. It was written before anything called
+it, and §6.13 keeps that as a finding rather than tidying it away, because the reason no gate caught
+it is the more interesting half.
 
 ### 4.15 The client, for blocks
 
@@ -833,21 +836,26 @@ never throws: a hint is a nicety and must never cost a round.
 
 **Open, from V4 Phase 1 — these are work, not decisions:**
 
-- **The pinned-block replay is wired but ungated.** `replayPinnedBlocks` and
-  `InstallCard.setRegisteredBlocks` now sit beside `setLedger` in `VibeModFabric`, before
-  `restoreModsFromDisk()`, so pinned ids are claimed before any live mod registers anything. What
-  is still owed is the test: a gate that places a block, deletes the mod, restarts, and asserts a
-  known vanilla block **two blocks away is unchanged**. That neighbour assertion is the shift
-  detector, and it is the one test that would protect a player's world. Until it exists the pin is
-  believed rather than proven. §6.13.
-- **No gate proves a block registers, places, breaks and drops through the real seam path.** The
-  smoke gate runs on a dedicated server, where registry content is refused, so its block coverage
-  is entirely the refusal path. `palette-gate.sh` proves the crossing against real chunks but its
-  canary bypasses the registry seam deliberately. The client gate has no block assertions at all.
-- **The client half of a crossing is not gated.** `Shims.clientSeam()` is null on a dedicated
-  server and `level.players()` is empty, so steps 2 and 4 of the crossing are no-ops in
-  `palette-gate.sh`, which says so in its own header rather than claiming coverage it lacks.
-  Proving it needs `:fabric:runClientGameTest` and a display.
+All three of Phase 1's open gate items are now closed by the client gate, which is the only place
+any of them could be proven: a block registering, placing, breaking and dropping **through the real
+seam path**; the client half of a crossing (server and client strategies both at 16, in lockstep,
+with a state at id 33403 written server-side and decoded by the client at the new width — the
+failure mode that would kick a real player); and the pin's neighbour assertion, placing a gold block
+two away, deleting the mod, closing the world and reopening it off disk. §11.
+
+One thing is still owed, and it is a property of the JVM rather than of the test:
+
+- **The pin is not proven across processes.** A deleted block id cannot be made to *disappear*
+  inside one JVM — there is no `MappedRegistry.remove` and no `IdMapper.remove` — so a reopened
+  world still decodes against a registry holding the original `Block`. The restart test proves the
+  pin survives a real shutdown and reload with nothing shifted, and the stub-minting half is covered
+  separately by replaying a ghost id that no live mod ever registered. A genuine cross-process
+  version needs a second launch, which no gate in this repo has.
+- **VibeMod's own `java.util.logging` output does not reach `logs/latest.log`** — it goes to the
+  console only, while the file gets the game's log4j lines. Every "this did not appear in the log"
+  assertion in the client gate is therefore paired with a liveness check keyed on a line Minecraft
+  itself writes. A JUL→log4j bridge is the missing piece if file assertions on VibeMod's own lines
+  are ever wanted.
 
 **Accepted, with reasons:**
 
@@ -941,7 +949,7 @@ that used to be first in this table, and the shape of that answer is in Decision
 | `scripts/palette-gate.sh` | CI, its own server | **New.** 31 assertions. Forces a real global-palette crossing with synthetic blocks sized from the *measured* budget, then asserts what did and did not move: the local-palette section untouched, the global one repacked, its contents unchanged, a known vanilla neighbour block unchanged (the palette-shift detector), a past-the-old-boundary write that neither throws nor reads back wrong, the free path taken by a block that fits, the straggler watch arming and disarming, and a save/evict/reload round trip in which nothing was silently shortened. Its own script because a crossing is **irreversible for the life of the JVM** and would invalidate every palette number `smoke-fabric.sh` measures |
 | `scripts/smoke-neoforge.sh` | CI matrix | 44 — the v2 path plus the loader-neutral datapack channel |
 | `scripts/smoke-paper.sh {1.20.6,1.21.8,26.2}` | CI matrix | Untouched by V3 and V4, and that is the point |
-| `./gradlew :fabric:runClientGameTest` | display / xvfb | 118 assertions in a real client: real GL, a real world, a real right-click. **No block coverage yet** — §9 |
+| `./gradlew :fabric:runClientGameTest` | display / xvfb | 214 assertions in a real client: real GL, a real world, a real right-click. Six of them are V4's, and they are the only proof of three things no other gate can reach — a block through the **real seam path** (registers, places, breaks, drops its own loot, round-trips through disk), that it **renders with its own model** rather than the missing one, and the **client half of a crossing**: both strategies at 16 in lockstep, and id 33403 written server-side and decoded by the client at the new width. The pin's neighbour assertion lives here too — gold block two away, `/vibe delete`, close the world, reopen off disk |
 | `scripts/clientgate-neoforge.sh` | display / xvfb | A self-driving mod, since NeoForge has no harness |
 | `scripts/demo-live.sh` | by hand, needs a key | **Not a gate.** The prompt's only test |
 
