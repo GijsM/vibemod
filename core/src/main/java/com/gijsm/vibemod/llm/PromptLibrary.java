@@ -572,9 +572,50 @@ public final class PromptLibrary {
             }
             files.add(new GeneratedProject.GeneratedFile(path, content));
         }
+        requireBlockstatesForBlockRegistrations(files);
 
         return new GeneratedProject(name, description, usage, manual, changelog, icon, mainClass,
                 files, config, null);
+    }
+
+    /**
+     * V4 Phase 1: a mod that registers into {@code minecraft:block} must ship the
+     * blockstate file that maps the block to a model, or every copy of it in the
+     * world is the missing model.
+     *
+     * <p>Reported the way every other contract violation here is — an
+     * {@link IllegalArgumentException} carrying the fix — because this one is
+     * invisible until somebody places the block, and a repair round that adds one
+     * small JSON file is the cheapest moment to catch it. Matched on the
+     * registration call with whitespace squeezed out, so a wrapped
+     * {@code Registry.register(} still trips it and a mere {@code BLOCK} lookup
+     * does not.
+     */
+    private static void requireBlockstatesForBlockRegistrations(
+            List<GeneratedProject.GeneratedFile> files) {
+        String registrar = null;
+        for (GeneratedProject.GeneratedFile file : files) {
+            if (file.path().endsWith(".java")
+                    && file.content().replaceAll("\\s+", "")
+                            .contains("register(BuiltInRegistries.BLOCK,")) {
+                registrar = file.path();
+                break;
+            }
+        }
+        if (registrar == null) {
+            return;
+        }
+        for (GeneratedProject.GeneratedFile file : files) {
+            String path = file.path();
+            if (path.startsWith(ModResources.ASSETS_ROOT) && path.contains("/blockstates/")
+                    && path.endsWith(".json")) {
+                return;
+            }
+        }
+        throw new IllegalArgumentException(registrar + " registers a block in minecraft:block, "
+                + "but the project ships no assets/<namespace>/blockstates/<name>.json - "
+                + "without it the block renders as the missing model. Add one per registered "
+                + "block: {\"variants\": {\"\": {\"model\": \"<namespace>:block/<name>\"}}}");
     }
 
     // ------------------------------------------------------------------

@@ -12,6 +12,8 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
 /**
  * The static methods a generated mod's rewritten bytecode actually calls
@@ -165,6 +167,22 @@ public final class Shims {
      */
     public static Item.Properties itemId(Item.Properties properties, ResourceKey<Item> key) {
         return requireRegistries().itemId(properties, key);
+    }
+
+    /**
+     * {@code BlockBehaviour.Properties.setId(ResourceKey<Block>)} (V4 Phase 1).
+     *
+     * <p>Seamed for the same reason {@link #itemId} is, and for one more:
+     * {@code BlockBehaviour.<init>} reads the id twice — once for the
+     * {@code descriptionId} and once for the loot-table {@code drops} key — so
+     * a namespace rewritten later at {@code Registry.register} leaves the lang
+     * key and the loot path in a namespace VibeMod never writes a file into.
+     * The block would register, place and break, and drop nothing, with no
+     * error anywhere.
+     */
+    public static BlockBehaviour.Properties blockId(BlockBehaviour.Properties properties,
+                                                    ResourceKey<Block> key) {
+        return requireRegistries().blockId(properties, key);
     }
 
     /** {@code EntityType.Builder.build(ResourceKey<EntityType<?>>)}, namespaced. */

@@ -542,9 +542,9 @@ public final class PlatformProfiles {
               `net.fabricmc.fabric.mixin.*`).
             - NEVER call `Event.addPhaseOrdering(...)`. Phase order is global and permanent,
               so it cannot be undone when your mod is disabled.
-            - You MAY register real items and entity types with `Registry.register` from
-              `onInitialize()` - see REGISTERING REAL CONTENT below for the rules. BLOCKS and
-              every other registry are still refused, and so is registering from anywhere but
+            - You MAY register real items, blocks and entity types with `Registry.register`
+              from `onInitialize()` - see REGISTERING REAL CONTENT below for the rules. Every
+              OTHER registry is still refused, and so is registering from anywhere but
               `onInitialize()`.""";
 
     private static final String NATIVE_FABRIC_THREADING = """
@@ -624,8 +624,9 @@ public final class PlatformProfiles {
               {"text":"Ruby Charm","color":"red","italic":false},"minecraft:lore":[{"text":"Warm
               to the touch.","color":"gray","italic":false}],"minecraft:item_model":
               "<ns>:ruby","minecraft:enchantment_glint_override":true}}`
-            - REGISTERING REAL CONTENT: items and entity types only, from `onInitialize()`
-              and nowhere else. The RubySword example below is the whole shape - copy it.
+            - REGISTERING REAL CONTENT: items, blocks and entity types only, from
+              `onInitialize()` and nowhere else. The RubySword and RubyBlock examples
+              below are the whole shape - copy them.
               * ITEMS: `Registry.register(BuiltInRegistries.ITEM, id, new MyItem(new
                 Item.Properties()...setId(ResourceKey.create(Registries.ITEM, id))))`. 26.x
                 needs `setId(...)` BEFORE the item is constructed or the constructor throws,
@@ -638,6 +639,36 @@ public final class PlatformProfiles {
                 texture, `"item.<ns>.<name>"` in the lang file (derived from the id, so it
                 must match), and a recipe so a player can get one. Registered items reach
                 the creative INGREDIENTS tab and creative search automatically.
+              * BLOCKS: `Registry.register(BuiltInRegistries.BLOCK, id, new Block(
+                BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_RED).strength(3.0F)
+                .sound(SoundType.STONE).setId(ResourceKey.create(Registries.BLOCK, id))))`.
+                `setId(...)` goes BEFORE construction here too: the `Block` constructor
+                bakes the description id AND the loot-table path out of it. Register the
+                item you hold under the SAME id, right after:
+                `new BlockItem(block, new Item.Properties().useBlockDescriptionPrefix()
+                .setId(ResourceKey.create(Registries.ITEM, id)))`.
+              * BUDGET YOUR BLOCKSTATES - about 402 are left for the WHOLE server. A block
+                costs the PRODUCT of its property value counts: no properties costs 1, one
+                boolean costs 2, one 4-value enum costs 4, a fence 32, a door 64, stairs
+                80, a wall 324. So PREFER PLAIN CUBES with no blockstate properties; add a
+                property only when the block genuinely needs one, and never more than a
+                couple. Past the budget the host REFUSES the registration and the message
+                tells you how many states were left.
+              * A BLOCK IS NOTHING WITHOUT ITS FILES:
+                `assets/<ns>/blockstates/<name>.json` = `{"variants": {"": {"model":
+                "<ns>:block/<name>"}}}` - WITHOUT IT THE BLOCK IS THE MISSING MODEL; a
+                block model parenting `minecraft:block/cube_all`, which is what declares
+                `"particle": "#all"` so break particles work; the two-file item model,
+                whose model parents the BLOCK model; a `.png.grid` under
+                `textures/block/`; `"block.<ns>.<name>"` in the lang file;
+                `data/<ns>/loot_table/blocks/<name>.json` or the block drops NOTHING (the
+                default drop key is `<ns>:blocks/<path>`); and the block's id in
+                `data/minecraft/tags/block/mineable/pickaxe.json`.
+              * NEVER REGISTER A RENDER LAYER, and never put a `render_type` key in a
+                block model. 26.x has neither the key nor any API for it, whatever you
+                remember from 1.20. The layer is derived from the texture's own alpha:
+                opaque is solid, all-or-nothing alpha is cutout, partial alpha is
+                translucent. Ship the right texture and register nothing.
               * ENTITY TYPES: `EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)
                 .build(ResourceKey.create(Registries.ENTITY_TYPE, id))`, registered the same
                 way, plus `FabricDefaultAttributeRegistry.register(TYPE, Mob.createAttributes())`
@@ -646,9 +677,8 @@ public final class PlatformProfiles {
                 `level.addFreshEntity(...)`. No spawn eggs, no natural spawning.
               * SINGLEPLAYER AND LAN-HOST ONLY. On a DEDICATED server the host REFUSES the
                 registration - use the components-on-a-vanilla-item trick above instead.
-              * NO OTHER REGISTRY: not blocks (their state ids are baked into every loaded
-                chunk when the world opens), not block entities, enchantments, biomes,
-                particles or sounds. Use `data/**` for anything datapack-shaped.
+              * NO OTHER REGISTRY: not block entities, enchantments, biomes, particles
+                or sounds. Use `data/**` for anything datapack-shaped.
             - STILL NOT AVAILABLE: `ClientCommandRegistrationCallback`.
             - If your mod does its setup when the server starts, register
               `ServerLifecycleEvents.SERVER_STARTING` (or `SERVER_STARTED`) normally: the host
@@ -670,8 +700,8 @@ public final class PlatformProfiles {
               * The player list is `server.getPlayerList().getPlayers()`.
             - Use `net.minecraft.*` types as the game hands them to you. The ONLY ones you
               may extend are the ones you own an instance of - your own `Item` subclass,
-              your own `Screen`, your own mob class. Never replace or wrap a vanilla
-              singleton.""";
+              your own `Block` subclass, your own `Screen`, your own mob class. Never
+              replace or wrap a vanilla singleton.""";
 
     /**
      * There is no {@code ctx} in a native mod, so there is nowhere to read a
@@ -724,8 +754,9 @@ public final class PlatformProfiles {
         return dedicatedServer
                 ? """
                   This host is a DEDICATED SERVER, with no client in the process:
-                  - Registering items or entity types is REFUSED here and your mod will fail
-                    to load. Put components on a vanilla item in the result instead.
+                  - Registering items, blocks or entity types is REFUSED here and your mod
+                    will fail to load. Put components on a vanilla item in the result
+                    instead.
                   - `assets/**` are stored but inert - no texture, model or translation you
                     ship is ever seen. Prefer text players can read.
                   - A `ClientModInitializer` half is skipped: keybinds, HUD and Screens do
@@ -733,7 +764,7 @@ public final class PlatformProfiles {
                 : """
                   This host is a MINECRAFT CLIENT (singleplayer, or a world opened to LAN).
                   The whole surface works here: `assets/**` render, a `ClientModInitializer`
-                  half runs, and registering items and entity types is allowed.""";
+                  half runs, and registering items, blocks and entity types is allowed.""";
     }
 
     /** Every profile this build knows. */

@@ -27,6 +27,8 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
 import com.gijsm.vibemod.fabric.mixin.DataComponentInitializersAccessor;
 import com.gijsm.vibemod.fabric.mixin.DefaultAttributesAccessor;
@@ -112,7 +114,8 @@ public final class RegistrySeam implements RegistryTarget {
     /** The registries a mod may actually register INTO, by their {@code ResourceKey}. */
     private static final Map<ResourceKey<? extends Registry<?>>, String> SUPPORTED = Map.of(
             Registries.ITEM, "item",
-            Registries.ENTITY_TYPE, "entity type");
+            Registries.ENTITY_TYPE, "entity type",
+            Registries.BLOCK, "block");
 
     /**
      * The registries the window unfreezes, which is a strictly larger set than
@@ -133,10 +136,14 @@ public final class RegistrySeam implements RegistryTarget {
      * found this: {@code IllegalStateException: Registry is already frozen} out
      * of {@code Item$Properties.sword}, three frames before the seam.
      *
-     * <p>Unfreezing it is not the same as allowing blocks. {@link #register}
-     * still refuses {@code BuiltInRegistries.BLOCK} by name, with the reason;
-     * what the window buys is that the refusal is OURS and legible rather than
-     * a vanilla frozen-registry stack trace from inside a builder.
+     * <p>V3 unfroze BLOCK without allowing blocks, and {@link #register}
+     * refused it by name. V4 Phase 1 keeps the window exactly as it is and only
+     * moves BLOCK into {@link #SUPPORTED} — which is the whole point of writing
+     * it down here: block construction already used the same
+     * {@code createIntrusiveHolder} mechanism as items ({@code Block.<init>} is
+     * byte-for-byte the {@code Item.<init>} shape), so the window needed no
+     * change at all to carry blocks. What Phase 1 adds is on the far side of
+     * the registration, in {@link BlockRegistration}.
      */
     private static final List<ResourceKey<? extends Registry<?>>> WINDOW = List.of(
             Registries.ITEM, Registries.ENTITY_TYPE, Registries.BLOCK);
@@ -150,7 +157,29 @@ public final class RegistrySeam implements RegistryTarget {
     /** Default-attribute suppliers this seam installed, so a drain can remove them. */
     private final Map<String, List<EntityType<?>>> attributes = new ConcurrentHashMap<>();
 
+    /**
+     * The blockstate budget, or null before one is installed (V4 Phase 1).
+     *
+     * <p>A setter rather than a constructor parameter on purpose: the guard is
+     * owned by the palette side of Phase 1 and is installed from the same place
+     * {@link #setLedger} is called, while this seam is constructed at mod init
+     * — long before there is a level whose palette width it could probe. A null
+     * guard registers blocks with the budget unchecked and says so, loudly,
+     * once per block; see {@link BlockRegistration#admit}.
+     */
+    private volatile PaletteGuard paletteGuard;
+
     private final AtomicInteger tabRebuilds = new AtomicInteger();
+    /**
+     * Blockstates this seam has appended to {@code Block.BLOCK_STATE_REGISTRY}.
+     *
+     * <p>Monotonic, and that is not sloppiness: {@code IdMapper} appends at
+     * {@code nextId++} and has no remove, so a state that has been added is
+     * added for the rest of the process. Unlike {@code registryBlocks}, this
+     * counter does not come back down when a mod is disabled, because the ids
+     * do not either.
+     */
+    private final AtomicInteger blockStatesAppended = new AtomicInteger();
     private int windowDepth;
     private int registeredInWindow;
     /** {@code DATA_COMPONENT_INITIALIZERS} size when the window opened, or -1 if unreadable. */
@@ -173,6 +202,19 @@ public final class RegistrySeam implements RegistryTarget {
     /** The ledger, or null before a server has started. */
     public RegistryLedger ledger() {
         return ledger;
+    }
+
+    /**
+     * Installs the palette guard. Called from the same wiring that installs the
+     * ledger, once there is a level whose palette width can be probed.
+     */
+    public void setPaletteGuard(PaletteGuard guard) {
+        this.paletteGuard = guard;
+    }
+
+    /** The palette guard, or null before one is installed. */
+    public PaletteGuard paletteGuard() {
+        return paletteGuard;
     }
 
     // ------------------------------------------------------------------ the window
@@ -377,9 +419,9 @@ public final class RegistrySeam implements RegistryTarget {
         if (what == null) {
             throw new UnsupportedOperationException("VibeMod cannot register into "
                     + registryKey.identifier() + " yet. Runtime registration is supported for "
-                    + "minecraft:item and minecraft:entity_type. Blocks, block entities and "
-                    + "everything datapack-shaped (enchantments, loot tables, worldgen) go in "
-                    + "your mod's data/** files instead.");
+                    + "minecraft:item, minecraft:block and minecraft:entity_type. Block "
+                    + "entities and everything datapack-shaped (enchantments, loot tables, "
+                    + "worldgen) go in your mod's data/** files instead.");
         }
         refuseOnDedicatedServer(handle, registryKey, id);
 
@@ -399,13 +441,35 @@ public final class RegistrySeam implements RegistryTarget {
         if (accessor.isFrozen()) {
             throw new IllegalStateException("Mod " + handle.name() + " tried to register "
                     + canonical + " outside its own onInitialize(). VibeMod opens the game's "
-                    + "registries only while a mod is initialising; register your items and entity "
-                    + "types from onInitialize() and keep them in static fields.");
+                    + "registries only while a mod is initialising; register your items, blocks "
+                    + "and entity types from onInitialize() and keep them in static fields.");
+        }
+
+        if (value instanceof Block block && Registries.BLOCK.equals(registryKey)) {
+            // Deliberately on the NEAR side of register(): a guard refusal here
+            // leaves a constructed-but-unregistered intrusive holder, which
+            // close() already discards loudly, instead of a live block id whose
+            // states never reached BLOCK_STATE_REGISTRY — an id no chunk could
+            // ever hold. See BlockRegistration.
+            BlockRegistration.admit(paletteGuard, handle.name(), canonical, block);
         }
 
         ResourceKey key = ResourceKey.create((ResourceKey) registryKey, canonical);
         ((MappedRegistry) mapped).register(key, value, RegistrationInfo.BUILT_IN);
         registeredInWindow++;
+        if (value instanceof Block block && Registries.BLOCK.equals(registryKey)) {
+            // Vanilla's own loop out of Blocks.<clinit>, which generated code
+            // never runs. Without it the block has no blockstate ids and cannot
+            // be placed; without initCache() inside it, it can be placed once
+            // and then NPEs the light engine.
+            blockStatesAppended.addAndGet(BlockRegistration.appendStates(block));
+        }
+        if (value instanceof Item item) {
+            // Items.registerItem's BlockItem branch, which generated code never
+            // runs either. Silent when missed: Block.asItem() returns air and
+            // pick-block hands back nothing.
+            BlockRegistration.linkBlockItem(item);
+        }
 
         Live entry = new Live(handle.name(), registryKey.identifier().toString(), canonical, value);
         live.computeIfAbsent(handle.name(), ignored -> new ArrayList<>()).add(entry);
@@ -497,6 +561,30 @@ public final class RegistrySeam implements RegistryTarget {
                 canonicalise(handle.name(), key)));
     }
 
+    /**
+     * {@code BlockBehaviour.Properties.setId(ResourceKey)}, namespaced (V4 Phase 1).
+     *
+     * <p>Exactly {@link #itemId}'s argument, one class over, and it buys one
+     * thing more. {@code BlockBehaviour.<init>} reads the id twice: once for
+     * the {@code descriptionId} that becomes the lang key, and once for the
+     * {@code drops} key that becomes the loot-table path
+     * {@code data/<namespace>/loot_table/blocks/<path>.json}. Both are baked
+     * before {@code Registry.register} is reached, so rewriting the namespace
+     * there would leave a block whose name renders as
+     * {@code block.whatever.thing} and which drops nothing, with no error
+     * anywhere to say why.
+     */
+    @Override
+    public BlockBehaviour.Properties blockId(BlockBehaviour.Properties properties,
+                                             ResourceKey<Block> key) {
+        ModHandle handle = ModAttribution.current();
+        if (handle == null) {
+            return properties.setId(key);
+        }
+        return properties.setId(ResourceKey.create(Registries.BLOCK,
+                canonicalise(handle.name(), key)));
+    }
+
     /** {@code EntityType.Builder.build(ResourceKey)}, namespaced for the same reason (§B). */
     @SuppressWarnings({"unchecked", "rawtypes"})
     @Override
@@ -522,6 +610,12 @@ public final class RegistrySeam implements RegistryTarget {
      * datapack channel already does it.
      */
     private void forget(Live entry) {
+        if (entry.value() instanceof Item item) {
+            // The one part of a block registration that IS revocable: BY_BLOCK
+            // is a plain HashMap. Left behind, it would keep Block.asItem()
+            // answering with a disabled mod's item forever.
+            BlockRegistration.unlinkBlockItem(item);
+        }
         List<Live> mine = live.get(entry.modName());
         if (mine != null) {
             mine.remove(entry);
@@ -648,11 +742,17 @@ public final class RegistrySeam implements RegistryTarget {
     }
 
     /**
-     * The two registries by name, rather than through the root registry.
+     * The three windowed registries by name, rather than through the root
+     * registry.
      *
      * <p>Named fields on purpose: {@code BuiltInRegistries.REGISTRY} is typed
      * {@code Registry<? extends Registry<?>>}, and a lookup through it would be
-     * an unchecked cast for no gain when there are exactly two.
+     * an unchecked cast for no gain when there are exactly three.
+     *
+     * <p>{@code BuiltInRegistries.BLOCK} is declared {@code DefaultedRegistry}
+     * and is a {@code DefaultedMappedRegistry extends MappedRegistry} at
+     * runtime (verified), so the {@code instanceof} below holds for it exactly
+     * as it does for {@code ITEM}.
      */
     private static MappedRegistryAccessor accessorFor(ResourceKey<? extends Registry<?>> key) {
         Registry<?> registry = null;
@@ -668,15 +768,29 @@ public final class RegistrySeam implements RegistryTarget {
 
     /**
      * Counts for the gates:
-     * {@code "registryMods=1 registryItems=1 registryEntityTypes=0 registryAttributes=0
-     * tabRebuilds=1 ledgerMods=1 ledgerIds=1 ledgerTombstones=0"}.
+     * {@code "registryMods=1 registryItems=1 registryBlocks=1 registryBlockStates=1
+     * registryEntityTypes=0 registryAttributes=0 tabRebuilds=1 ledgerMods=1 ledgerIds=1
+     * ledgerTombstones=0 paletteBits=15 paletteBudget=402 paletteRepacks=0"}.
+     *
+     * <p>{@code name=value} throughout, and the names stay stable, because the
+     * gates match on full prefixes of this string rather than parsing it.
+     *
+     * <p>{@code registryBlocks} falls when a mod is disabled and
+     * {@code registryBlockStates} does not. That asymmetry is the truth rather
+     * than an oversight: {@code IdMapper} has no remove, so the states stay in
+     * {@code Block.BLOCK_STATE_REGISTRY} for the life of the process, and a
+     * counter that came back down would be lying about the one number the
+     * palette budget is computed from.
      */
     public String describeState() {
         int items = 0;
+        int blocks = 0;
         int entities = 0;
         for (List<Live> entries : new LinkedHashMap<>(live).values()) {
             for (Live entry : entries) {
-                if (entry.value() instanceof Item) {
+                if (entry.value() instanceof Block) {
+                    blocks++;
+                } else if (entry.value() instanceof Item) {
                     items++;
                 } else if (entry.value() instanceof EntityType<?>) {
                     entities++;
@@ -688,12 +802,16 @@ public final class RegistrySeam implements RegistryTarget {
             suppliers += types.size();
         }
         RegistryLedger book = ledger;
+        PaletteGuard guard = paletteGuard;
         return "registryMods=" + live.size()
                 + " registryItems=" + items
+                + " registryBlocks=" + blocks
+                + " registryBlockStates=" + blockStatesAppended.get()
                 + " registryEntityTypes=" + entities
                 + " registryAttributes=" + suppliers
                 + " tabRebuilds=" + tabRebuilds.get()
                 + " " + (book == null ? "ledgerMods=0 ledgerIds=0 ledgerTombstones=0"
-                        : book.describeState());
+                        : book.describeState())
+                + (guard == null ? "" : " " + guard.describeState());
     }
 }

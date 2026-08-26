@@ -78,4 +78,35 @@ public interface ClientSeam {
      * handling clicks with the rest of its mod already gone.
      */
     void closeScreensFrom(ClassLoader modLoader);
+
+    /**
+     * Widens the client level's block-state palette strategy to {@code bits}
+     * (V4 Phase 1).
+     *
+     * <p>Ints only, and that is the whole reason this lives here rather than
+     * anywhere more natural. The type it actually operates on is
+     * {@code net.minecraft.world.level.chunk.Strategy}, reached through
+     * {@code ClientLevel} — and {@code ClientSeam} is held by
+     * {@code EventFanout} and {@code FabricEntrypointAdapter}, which a dedicated
+     * server loads. A client type in this descriptor would be a
+     * {@code NoClassDefFoundError} on somebody's server.
+     *
+     * <p><b>Why this is not a {@code runOnRenderThread} hop.</b> The caller is
+     * the server thread, mid-registration, and the ordering it is enforcing is
+     * the correctness argument for the whole crossing: both sides widen
+     * <em>before</em> any id wide enough to need the extra bit exists. An async
+     * hop would put the client's widen an unbounded number of frames later and
+     * reopen exactly the window this ordering closes — a chunk packet encoded at
+     * 16 bits reaching a client still decoding at 15, which is a length mismatch
+     * and a disconnect, in singleplayer included
+     * ({@code Connection.configureInMemoryPipeline} really does serialise). So
+     * this is a direct field write, and it is safe to be one because it writes a
+     * single {@code int} that only ever grows, and every reader of it recomputes
+     * from scratch on the next container operation.
+     *
+     * @return the width the client level is on afterwards, or -1 if there is no
+     *         level — which is the normal answer at the main menu, and the
+     *         reason this returns a width rather than nothing
+     */
+    int widenBlockStatePalette(int bits);
 }

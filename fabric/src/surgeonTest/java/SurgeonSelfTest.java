@@ -13,6 +13,7 @@ import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.fabric.FabricSeams;
 import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.loader.surgeon.BytecodeSurgeon;
+import com.gijsm.vibemod.loader.surgeon.Seam;
 import com.gijsm.vibemod.loader.surgeon.SurgeonPolicy;
 import com.gijsm.vibemod.platform.ClassSurgeon;
 import com.gijsm.vibemod.platform.CompilerProvider;
@@ -60,6 +61,10 @@ public final class SurgeonSelfTest {
         testRubySwordShapeIsFullySeamed(compiler);
         testEntityTypeSeamsAreRewritten(compiler);
         testEntityRendererSeamIsRewritten(compiler);
+        testTheTwoSetIdSeamsAreToldApart();
+        testBlockSetIdIsRewrittenAndRuns(compiler);
+        testRubyBlockShapeIsFullySeamed(compiler);
+        testBlockColorRegistryRejected(compiler);
 
         if (failures == 0) {
             System.out.println("ALL CHECKS PASSED");
@@ -737,6 +742,262 @@ public final class SurgeonSelfTest {
                         "net/fabricmc/fabric/api/client/rendering/v1/EntityRendererRegistry.")));
     }
 
+    // ------------------------------------------------------------------ V4 Phase 1
+
+    /**
+     * The one assertion the block seam has to earn: {@code setId} appears twice
+     * in the table with an identical parameter list, and the surgeon still
+     * tells them apart.
+     *
+     * <p>{@code Seam.matches} compares owner AND name AND the FULL descriptor.
+     * Both rows take a bare {@code (Lnet/minecraft/resources/ResourceKey;)} —
+     * generics are erased, so {@code ResourceKey<Item>} and
+     * {@code ResourceKey<Block>} are the same bytes — and what separates them
+     * is the owner and the return type. This is the check that fires if
+     * somebody ever "simplifies" the table to match on name and arity.
+     */
+    private static void testTheTwoSetIdSeamsAreToldApart() {
+        List<Seam> setIds = new ArrayList<>();
+        for (Seam seam : FabricSeams.table()) {
+            if (seam.name().equals("setId")) {
+                setIds.add(seam);
+            }
+        }
+        check("the seam table carries exactly two setId rows (" + setIds.size() + ")",
+                setIds.size() == 2);
+        if (setIds.size() != 2) {
+            return;
+        }
+        Seam first = setIds.get(0);
+        Seam second = setIds.get(1);
+        check("the two setId rows have different owners ("
+                        + first.owner() + " / " + second.owner() + ")",
+                !first.owner().equals(second.owner()));
+        check("their erased PARAMETER lists are identical, which is the trap ("
+                        + first.descriptor() + ")",
+                first.descriptor().substring(0, first.descriptor().indexOf(')'))
+                        .equals(second.descriptor().substring(0, second.descriptor().indexOf(')'))));
+        check("so it is the return type that separates them ("
+                        + first.descriptor() + " / " + second.descriptor() + ")",
+                !first.descriptor().equals(second.descriptor()));
+        check("and they point at different shims ("
+                        + first.shimName() + " / " + second.shimName() + ")",
+                !first.shimName().equals(second.shimName()));
+        boolean itemRow = setIds.stream().anyMatch(seam ->
+                seam.owner().equals("net/minecraft/world/item/Item$Properties")
+                        && seam.shimName().equals("itemId"));
+        boolean blockRow = setIds.stream().anyMatch(seam ->
+                seam.owner().equals("net/minecraft/world/level/block/state/BlockBehaviour$Properties")
+                        && seam.shimName().equals("blockId"));
+        check("Item$Properties.setId still routes to Shims.itemId", itemRow);
+        check("BlockBehaviour$Properties.setId routes to Shims.blockId", blockRow);
+    }
+
+    /**
+     * Both {@code setId} call sites in one class, rewritten and then actually
+     * run.
+     *
+     * <p>Running is the point. A constant-pool assertion passes just as
+     * happily on a shim descriptor that does not exist; defining the class and
+     * invoking it turns that into a {@code NoSuchMethodError} at the first
+     * call, which is the only proof that the descriptor the table computed and
+     * the descriptor {@code Shims.blockId} actually has are the same string.
+     *
+     * <p>The receivers are null on purpose: the shim is static, the recorder
+     * never dereferences them, and constructing a real
+     * {@code BlockBehaviour.Properties} would say nothing about the rewrite.
+     */
+    private static void testBlockSetIdIsRewrittenAndRuns(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.blockid.BlockId", """
+                package vibemod.blockid;
+
+                import net.minecraft.resources.ResourceKey;
+                import net.minecraft.world.item.Item;
+                import net.minecraft.world.level.block.Block;
+                import net.minecraft.world.level.block.state.BlockBehaviour;
+
+                public final class BlockId {
+                    public BlockBehaviour.Properties block(BlockBehaviour.Properties properties,
+                                                           ResourceKey<Block> key) {
+                        return properties.setId(key);
+                    }
+
+                    public Item.Properties item(Item.Properties properties, ResourceKey<Item> key) {
+                        return properties.setId(key);
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("a class calling both setId overloads passes the policy: " + result.diagnostics(),
+                result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.blockid.BlockId"));
+        check("BlockBehaviour$Properties.setId went to Shims.blockId (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.blockId"));
+        check("Item$Properties.setId still went to Shims.itemId (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.itemId"));
+        check("neither raw setId survived (" + calls + ")",
+                !calls.contains(
+                        "net/minecraft/world/level/block/state/BlockBehaviour$Properties.setId")
+                        && !calls.contains("net/minecraft/world/item/Item$Properties.setId"));
+
+        RegistryRecorder recorder = new RegistryRecorder();
+        Shims.installRegistries(recorder);
+        try {
+            ClassLoader loader = new ModLifecycle.BytesClassLoader(
+                    SurgeonSelfTest.class.getClassLoader(), result.classes());
+            Class<?> blockId = loader.loadClass("vibemod.blockid.BlockId");
+            Object instance = blockId.getDeclaredConstructor().newInstance();
+            net.minecraft.resources.Identifier id =
+                    net.minecraft.resources.Identifier.fromNamespaceAndPath("blockid", "thing");
+            net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> blockKey =
+                    net.minecraft.resources.ResourceKey.create(
+                            net.minecraft.core.registries.Registries.BLOCK, id);
+            net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> itemKey =
+                    net.minecraft.resources.ResourceKey.create(
+                            net.minecraft.core.registries.Registries.ITEM, id);
+            blockId.getMethod("block",
+                            net.minecraft.world.level.block.state.BlockBehaviour.Properties.class,
+                            net.minecraft.resources.ResourceKey.class)
+                    .invoke(instance, null, blockKey);
+            blockId.getMethod("item", net.minecraft.world.item.Item.Properties.class,
+                            net.minecraft.resources.ResourceKey.class)
+                    .invoke(instance, null, itemKey);
+
+            check("the block setId reached Shims.blockId with the mod's own key",
+                    recorder.blockIds.size() == 1 && recorder.blockIds.get(0) == blockKey);
+            check("the item setId reached Shims.itemId, and did NOT land on blockId",
+                    recorder.itemIds.size() == 1 && recorder.itemIds.get(0) == itemKey);
+        } catch (Throwable t) {
+            check("defining and running the rewritten setId class threw: " + t, false);
+        } finally {
+            Shims.installRegistries(null);
+        }
+    }
+
+    /**
+     * The block few-shot, seam by seam: the shape a generated block mod has,
+     * with a real {@code BuiltInRegistries.BLOCK}, a real
+     * {@code BlockBehaviour.Properties.setId} and the paired {@code BlockItem}.
+     *
+     * <p>Compiled and rewritten but NOT run, for the same reason
+     * {@code RubySword} is not: constructing a {@code Block} outside a
+     * registration window is exactly what the window exists to make legal.
+     */
+    private static void testRubyBlockShapeIsFullySeamed(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.rubyblock.RubyBlock", """
+                package vibemod.rubyblock;
+
+                import net.fabricmc.api.ModInitializer;
+
+                import net.minecraft.core.Registry;
+                import net.minecraft.core.registries.BuiltInRegistries;
+                import net.minecraft.core.registries.Registries;
+                import net.minecraft.resources.Identifier;
+                import net.minecraft.resources.ResourceKey;
+                import net.minecraft.world.item.BlockItem;
+                import net.minecraft.world.item.Item;
+                import net.minecraft.world.level.block.Block;
+                import net.minecraft.world.level.block.state.BlockBehaviour;
+
+                public final class RubyBlock implements ModInitializer {
+
+                    public static Block RUBY_BLOCK;
+                    public static Item RUBY_BLOCK_ITEM;
+
+                    @Override
+                    public void onInitialize() {
+                        Identifier id = Identifier.fromNamespaceAndPath("rubyblock", "ruby_block");
+                        ResourceKey<Block> blockKey = ResourceKey.create(Registries.BLOCK, id);
+                        RUBY_BLOCK = Registry.register(BuiltInRegistries.BLOCK, id,
+                                new Block(BlockBehaviour.Properties.of()
+                                        .strength(3.0F)
+                                        .setId(blockKey)));
+                        ResourceKey<Item> itemKey = ResourceKey.create(Registries.ITEM, id);
+                        RUBY_BLOCK_ITEM = Registry.register(BuiltInRegistries.ITEM, id,
+                                new BlockItem(RUBY_BLOCK, new Item.Properties()
+                                        .useBlockDescriptionPrefix()
+                                        .setId(itemKey)));
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("the RubyBlock few-shot shape passes the policy: " + result.diagnostics(), result.ok());
+        if (!result.ok()) {
+            return;
+        }
+        List<String> calls = callSites(result.classes().get("vibemod.rubyblock.RubyBlock"));
+        long registrations = calls.stream()
+                .filter("com/gijsm/vibemod/fabric/shim/Shims.registryRegister"::equals).count();
+        check("both Registry.register call sites went through the host shim (" + calls + ")",
+                registrations == 2);
+        check("its BlockBehaviour.Properties.setId went through the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.blockId"));
+        check("its Item.Properties.setId went through the host shim (" + calls + ")",
+                calls.contains("com/gijsm/vibemod/fabric/shim/Shims.itemId"));
+        check("no raw Registry.register or setId survived (" + calls + ")",
+                !calls.contains("net/minecraft/core/Registry.register")
+                        && !calls.contains("net/minecraft/world/item/Item$Properties.setId")
+                        && !calls.contains("net/minecraft/world/level/block/state/"
+                                + "BlockBehaviour$Properties.setId"));
+        check("the builder calls that are NOT seams are untouched (" + calls + ")",
+                calls.contains("net/minecraft/world/level/block/state/"
+                        + "BlockBehaviour$Properties.of")
+                        && calls.contains("net/minecraft/world/level/block/state/"
+                                + "BlockBehaviour$Properties.strength"));
+    }
+
+    /**
+     * The V4 Phase 1 denial: per-block tint colours.
+     *
+     * <p>{@code BlockColors} is built once per client out of every registration
+     * made before the build, and has no unregister — so a tint outlives the mod
+     * that added it, for the rest of the session. That is the same objection
+     * that keeps {@code HudElementRegistry.removeElement} off the seam table.
+     * A coloured texture is the same picture and goes away with the pack.
+     *
+     * <p>{@code BlockRenderLayerMap} is deliberately NOT denied: it does not
+     * exist in 26.2, so a model that writes it already gets "cannot find
+     * symbol" from javac, which names the line and is the better message.
+     *
+     * <p>The fixture reaches the class without calling any of its methods, and
+     * that is the honest shape of this denial rather than a shortcut around
+     * one: the {@code Denial} is written with a null member, so it forbids the
+     * <em>type</em>. {@code BytecodeSurgeon.Scan.constant} routes a class
+     * literal through {@code type()}, which is the same check every
+     * {@code invokestatic} to it would hit. Pinning a method signature here
+     * would only make the gate break on a fabric-api bump that renamed it,
+     * while the thing under test — that no generated mod may touch this class
+     * at all — would be no better proven.
+     */
+    private static void testBlockColorRegistryRejected(InMemoryCompiler compiler) {
+        Map<String, byte[]> classes = compile(compiler, "vibemod.tint.Tint", """
+                package vibemod.tint;
+
+                import net.fabricmc.api.ClientModInitializer;
+                import net.fabricmc.fabric.api.client.rendering.v1.BlockColorRegistry;
+
+                public final class Tint implements ClientModInitializer {
+
+                    @Override
+                    public void onInitializeClient() {
+                    }
+
+                    public Class<?> tint() {
+                        return BlockColorRegistry.class;
+                    }
+                }
+                """);
+        ClassSurgeon.Result result = fabricSurgeon().operate(classes);
+        check("BlockColorRegistry is rejected", !result.ok());
+        check("the tint diagnostic names the mechanism and the fix ("
+                        + firstLine(result.diagnostics()) + ")",
+                result.diagnostics().contains("cannot be unregistered")
+                        && result.diagnostics().contains("coloured texture"));
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     /** Records what a rewritten registry call site handed the shim (V3 Phase 3 §A). */
@@ -745,6 +1006,9 @@ public final class SurgeonSelfTest {
 
         private final List<Object> ids = new ArrayList<>();
         private final List<Object> values = new ArrayList<>();
+        /** Kept apart from {@link #ids} so a block key landing on itemId is a FAIL, not a pass. */
+        private final List<Object> blockIds = new ArrayList<>();
+        private final List<Object> itemIds = new ArrayList<>();
 
         @Override
         public Object register(net.minecraft.core.Registry<?> registry, Object id, Object value) {
@@ -765,6 +1029,16 @@ public final class SurgeonSelfTest {
                 net.minecraft.world.item.Item.Properties properties,
                 net.minecraft.resources.ResourceKey<net.minecraft.world.item.Item> key) {
             ids.add(key);
+            itemIds.add(key);
+            return properties;
+        }
+
+        @Override
+        public net.minecraft.world.level.block.state.BlockBehaviour.Properties blockId(
+                net.minecraft.world.level.block.state.BlockBehaviour.Properties properties,
+                net.minecraft.resources.ResourceKey<net.minecraft.world.level.block.Block> key) {
+            ids.add(key);
+            blockIds.add(key);
             return properties;
         }
 

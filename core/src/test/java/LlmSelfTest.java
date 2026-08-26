@@ -29,6 +29,15 @@ public class LlmSelfTest {
 
     private static int failures = 0;
 
+    /**
+     * What the native Fabric prompt is allowed to cost, as SENT (the profile plus
+     * its "THIS HOST" block). It was 30000 until V4 Phase 1: blocks brought a
+     * fourth few-shot and a block-rules section, and there is no way to teach a
+     * block's nine-file shape for less. Raised deliberately, in one place, so the
+     * next person raising it has to mean it.
+     */
+    private static final int NATIVE_FABRIC_BUDGET = 40000;
+
     public static void main(String[] args) {
         testParseCleanJson();
         testParseFencedWithProse();
@@ -45,6 +54,7 @@ public class LlmSelfTest {
         testPlatformProfiles();
         testPromptHygiene();
         testNativeFabricProfile();
+        testBlockContentPrompt();
         testPromptBudgets();
         testRepairPromptBudget();
         testSymbolOracle();
@@ -545,9 +555,9 @@ public class LlmSelfTest {
         check("the fabric-legacy prompt counts its own few-shots (three)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC_LEGACY)
                         .contains("The following three examples show"));
-        check("the native fabric prompt counts its own few-shots (three)",
+        check("the native fabric prompt counts its own few-shots (four)",
                 PromptLibrary.systemPrompt(PlatformProfiles.FABRIC)
-                        .contains("The following three examples show"));
+                        .contains("The following four examples show"));
 
         if (failures == 0) {
             System.out.println("PASS: Bukkit vocabulary is confined to the Paper profiles, and every "
@@ -628,8 +638,10 @@ public class LlmSelfTest {
         check("the native prompt states the singleplayer/LAN-host limit and the refusal",
                 prompt.contains("SINGLEPLAYER AND LAN-HOST ONLY")
                         && prompt.contains("the host REFUSES the"));
-        check("the native prompt refuses blocks by name, with the reason",
-                prompt.contains("not blocks (their state ids are baked into every loaded"));
+        // V4 Phase 1 reversed this one: blocks are real content now. The block
+        // rules themselves are asserted in testBlockContentPrompt().
+        check("the native prompt no longer refuses blocks",
+                !prompt.contains("not blocks (their state ids are baked into every loaded"));
         check("the native prompt teaches entity types and their default attributes",
                 prompt.contains("EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)")
                         && prompt.contains("FabricDefaultAttributeRegistry.register"));
@@ -691,8 +703,9 @@ public class LlmSelfTest {
                 prompt.contains("Registry.register(BuiltInRegistries.ITEM, ID")
                         && prompt.contains("extends Item")
                         && prompt.contains("InteractionResult use(Level level"));
-        check("the native prompt fits its budget (" + prompt.length() + " <= 30000 chars)",
-                prompt.length() <= 30000);
+        check("the native prompt fits its budget (" + prompt.length() + " <= "
+                        + NATIVE_FABRIC_BUDGET + " chars)",
+                prompt.length() <= NATIVE_FABRIC_BUDGET);
         check("the native prompt no longer names the era's non-existent KeyBindingHelper",
                 !prompt.contains("KeyBindingHelper"));
         check("the native prompt carries the Yarn -> Mojang rename table",
@@ -754,6 +767,149 @@ public class LlmSelfTest {
     }
 
     /**
+     * V4 Phase 1: blocks are registerable content now, and the prompt has to
+     * teach them in 26.2's vocabulary rather than the 1.20 one a trained model
+     * reaches for.
+     *
+     * <p>The four dead names are asserted absent from EVERY profile, not just the
+     * native Fabric one. None of them exists in this era, and a model that sees
+     * {@code ItemBlockRenderTypes} anywhere in a prompt will reach for it — which
+     * compiles nowhere and costs a repair round to discover.
+     */
+    private static void testBlockContentPrompt() {
+        String[] deadNames = {"ItemBlockRenderTypes", "BlockRenderLayerMap",
+                "FabricBlockSettings", "AbstractBlock.Settings"};
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            String any = PromptLibrary.systemPrompt(profile);
+            for (String dead : deadNames) {
+                check("the " + profile.id() + " prompt never names the dead 1.20-era `"
+                        + dead + "`", !any.contains(dead));
+            }
+        }
+
+        String prompt = PromptLibrary.systemPrompt(PlatformProfiles.FABRIC);
+
+        // ---- the rules ----
+        check("the native prompt lists blocks as registerable content",
+                prompt.contains("items, blocks and entity types only")
+                        && prompt.contains("You MAY register real items, blocks and entity types"));
+        check("the native prompt still refuses every other registry",
+                prompt.contains("NO OTHER REGISTRY: not block entities, enchantments, biomes"));
+        check("the native prompt puts setId BEFORE construction for blocks too, with the reason",
+                prompt.contains("BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_RED)")
+                        && prompt.contains("`setId(...)` goes BEFORE construction here too")
+                        && prompt.contains("bakes the description id AND the loot-table path"));
+        check("the native prompt teaches the paired BlockItem under the same id",
+                prompt.contains("Registry.register(BuiltInRegistries.BLOCK, id, new Block(")
+                        && prompt.contains("`new BlockItem(block, new Item.Properties()"
+                                + ".useBlockDescriptionPrefix()"));
+        check("the native prompt teaches the state budget in units a model can act on",
+                prompt.contains("BUDGET YOUR BLOCKSTATES") && prompt.contains("about 402 are left")
+                        && prompt.contains("PREFER PLAIN CUBES with no blockstate properties")
+                        && prompt.contains("a fence 32, a door 64, stairs"));
+        check("and says what happens when the budget runs out",
+                prompt.contains("tells you how many states were left"));
+        check("the native prompt demands the blockstates file and says what is lost without it",
+                prompt.contains("`assets/<ns>/blockstates/<name>.json` = `{\"variants\": "
+                                + "{\"\": {\"model\":")
+                        && prompt.contains("WITHOUT IT THE BLOCK IS THE MISSING MODEL"));
+        check("the native prompt says to parent the block model to cube_all, and why",
+                prompt.contains("minecraft:block/cube_all")
+                        && prompt.contains("`\"particle\": \"#all\"` so break particles work"));
+        check("the native prompt says the loot table is what makes a block drop itself",
+                prompt.contains("`data/<ns>/loot_table/blocks/<name>.json` or the block drops "
+                                + "NOTHING")
+                        && prompt.contains("`<ns>:blocks/<path>`"));
+        check("the native prompt names the pickaxe tag",
+                prompt.contains("data/minecraft/tags/block/mineable/pickaxe.json"));
+        // Stated WITHOUT naming the dead classes, on purpose: the four names above
+        // must not appear in a prompt even inside a denial, because a model that
+        // reads one reaches for it.
+        check("the native prompt forbids registering a render layer, and says where it comes from",
+                prompt.contains("NEVER REGISTER A RENDER LAYER")
+                        && prompt.contains("never put a `render_type` key in a")
+                        && prompt.contains("derived from the texture's own alpha"));
+
+        // ---- the few-shot ----
+        check("the block few-shot ships the blockstate, both models and the block texture",
+                prompt.contains("assets/vibemod_rubyblock/blockstates/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/models/block/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/items/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/models/item/ruby_block.json")
+                        && prompt.contains(
+                                "assets/vibemod_rubyblock/textures/block/ruby_block.png.grid"));
+        check("the block few-shot ships the loot table and the pickaxe tag",
+                prompt.contains("data/vibemod_rubyblock/loot_table/blocks/ruby_block.json")
+                        && prompt.contains("data/minecraft/tags/block/mineable/pickaxe.json"));
+        check("the block few-shot's lang key is the one the block derives",
+                prompt.contains("block.vibemod_rubyblock.ruby_block"));
+        checkFewShotPlanMatchesFiles(prompt, "--- Example 4 ---", "example 4 (RubyBlock)");
+
+        // The few-shot has to survive the SAME path a real response takes — the
+        // resource-path rules, the pixel-grid parse and the new blockstates check
+        // included. A few-shot the parser would reject is a few-shot teaching the
+        // model to be rejected.
+        try {
+            GeneratedProject block = PromptLibrary.parse(fewShotJson(prompt, "--- Example 4 ---"));
+            check("the block few-shot parses through the normal generated-project path",
+                    "RubyBlock".equals(block.name()) && block.files().size() == 9);
+            check("the block few-shot leads with its Java",
+                    "RubyBlock.java".equals(block.files().get(0).path()));
+        } catch (Exception e) {
+            fail("the block few-shot did not parse: " + e);
+        }
+
+        // ---- the validation, in both directions ----
+        String registersABlock = "Registry.register(\\n    BuiltInRegistries.BLOCK, ID, block);";
+        expectParseFailure("a block registration with no blockstates file",
+                blockProject(registersABlock, false));
+        try {
+            PromptLibrary.parse(blockProject(registersABlock, false));
+        } catch (IllegalArgumentException e) {
+            check("the blockstates diagnostic names the file that registers the block",
+                    e.getMessage().contains("Blocky.java"));
+            check("the blockstates diagnostic says what to add",
+                    e.getMessage().contains("blockstates") && e.getMessage().contains("variants"));
+        }
+        try {
+            PromptLibrary.parse(blockProject(registersABlock, true));
+            check("a block registration WITH its blockstates file parses", true);
+        } catch (Exception e) {
+            fail("a block registration with its blockstates file was rejected: " + e);
+        }
+        try {
+            PromptLibrary.parse(blockProject("BuiltInRegistries.BLOCK.getValue(ID);", false));
+            check("merely LOOKING UP a vanilla block does not demand a blockstates file", true);
+        } catch (Exception e) {
+            fail("a block lookup was mistaken for a block registration: " + e);
+        }
+
+        if (failures == 0) {
+            System.out.println("PASS: the native fabric profile teaches 26.2 blocks - the state "
+                    + "budget, the nine-file shape, and no render layer anywhere");
+        }
+    }
+
+    /** A minimal full-shape response that registers a block, with or without its blockstate. */
+    private static String blockProject(String javaBody, boolean withBlockstate) {
+        String blockstate = withBlockstate
+                ? ",{\"path\":\"assets/vibemod_blocky/blockstates/ruby.json\",\"content\":"
+                        + "\"{\\\"variants\\\": {\\\"\\\": {\\\"model\\\": "
+                        + "\\\"vibemod_blocky:block/ruby\\\"}}}\"}"
+                : "";
+        return "{\"name\":\"Blocky\",\"description\":\"d\",\"mainClass\":\"Blocky\","
+                + "\"files\":[{\"path\":\"Blocky.java\",\"content\":\"" + javaBody + "\"}"
+                + blockstate + "]}";
+    }
+
+    /** The raw assistant JSON of one worked example, exactly as the model sees it. */
+    private static String fewShotJson(String prompt, String marker) {
+        int assistantIdx = prompt.indexOf("Assistant: ", prompt.indexOf(marker));
+        int jsonStart = assistantIdx + "Assistant: ".length();
+        return prompt.substring(jsonStart, prompt.indexOf('\n', jsonStart));
+    }
+
+    /**
      * A budget print for every profile.
      *
      * <p>Not an assertion with a magic number — prompt length is a design
@@ -782,8 +938,9 @@ public class LlmSelfTest {
         System.out.printf("  %-14s %7d chars  ~%6d tokens  (as SENT by a client)%n",
                 "fabric+host", client.length(), client.length() / 4);
         check("the fabric prompt AS SENT still fits its budget ("
-                        + Math.max(server.length(), client.length()) + " <= 30000 chars)",
-                Math.max(server.length(), client.length()) <= 30000);
+                        + Math.max(server.length(), client.length()) + " <= "
+                        + NATIVE_FABRIC_BUDGET + " chars)",
+                Math.max(server.length(), client.length()) <= NATIVE_FABRIC_BUDGET);
 
         // The overload has to be free when nobody uses it, or every host that
         // supplies no facts is paying for a feature it did not ask for.
@@ -799,10 +956,10 @@ public class LlmSelfTest {
                 server.contains("================ THIS HOST ================"));
         check("the dedicated-server block says the registry is refused HERE",
                 server.contains("DEDICATED SERVER")
-                        && server.contains("Registering items or entity types is REFUSED here"));
+                        && server.contains("Registering items, blocks or entity types is REFUSED"));
         check("the client block says the whole surface works",
                 client.contains("MINECRAFT CLIENT")
-                        && client.contains("registering items and entity types is allowed"));
+                        && client.contains("registering items, blocks and entity types is allowed"));
         check("the two blocks disagree, which is the entire point",
                 !PromptLibrary.systemPrompt(PlatformProfiles.FABRIC,
                         PlatformProfiles.fabricHostFacts(true))

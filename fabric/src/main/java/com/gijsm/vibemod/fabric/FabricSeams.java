@@ -60,6 +60,19 @@ public final class FabricSeams {
     private static final String ITEM_PROPERTIES = "net/minecraft/world/item/Item$Properties";
     private static final String L_ITEM_PROPERTIES = "Lnet/minecraft/world/item/Item$Properties;";
 
+    /**
+     * V4 Phase 1's one new seam owner. {@code javap -s} on the 26.2 jar:
+     *
+     * <pre>
+     * public net.minecraft.world.level.block.state.BlockBehaviour$Properties setId(ResourceKey&lt;Block&gt;);
+     *   descriptor: (Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;
+     * </pre>
+     */
+    private static final String BLOCK_PROPERTIES =
+            "net/minecraft/world/level/block/state/BlockBehaviour$Properties";
+    private static final String L_BLOCK_PROPERTIES =
+            "Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;";
+
     private static final String ENTITY_TYPE_BUILDER = "net/minecraft/world/entity/EntityType$Builder";
     private static final String L_ENTITY_TYPE = "Lnet/minecraft/world/entity/EntityType;";
 
@@ -182,6 +195,21 @@ public final class FabricSeams {
                 Seam.prependingReceiver(ITEM_PROPERTIES, "setId",
                         "(" + RESOURCE_KEY + ")" + L_ITEM_PROPERTIES,
                         SHIMS, "itemId"),
+
+                // V4 Phase 1: the same argument again, one class over.
+                // BlockBehaviour.<init> bakes BOTH the descriptionId and the
+                // loot-table `drops` key out of the id before Registry.register
+                // is reached, so a namespace rewritten at registration time
+                // would leave the lang key and the loot path pointing at a
+                // namespace nothing writes to.
+                //
+                // It cannot collide with the Item$Properties row above even
+                // though the parameter list is identical: Seam.matches compares
+                // owner AND name AND the FULL descriptor, and both the owner and
+                // the return type differ. SurgeonSelfTest asserts exactly that.
+                Seam.prependingReceiver(BLOCK_PROPERTIES, "setId",
+                        "(" + RESOURCE_KEY + ")" + L_BLOCK_PROPERTIES,
+                        SHIMS, "blockId"),
                 Seam.prependingReceiver(ENTITY_TYPE_BUILDER, "build",
                         "(" + RESOURCE_KEY + ")" + L_ENTITY_TYPE,
                         SHIMS, "entityTypeBuild"),

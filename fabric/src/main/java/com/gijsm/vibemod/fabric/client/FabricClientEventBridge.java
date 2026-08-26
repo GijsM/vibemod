@@ -17,9 +17,11 @@ import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
+import com.gijsm.vibemod.fabric.mixin.StrategyAccessor;
 import com.gijsm.vibemod.fabric.shim.ClientRegistrations;
 import com.gijsm.vibemod.fabric.shim.ClientSeam;
 import com.gijsm.vibemod.fabric.shim.ClientShims;
@@ -113,6 +115,45 @@ public final class FabricClientEventBridge extends LoaderClientEventBridge
                 LOG.fine("Could not close a departing mod's screen: " + t);
             }
         });
+    }
+
+    /**
+     * The client half of a global block-palette crossing (V4 Phase 1).
+     *
+     * <p>{@code ClientLevel} builds its own {@code PalettedContainerFactory},
+     * so its block-state {@code Strategy} carries its own
+     * {@code globalPaletteBitsInMemory} — a separate {@code int} from the
+     * server's, even when the server is the integrated one two objects away.
+     * They must agree: {@code PalettedContainer.read} sizes its long array from
+     * the <em>receiving</em> container's own strategy, and the integrated
+     * server genuinely serialises chunk packets
+     * ({@code Connection.configureInMemoryPipeline} delegates to
+     * {@code configureSerialization(..., memoryConnection=true, ...)}), so a
+     * disagreement is a decoder exception and a dropped world, not a
+     * singleplayer freebie.
+     *
+     * <p>Called inline on the server thread, deliberately — see
+     * {@link ClientSeam#widenBlockStatePalette(int)} for why an
+     * {@code execute(...)} hop here would reopen the window the crossing's
+     * ordering exists to close. Widening only ever grows the field, so a
+     * concurrent reader on the render thread sees either the old width or the
+     * new one, and no id needing the new one exists yet in either case.
+     */
+    @Override
+    public int widenBlockStatePalette(int bits) {
+        Minecraft client = Minecraft.getInstance();
+        ClientLevel level = client == null ? null : client.level;
+        if (level == null) {
+            // The main menu, or mid-teardown between worlds. Nothing to widen:
+            // the next ClientLevel builds its factory from the registry as it
+            // then stands, which already includes the new states.
+            return -1;
+        }
+        StrategyAccessor strategy = (StrategyAccessor) level.palettedContainerFactory().blockStatesStrategy();
+        if (strategy.getGlobalPaletteBitsInMemory() < bits) {
+            strategy.setGlobalPaletteBitsInMemory(bits);
+        }
+        return strategy.getGlobalPaletteBitsInMemory();
     }
 
     // -------------------------------------------------- ClientRegistrations

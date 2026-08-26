@@ -134,7 +134,16 @@ public record SurgeonPolicy(List<String> allowedRoots, List<Denial> denials) {
             // event's phases changes behaviour for every other mod and cannot
             // be undone when it is disabled.
             new Denial("net/fabricmc/fabric/api/event/Event", "addPhaseOrdering",
-                    "Event.addPhaseOrdering (phase order is global and cannot be undone on disable)"));
+                    "Event.addPhaseOrdering (phase order is global and cannot be undone on disable)"),
+            // V4 Phase 1. Same objection as HudElementRegistry.removeElement:
+            // BlockColors is built once per client, from every registration
+            // made before the build, and has no unregister — so a tint a mod
+            // adds outlives the mod, for the rest of the session, with no way
+            // to take it back. A coloured texture is the same picture and the
+            // host can drop it with the rest of the pack.
+            new Denial("net/fabricmc/fabric/api/client/rendering/v1/BlockColorRegistry", null,
+                    "BlockColorRegistry (per-block tint colours are built once per client and "
+                            + "cannot be unregistered; ship a coloured texture instead)"));
 
     /** The stock policy: {@link #DEFAULT_ROOTS} and {@link #DEFAULT_DENIALS}. */
     public static SurgeonPolicy defaults() {

@@ -30,6 +30,7 @@ import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.fabric.shim.CreativeTabs;
 import com.gijsm.vibemod.fabric.shim.EventFanout;
+import com.gijsm.vibemod.fabric.shim.PaletteGuard;
 import com.gijsm.vibemod.fabric.shim.RegistrySeam;
 import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.gen.ModGenerator;
@@ -133,6 +134,18 @@ public final class VibeModFabric implements ModInitializer {
      * that cannot be undone.
      */
     private static volatile RegistrySeam registrySeam;
+    /**
+     * The process-lived block-palette guard (V4 Phase 1); built once, in
+     * {@link #onInitialize()}.
+     *
+     * <p>Process-lived like the seam beside it, and for a sharper reason of its
+     * own: a crossing mutates {@code Strategy.globalPaletteBitsInMemory} on
+     * strategies that outlive nothing in particular, and the repack count it
+     * keeps is a property of the JVM rather than of a world. It reads the live
+     * server through a supplier and finds null between worlds, at which point it
+     * refuses a crossing rather than guessing.
+     */
+    private static volatile PaletteGuard paletteGuard;
 
     /**
      * What the client entrypoint contributes: the bridge, its watchdog wiring,
@@ -187,6 +200,16 @@ public final class VibeModFabric implements ModInitializer {
         return registrySeam;
     }
 
+    /**
+     * The process-lived block-palette guard (V4 Phase 1), for the acceptance
+     * gates and for {@code /vibe info}'s palette line.
+     *
+     * <p>Never null after {@link #onInitialize()}.
+     */
+    public static PaletteGuard paletteGuard() {
+        return paletteGuard;
+    }
+
     /** Called by the client entrypoint at its own init, before any server starts. */
     public static void setClientHooks(ClientHooks hooks) {
         clientHooks = hooks;
@@ -234,6 +257,22 @@ public final class VibeModFabric implements ModInitializer {
         Shims.installRegistries(registrySeam);
         CreativeTabs.install(registrySeam);
 
+        // V4 Phase 1. Built here rather than per-server because the thing it
+        // guards — the global blockstate id space — is per-JVM: it is appended
+        // to from the registration window and never reclaimed, world or no
+        // world.
+        //
+        // The seam calls admit() before appending a block's states, and lets the
+        // refusal propagate. Handing the guard over here rather than constructing
+        // it inside the seam keeps it per-JVM while the seam is rebuilt per
+        // server: measuring the budget against a registry that outlives the world
+        // is the whole point.
+        paletteGuard = new PaletteGuard(() -> {
+            Services live = services;
+            return live == null ? null : live.server();
+        });
+        registrySeam.setPaletteGuard(paletteGuard);
+
         // The note* calls are what make the fanout's immediate-replay honest
         // (V3 Phase 1 §A): a mod hot-loaded after an event has fired needs it
         // replayed, and a mod loaded BEFORE it fires must not get it twice. Only
@@ -243,7 +282,13 @@ public final class VibeModFabric implements ModInitializer {
             eventFanout.noteServerStarting();
             start(server);
         });
-        ServerLifecycleEvents.SERVER_STARTED.register(server -> eventFanout.noteServerStarted());
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            eventFanout.noteServerStarted();
+            // One line, once per server: the real blockstate count and the real
+            // headroom on whatever version is actually running, which is the
+            // honest replacement for a figure computed from a data dump.
+            paletteGuard.probe();
+        });
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             eventFanout.noteServerStopped();
             stop();

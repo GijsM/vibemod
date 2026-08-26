@@ -7,6 +7,8 @@ import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.ai.attributes.AttributeSupplier;
 import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 
 /**
  * What {@link Shims} delegates a rewritten registry call to (V3 Phase 3 §A).
@@ -29,6 +31,15 @@ public interface RegistryTarget {
 
     /** {@code Item.Properties.setId}, namespaced. */
     Item.Properties itemId(Item.Properties properties, ResourceKey<Item> key);
+
+    /**
+     * {@code BlockBehaviour.Properties.setId}, namespaced.
+     *
+     * <p>Separate from {@link #itemId} rather than folded into it because the
+     * two are different classes with different return types — the seam table
+     * matches on the whole descriptor, and so must this.
+     */
+    BlockBehaviour.Properties blockId(BlockBehaviour.Properties properties, ResourceKey<Block> key);
 
     /** {@code EntityType.Builder.build}, namespaced. */
     EntityType<?> entityTypeBuild(EntityType.Builder<?> builder, ResourceKey<EntityType<?>> key);
