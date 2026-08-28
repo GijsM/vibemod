@@ -47,6 +47,17 @@ final class PaperApiVocabulary {
         TYPES.put("Sound", "org.bukkit.Sound");
         TYPES.put("Material", "org.bukkit.Material");
         TYPES.put("EntityType", "org.bukkit.entity.EntityType");
+        // These five carry measured renames in SymbolRepair's table (derived from
+        // <clinit> registry keys across the 21 cached paper-api jars), so leaving
+        // them out would make the repair pass answer UNKNOWN and decline to fix a
+        // rename it can prove. They are here to be repaired, not to be injected
+        // into the prompt — VocabularyBlock dumps only Attribute, Enchantment and
+        // PotionEffectType, and that list is deliberately separate from this one.
+        TYPES.put("PotionType", "org.bukkit.potion.PotionType");
+        TYPES.put("PatternType", "org.bukkit.block.banner.PatternType");
+        TYPES.put("MusicInstrument", "org.bukkit.MusicInstrument");
+        TYPES.put("Tag", "org.bukkit.Tag");
+        TYPES.put("LootTables", "org.bukkit.loot.LootTables");
         // The method-surface types the capability rules probe.
         TYPES.put("ItemMeta", "org.bukkit.inventory.meta.ItemMeta");
         TYPES.put("ItemFlag", "org.bukkit.inventory.ItemFlag");

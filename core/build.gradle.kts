@@ -292,11 +292,54 @@ registerSelfTest("selfTestVocabulary", "symbols.VocabularySelfTest") {
     systemProperty("vibemod.apiJars", apiJarsDir)
 }
 
+/**
+ * The B3 gate: builds the REAL system prompt for every cached Paper version and
+ * checks every symbol it names, every symbol it forbids, the injected constant
+ * lists and which era rules fired, against that version's own paper-api jar.
+ *
+ * Like the vocabulary self-test it SKIPS loudly without the jar cache, so a
+ * fresh clone stays green — and unlike it, CI fetches the cache first
+ * (.github/workflows/build.yml), because a gate that only ever skips is not one.
+ *
+ *   ./gradlew :core:selfTestPromptSymbols -Pinventory=true   # every reference
+ */
+registerSelfTest("selfTestPromptSymbols", "symbols.PromptSymbolGate") {
+    args(apiJarsDir, (findProperty("inventory") as String?) ?: "false")
+}
+
+/**
+ * The B2 gate: SymbolRepair, the offline pre-compile pass. Measured
+ * vocabularies from the jar cache wherever possible (it skips those checks
+ * loudly without it), plus a sweep of the whole stored corpus reporting what
+ * the pass would rewrite there — which must be nothing, since the corpus
+ * already compiles.
+ */
+registerSelfTest("selfTestSymbolRepair", "com.gijsm.vibemod.gen.SymbolRepairSelfTest") {
+    systemProperty("vibemod.apiJars", apiJarsDir)
+    systemProperty("vibemod.mods.dir", modsDir)
+    systemProperty("vibemod.fixture.mods.dir", fixtureModsDir)
+}
+
+/**
+ * Re-derives the legacy<->vanilla rename table from the jar cache and prints it
+ * in the form SymbolRepair embeds. The table is measured, never typed:
+ * constants are paired on the vanilla registry key their <clinit> loads.
+ *
+ *   ./gradlew :core:deriveRenames
+ */
+tasks.register<JavaExec>("deriveRenames") {
+    group = "verification"
+    description = "Derives the API constant rename table from the cached paper-api jars."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "repair.RenameDerivation"
+    args(apiJarsDir)
+}
+
 tasks.register("selfTest") {
     group = "verification"
     description = "Runs core's self-tests."
     dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog",
-        "selfTestErrors", "selfTestVocabulary")
+        "selfTestErrors", "selfTestVocabulary", "selfTestPromptSymbols", "selfTestSymbolRepair")
 }
 
 tasks.named("check") { dependsOn("selfTest") }

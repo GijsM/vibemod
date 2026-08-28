@@ -479,12 +479,40 @@ public final class PromptLibrary {
 
     /** Prompt asking the model to fix a project that failed to compile. */
     public static String repairPrompt(String javacDiagnostics) {
-        return "Your previous JSON response failed to compile. javac says:\n\n"
-                + javacDiagnostics
-                + "\n\nReturn the corrected project as JSON: either the FULL project shape (every file) "
-                + "described in the system prompt, or — if the fix is small and surgical — the EDIT shape "
-                + "({\"edits\":[{\"path\":...,\"find\":...,\"replace\":...}]}) whose \"find\" matches the "
-                + "current source of that file exactly once.";
+        return repairPrompt(javacDiagnostics, List.of());
+    }
+
+    /**
+     * The same repair prompt, carrying what
+     * {@link com.gijsm.vibemod.gen.SymbolRepair} measured off the running server
+     * before the compile.
+     *
+     * <p>Two kinds of note, and both matter. A note about a constant the host
+     * <em>already rewrote</em> stops the model "correcting" the repair back to the
+     * name it remembers from training, which would loop the round forever. A note
+     * about one it could not resolve names the constants that really exist, so the
+     * round is spent on choosing between real names rather than on rediscovering
+     * that the old one is gone — which is a whole 6k-token round otherwise.
+     *
+     * <p>These are measurements, not guesses, and the prompt says so: the model
+     * has to be told this outranks its training data, or it will argue.
+     */
+    public static String repairPrompt(String javacDiagnostics, List<String> vocabularyNotes) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Your previous JSON response failed to compile. javac says:\n\n")
+                .append(javacDiagnostics);
+        if (vocabularyNotes != null && !vocabularyNotes.isEmpty()) {
+            sb.append("\n\nThis server's API was measured directly at boot. These facts about it beat "
+                    + "anything you remember about Minecraft versions:\n");
+            for (String note : vocabularyNotes) {
+                sb.append("- ").append(note).append('\n');
+            }
+        }
+        sb.append("\n\nReturn the corrected project as JSON: either the FULL project shape (every file) ")
+                .append("described in the system prompt, or — if the fix is small and surgical — the EDIT ")
+                .append("shape ({\"edits\":[{\"path\":...,\"find\":...,\"replace\":...}]}) whose \"find\" ")
+                .append("matches the current source of that file exactly once.");
+        return sb.toString();
     }
 
     /**

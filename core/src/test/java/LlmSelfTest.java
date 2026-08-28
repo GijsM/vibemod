@@ -714,39 +714,23 @@ public class LlmSelfTest {
     }
 
     /**
-     * The anti-drift check: scan each rule's own text for {@code Type.CONSTANT}
-     * and {@code Type#method} references and require every one to appear in
-     * {@code requiresSymbols} or {@code forbidsSymbols}. Without this, someone
-     * adds a sentence naming a new constant and no gate ever notices it is
-     * wrong on nine versions — which is exactly how the prompt got into the
-     * state docs/API-VOCABULARY.md measured.
+     * The anti-drift check: every {@code Type.CONSTANT}, {@code Type#method} and
+     * bare {@code CONSTANT} a rule's own text names must appear in that rule's
+     * {@code requiresSymbols} or {@code forbidsSymbols}. Without it, someone adds
+     * a sentence naming a new constant and no gate ever notices it is wrong on
+     * nine versions — which is exactly how the prompt got into the state
+     * docs/API-VOCABULARY.md measured.
+     *
+     * <p>The implementation moved to {@link symbols.RuleSymbolDrift} so the B3
+     * gate ({@code symbols.PromptSymbolGate}, which needs the api-jar cache) and
+     * this self-test (which needs nothing) run the same code rather than two
+     * drifting copies of it. It got stricter in the move: qualified references
+     * now have to match a qualified declaration, and bare {@code SCREAMING_CASE}
+     * constants — how the rename rules spell most of the names they teach — are
+     * checked at all for the first time.
      */
     private static void checkRuleSymbolsAreDeclared() {
-        java.util.regex.Pattern ref = java.util.regex.Pattern.compile(
-                "`([A-Z][A-Za-z0-9]*)[.#]([A-Za-z_][A-Za-z0-9_]*)");
-        List<String> undeclared = new ArrayList<>();
-        List<com.gijsm.vibemod.llm.PromptRule> all = new ArrayList<>(PromptRules.PAPER);
-        all.addAll(PromptRules.LOADER);
-        for (com.gijsm.vibemod.llm.PromptRule rule : all) {
-            java.util.Set<String> declared = new java.util.HashSet<>();
-            declared.addAll(rule.requiresSymbols());
-            declared.addAll(rule.forbidsSymbols());
-            // A bare CONSTANT after a rename arrow ("`NAUSEA`") is written
-            // without its type; match those against the declared list by name.
-            java.util.Set<String> declaredNames = new java.util.HashSet<>();
-            for (String d : declared) {
-                int cut = Math.max(d.indexOf('#'), d.lastIndexOf('.'));
-                declaredNames.add(cut < 0 ? d : d.substring(cut + 1));
-            }
-            java.util.regex.Matcher m = ref.matcher(rule.text());
-            while (m.find()) {
-                String qualified = m.group(1) + (rule.text().charAt(m.end(1)) == '#' ? "#" : ".") + m.group(2);
-                if (!declared.contains(qualified) && !declaredNames.contains(m.group(2))) {
-                    undeclared.add(rule.id() + " names " + qualified
-                            + " but lists neither it nor " + m.group(2));
-                }
-            }
-        }
+        List<String> undeclared = symbols.RuleSymbolDrift.violations();
         check("every symbol a rule's text names is declared in its requires/forbids lists"
                 + (undeclared.isEmpty() ? "" : " -> " + undeclared), undeclared.isEmpty());
     }
