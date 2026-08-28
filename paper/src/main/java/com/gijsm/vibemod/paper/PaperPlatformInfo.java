@@ -13,12 +13,17 @@ import com.gijsm.vibemod.platform.PlatformInfo;
  * What this Paper server can actually do, probed once at boot.
  *
  * <p>Everything here is a probe, never a version comparison
- * (ARCHITECTURE-V2 §0#8) — with one deliberate exception. The dialog capability
- * needs BOTH the API class to exist AND the server to be new enough: Paper
- * shipped {@code io.papermc.paper.dialog.Dialog} while the protocol behind it
- * was still settling, so 1.21.6 has the class but not the behaviour VibeMod's
- * screens assume. Class presence alone would let the dialog renderer load on a
- * server that then renders nothing. Hence the {@code &&}.
+ * (ARCHITECTURE-V2 §0#8) — with one belt-and-braces exception, the dialog
+ * capability, which requires both the API class and a modern profile.
+ *
+ * <p>This javadoc used to justify that {@code &&} by claiming 1.21.6 "has the
+ * class but not the behaviour". <b>That was wrong.</b> Measured against every
+ * cached {@code paper-api} jar: {@code io.papermc.paper.dialog.Dialog} is absent
+ * from 1.21.6 entirely and first appears in 1.21.7 (docs/API-VOCABULARY.md,
+ * claim 5). The class probe alone would therefore have been sufficient. The
+ * {@code &&} is kept because it is harmless and costs nothing on a fork that
+ * back-ports the class without the protocol, but it is a belt on top of braces,
+ * not the load-bearing part it was described as.
  *
  * <p>The class probe is load-bearing in the other direction too: VibeMod is
  * compiled against 1.21.8 paper-api and ships a dialog renderer that references
@@ -41,6 +46,8 @@ public final class PaperPlatformInfo implements PlatformInfo {
     private final boolean hasItemGlintOverride;
     private final boolean hasCommandResync;
     private final int maxTargetRelease;
+    /** Measured once here; reflecting Material alone walks 1,900+ fields. */
+    private final com.gijsm.vibemod.platform.ApiVocabulary vocabulary;
 
     public PaperPlatformInfo() {
         this.mcVersion = detectMcVersion();
@@ -52,6 +59,12 @@ public final class PaperPlatformInfo implements PlatformInfo {
         this.hasItemGlintOverride = methodPresent(ItemMeta.class, "setEnchantmentGlintOverride", Boolean.class);
         this.hasCommandResync = methodPresent(org.bukkit.entity.Player.class, "updateCommands");
         this.maxTargetRelease = detectMaxTargetRelease();
+        this.vocabulary = PaperApiVocabulary.measure();
+    }
+
+    @Override
+    public com.gijsm.vibemod.platform.ApiVocabulary vocabulary() {
+        return vocabulary;
     }
 
     /** One line for the boot log: everything a bug report needs to reproduce a UI difference. */
@@ -61,7 +74,8 @@ public final class PaperPlatformInfo implements PlatformInfo {
                 + " · commandMap=" + hasNativeCommandMap
                 + " · glintOverride=" + hasItemGlintOverride
                 + " · commandResync=" + hasCommandResync
-                + " · target=java" + maxTargetRelease;
+                + " · target=java" + maxTargetRelease
+                + " · vocabulary=" + vocabulary;
     }
 
     @Override

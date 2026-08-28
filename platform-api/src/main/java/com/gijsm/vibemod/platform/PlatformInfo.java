@@ -71,6 +71,31 @@ public interface PlatformInfo {
     }
 
     /**
+     * What this host's API actually declares, measured off its own classpath at
+     * boot.
+     *
+     * <p>This is the probe that retires an error class rather than an error. The
+     * capability booleans above answer questions someone thought to ask; a
+     * vocabulary answers the ones nobody did, which is how the prompt came to
+     * teach {@code Attribute.GENERIC_MAX_HEALTH} on four versions where only the
+     * short form compiles (docs/API-VOCABULARY.md). The prompt builder consumes
+     * it instead of asserting era prose, and the pre-compile repair pass will
+     * consume the same object.
+     *
+     * <p>Building one walks a few thousand reflected members, so a host builds
+     * it ONCE at boot and returns the cached instance — never per generation.
+     *
+     * <p>The default is {@link ApiVocabulary#empty()}: a host that has not
+     * implemented this measured nothing, and every query answers
+     * {@code UNKNOWN}. That degrades correctly — capability-predicated prompt
+     * text drops out and a repair pass changes nothing — whereas a partial guess
+     * would report {@code NO} for types it simply never looked at.
+     */
+    default ApiVocabulary vocabulary() {
+        return ApiVocabulary.empty();
+    }
+
+    /**
      * The {@code PlatformProfile} id this host should generate code for —
      * {@code "paper-modern"}, {@code "paper-legacy"}, {@code "fabric"} or
      * {@code "neoforge"} (ARCHITECTURE-V2 §6.2). Kept here, next to

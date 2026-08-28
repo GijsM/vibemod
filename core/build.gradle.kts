@@ -235,10 +235,68 @@ tasks.register("selfTestEcj") {
     dependsOn("selfTestCompilerEcj", "selfTestStoreEcj")
 }
 
+// ---------------------------------------------------------------------------
+// Offline API-vocabulary tools (docs/API-VOCABULARY.md)
+//
+// These read paper-api jars as BYTES from `paper/api-jars/` (populated by
+// scripts/fetch-api-jars.sh) to measure what each supported Paper version's API
+// actually contains. They do not load a single Bukkit class and they are not
+// wired into `check`: without the jar cache there is nothing to measure, and a
+// 49MB download is not something a build should do behind your back.
+// ---------------------------------------------------------------------------
+
+val apiJarsDir: String = (findProperty("vibemod.apiJars") as String?)
+    ?: rootProject.layout.projectDirectory.dir("paper/api-jars").asFile.absolutePath
+
+/** `./gradlew :core:apiVocabulary -Pvocab="<jar> [type ...]"` */
+tasks.register<JavaExec>("apiVocabulary") {
+    group = "verification"
+    description = "Prints the measured API vocabulary of one paper-api jar."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.ClassFileVocabulary"
+    val spec = (findProperty("vocab") as String?) ?: "$apiJarsDir/paper-api-1.21.8.jar"
+    args(spec.split(" ").filter { it.isNotEmpty() })
+}
+
+/** `./gradlew :core:apiVocabularyReport` — the whole cache, as the measured report. */
+tasks.register<JavaExec>("apiVocabularyReport") {
+    group = "verification"
+    description = "Measures every cached paper-api jar and checks the prompt's claims."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.VocabularyReport"
+    // arg[1] is the prompt source dir: the report re-extracts every constant the
+    // prompt names straight out of it, so the audit cannot drift from the prompt.
+    args(apiJarsDir,
+        layout.projectDirectory.dir("src/main/java/com/gijsm/vibemod/llm").asFile.absolutePath)
+}
+
+/**
+ * `./gradlew :core:promptProof [-Pversions="1.20 1.21.3 26.2"]` — builds the
+ * real system prompt against each cached version's measured vocabulary and
+ * prints the lines that differ. The proof that the capability rework produces
+ * different, correct guidance per version rather than two hand-written eras.
+ */
+tasks.register<JavaExec>("promptProof") {
+    group = "verification"
+    description = "Builds the system prompt per Paper version and shows what changes."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.PromptVocabularyProof"
+    args(apiJarsDir, (findProperty("versions") as String?) ?: "")
+}
+
+/**
+ * The vocabulary contract + the measured facts the prompt asserts. Skips the
+ * jar-backed half when the cache is absent, so it is safe in `selfTest`.
+ */
+registerSelfTest("selfTestVocabulary", "symbols.VocabularySelfTest") {
+    systemProperty("vibemod.apiJars", apiJarsDir)
+}
+
 tasks.register("selfTest") {
     group = "verification"
     description = "Runs core's self-tests."
-    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog", "selfTestErrors")
+    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog",
+        "selfTestErrors", "selfTestVocabulary")
 }
 
 tasks.named("check") { dependsOn("selfTest") }

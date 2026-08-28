@@ -214,7 +214,8 @@ public final class VibeMod extends JavaPlugin {
         settingsScreens = new SettingsScreens(messenger, ui, this::settingsSnapshot, this::applySettings,
                 this::openSettingsModelPicker, this::reloadVibeConfig);
 
-        generator = new ModGenerator(scheduler, profile, client, compiler, store, lifecycle,
+        generator = new ModGenerator(scheduler, com.gijsm.vibemod.llm.PromptFacts.of(platform),
+                client, compiler, store, lifecycle,
                 () -> getConfig().getInt("generation.max-retries", 3),
                 () -> getConfig().getBoolean("openrouter.streaming", true),
                 getConfig().getInt("generation.concurrency", 4));

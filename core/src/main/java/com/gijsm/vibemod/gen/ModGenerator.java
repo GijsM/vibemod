@@ -18,6 +18,7 @@ import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
+import com.gijsm.vibemod.llm.PromptFacts;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.runtime.ModLifecycle;
@@ -36,10 +37,12 @@ import com.gijsm.vibemod.store.ModStore;
  * carrying the mod's config schema and current values.
  *
  * <p>v2 change (ARCHITECTURE-V2 §1.1, §6.1): no Bukkit. Thread hops go through
- * a {@link TickScheduler}, and the {@link PlatformProfile} the host resolved at
- * boot is threaded into every system prompt this generator sends, so the same
- * engine generates 1.21.8-era and 1.20.6-era code without knowing how they
- * differ.
+ * a {@link TickScheduler}, and the {@link PromptFacts} the host resolved at boot
+ * — its {@link PlatformProfile} plus the API vocabulary it measured off its own
+ * classpath — are threaded into every system prompt this generator sends, so the
+ * same engine generates 1.20-era and 26.2-era code without knowing how they
+ * differ. It used to receive only the profile, which is why the prompt could
+ * contradict probes the host had already made.
  */
 public final class ModGenerator {
 
@@ -85,7 +88,7 @@ public final class ModGenerator {
     private static final Logger LOG = Logger.getLogger(ModGenerator.class.getName());
 
     private final TickScheduler scheduler;
-    private final PlatformProfile profile;
+    private final PromptFacts facts;
     private final OpenRouterClient client;
     private final InMemoryCompiler compiler;
     private final ModStore store;
@@ -99,7 +102,7 @@ public final class ModGenerator {
             new java.util.concurrent.atomic.AtomicInteger();
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
-    public ModGenerator(TickScheduler scheduler, PlatformProfile profile, OpenRouterClient client,
+    public ModGenerator(TickScheduler scheduler, PromptFacts facts, OpenRouterClient client,
                         InMemoryCompiler compiler, ModStore store, ModLifecycle lifecycle,
                         IntSupplier maxRetries,
                         java.util.function.BooleanSupplier streamingEnabled, int concurrency) {
@@ -110,7 +113,7 @@ public final class ModGenerator {
             return t;
         });
         this.scheduler = scheduler;
-        this.profile = profile;
+        this.facts = facts;
         this.client = client;
         this.compiler = compiler;
         this.store = store;
@@ -275,9 +278,9 @@ public final class ModGenerator {
             String response;
             try {
                 OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
-                        ? client.completeStreaming(PromptLibrary.systemPrompt(profile), messages,
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(facts), messages,
                                 new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
-                        : client.complete(PromptLibrary.systemPrompt(profile), messages)
+                        : client.complete(PromptLibrary.systemPrompt(facts), messages)
                                 .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();

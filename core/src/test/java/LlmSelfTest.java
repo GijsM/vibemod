@@ -15,8 +15,11 @@ import com.gijsm.vibemod.gen.GeneratedProject;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PlatformProfiles;
+import com.gijsm.vibemod.llm.PromptFacts;
 import com.gijsm.vibemod.llm.PromptLibrary;
+import com.gijsm.vibemod.llm.PromptRules;
 import com.gijsm.vibemod.llm.StreamScanner;
+import com.gijsm.vibemod.platform.ApiVocabulary;
 
 /**
  * Standalone self-test (no test framework, no network) proving PromptLibrary's
@@ -428,7 +431,11 @@ public class LlmSelfTest {
         // text, which is what makes a stored mod portable between loaders.
         String neutralised = prompt
                 .replace("NeoForge mod", "Fabric mod")
-                .replace("no neoforge.mods.toml", "no fabric.mod.json");
+                .replace("no neoforge.mods.toml", "no fabric.mod.json")
+                // The "THIS SERVER" section names the profile it was built for,
+                // which for a loader is the loader's own name — still the same
+                // one word, just now appearing twice.
+                .replace("NeoForge 26.1+", "Fabric 26.1+");
         check("the neoforge and fabric prompts differ ONLY in the loader's name "
                         + "and manifest (the sdk mod flavor is loader-neutral)",
                 neutralised.equals(fabricPrompt));
@@ -471,12 +478,21 @@ public class LlmSelfTest {
     }
 
     /**
-     * The two Paper prompt profiles (ARCHITECTURE-V2 §6.2). What matters here is
-     * not that the strings exist but that the era table actually diverges: the
-     * legacy profile has to teach the {@code GENERIC_} attribute names and forbid
-     * the 1.20.5+ item-data setters, because a modern-only prompt produces code
-     * that cannot compile on 1.20.6 and each such miss costs a self-heal round of
-     * real money.
+     * The two Paper prompt profiles (ARCHITECTURE-V2 §6.2), after the capability
+     * rework.
+     *
+     * <p>What this used to assert is now the bug. It pinned that
+     * {@code paper-legacy} teaches {@code Attribute.GENERIC_MAX_HEALTH} and
+     * forbids {@code setEnchantmentGlintOverride} — and both are false on a large
+     * part of the range that profile serves: the long attribute names do not
+     * exist on 1.21.3-1.21.6, and the glint setter exists on 8 of the 13
+     * versions where the sheet banned it (docs/API-VOCABULARY.md, claims 3 and
+     * 4). The test passed because it asked whether the prompt said a thing, never
+     * whether the thing was true.
+     *
+     * <p>So the assertions below are about the mechanism instead: the era text is
+     * driven by the measured vocabulary, both directions of every pair are
+     * reachable, and no rule can survive contradicting a probe.
      */
     private static void testPlatformProfiles() {
         String modern = PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN);
@@ -486,19 +502,25 @@ public class LlmSelfTest {
                 PromptLibrary.systemPrompt().equals(modern));
         check("the two Paper profiles produce different prompts", !modern.equals(legacy));
 
-        check("modern teaches the short 1.21.3+ attribute names",
-                modern.contains("Attribute.MAX_HEALTH"));
-        check("modern allows setEnchantmentGlintOverride",
-                modern.contains("setEnchantmentGlintOverride") && !legacy.isEmpty());
+        // With no host behind them the two profiles are the SAME prompt but for
+        // the display range: every other difference they used to have was an
+        // unchecked claim about the API, and those are now measured instead.
+        check("with no vocabulary the two Paper prompts differ only in the display range",
+                modern.replace("Paper 1.21.7+", "Paper 1.20-1.21.6").equals(legacy));
+        check("neither Paper prompt asserts an attribute spelling when nothing was measured",
+                !modern.contains("Attribute.GENERIC_MAX_HEALTH")
+                        && !modern.contains("Attribute.MAX_HEALTH")
+                        && !legacy.contains("Attribute.GENERIC_MAX_HEALTH")
+                        && !legacy.contains("Attribute.MAX_HEALTH"));
+        check("the display range is the measured one, not the old 1.20.6 floor",
+                PlatformProfiles.PAPER_LEGACY.displayName().equals("Paper 1.20-1.21.6"));
+        check("the role line no longer names a version at all",
+                !PlatformProfiles.PAPER_LEGACY.roleLine().contains("1.20")
+                        && !PlatformProfiles.PAPER_MODERN.roleLine().contains("1.21")
+                        && PlatformProfiles.PAPER_MODERN.roleLine()
+                                .equals(PlatformProfiles.PAPER_LEGACY.roleLine()));
 
-        check("legacy teaches the GENERIC_ attribute names",
-                legacy.contains("Attribute.GENERIC_MAX_HEALTH"));
-        check("legacy forbids the short 1.21.3+ attribute names",
-                legacy.contains("NEVER the short"));
-        check("legacy forbids setEnchantmentGlintOverride",
-                legacy.contains("Do NOT call `ItemMeta#setEnchantmentGlintOverride"));
-        check("legacy names its era in the role line",
-                legacy.contains("Paper 1.20.6-1.21.6 gameplay-mod author"));
+        testCapabilityDrivenPrompt();
 
         // Adventure is now an officially allowed import root in both eras (§6.2):
         // 88+ stored mods already use it, and banning it in the prompt was a
@@ -540,6 +562,193 @@ public class LlmSelfTest {
                         && PlatformProfiles.PAPER_LEGACY.pluginDescriptor().equals("1.20"));
 
         System.out.println("PASS: paper-modern and paper-legacy profiles differ where the era does");
+    }
+
+    /**
+     * A closed-world stub vocabulary: {@code "Type"} to its constants and
+     * methods, where a method name is written {@code "#name"}.
+     *
+     * <p>Closed on purpose — {@link ApiVocabulary}'s default {@code knows}
+     * answers {@code NO} for a type outside a non-empty vocabulary, which is
+     * what makes "this server does not have that constant" testable without a
+     * jar. The runtime {@code ReflectiveVocabulary} is open-world instead,
+     * because it probes a hand-supplied list rather than enumerating a platform.
+     */
+    private static ApiVocabulary stubVocabulary(Map<String, List<String>> members) {
+        return new ApiVocabulary() {
+            @Override
+            public java.util.Set<String> knownTypes() {
+                return members.keySet();
+            }
+
+            @Override
+            public java.util.Set<String> constants(String type) {
+                java.util.Set<String> out = new java.util.LinkedHashSet<>();
+                for (String m : members.getOrDefault(type, List.of())) {
+                    if (!m.startsWith("#")) {
+                        out.add(m);
+                    }
+                }
+                return out;
+            }
+
+            @Override
+            public java.util.Set<String> methods(String type) {
+                java.util.Set<String> out = new java.util.LinkedHashSet<>();
+                for (String m : members.getOrDefault(type, List.of())) {
+                    if (m.startsWith("#")) {
+                        out.add(m.substring(1));
+                    }
+                }
+                return out;
+            }
+        };
+    }
+
+    /**
+     * The core of the rework: the same profile produces opposite, correct
+     * guidance on two different servers, and neither answer is a version
+     * comparison.
+     *
+     * <p>The two vocabularies below are the measured 1.20.4 and 1.21.8 shapes,
+     * reduced to the symbols the rules key off (verified against
+     * {@code paper/api-jars/} — see docs/API-VOCABULARY.md). The point is not the
+     * text but that flipping the MEASUREMENT flips the guidance.
+     */
+    private static void testCapabilityDrivenPrompt() {
+        Map<String, List<String>> old = Map.of(
+                "Attribute", List.of("GENERIC_MAX_HEALTH", "GENERIC_MOVEMENT_SPEED", "HORSE_JUMP_STRENGTH"),
+                "AttributeModifier", List.of("#getUniqueId", "#getName"),
+                "AttributeInstance", List.of("#setBaseValue", "#addModifier"),
+                "Enchantment", List.of("DURABILITY", "DIG_SPEED", "PROTECTION_ENVIRONMENTAL", "LOOT_BONUS_MOBS"),
+                "PotionEffectType", List.of("CONFUSION", "DAMAGE_RESISTANCE", "FAST_DIGGING",
+                        "INCREASE_DAMAGE", "JUMP", "SLOW", "SPEED"),
+                "Particle", List.of("BLOCK_CRACK", "CRIT_MAGIC", "EXPLOSION_NORMAL", "SMOKE_NORMAL",
+                        "VILLAGER_HAPPY", "CLOUD", "FLAME", "HEART"),
+                "ItemMeta", List.of("#addEnchant", "#addItemFlags"),
+                "ItemFlag", List.of("HIDE_ENCHANTS"),
+                "Material", List.of("DIAMOND_SWORD"),
+                "Registry", List.of("MATERIAL"));
+
+        Map<String, List<String>> modern = Map.of(
+                "Attribute", List.of("MAX_HEALTH", "MOVEMENT_SPEED", "JUMP_STRENGTH"),
+                "AttributeModifier", List.of("#getKey", "#getName"),
+                "AttributeInstance", List.of("#setBaseValue", "#addModifier"),
+                "Enchantment", List.of("UNBREAKING", "EFFICIENCY", "PROTECTION", "LOOTING"),
+                "PotionEffectType", List.of("NAUSEA", "RESISTANCE", "HASTE",
+                        "STRENGTH", "JUMP_BOOST", "SLOWNESS", "SPEED"),
+                "Particle", List.of("BLOCK", "ENCHANTED_HIT", "POOF", "SMOKE",
+                        "HAPPY_VILLAGER", "CLOUD", "FLAME", "HEART"),
+                "ItemMeta", List.of("#addEnchant", "#setEnchantmentGlintOverride",
+                        "#setItemModel", "#setTooltipStyle"),
+                "ItemFlag", List.of("HIDE_ENCHANTS"),
+                "Material", List.of("DIAMOND_SWORD"),
+                "Registry", List.of("MATERIAL"));
+
+        PromptFacts oldFacts = new PromptFacts(PlatformProfiles.PAPER_LEGACY, null, stubVocabulary(old));
+        PromptFacts newFacts = new PromptFacts(PlatformProfiles.PAPER_LEGACY, null, stubVocabulary(modern));
+
+        List<String> oldIds = PromptRules.applicableIds(PromptRules.PAPER, oldFacts);
+        List<String> newIds = PromptRules.applicableIds(PromptRules.PAPER, newFacts);
+
+        check("an old server gets the legacy enchantment/potion/particle rules",
+                oldIds.contains("paper.enchantment.legacy")
+                        && oldIds.contains("paper.potion.legacy")
+                        && oldIds.contains("paper.particle.legacy"));
+        check("an old server gets the UUID AttributeModifier rule and no glint",
+                oldIds.contains("paper.attribute.modifier.uuid")
+                        && oldIds.contains("paper.itemmeta.glint.no")
+                        && !oldIds.contains("paper.itemmeta.glint.yes"));
+        check("a modern server gets the vanilla enchantment/potion/particle rules",
+                newIds.contains("paper.enchantment.vanilla")
+                        && newIds.contains("paper.potion.vanilla")
+                        && newIds.contains("paper.particle.vanilla"));
+        check("a modern server gets the key AttributeModifier rule and the glint setter",
+                newIds.contains("paper.attribute.modifier.key")
+                        && newIds.contains("paper.itemmeta.glint.yes")
+                        && newIds.contains("paper.itemmeta.model.yes"));
+        check("no rule pair ever fires both halves",
+                java.util.Collections.disjoint(oldIds, List.of("paper.enchantment.vanilla",
+                        "paper.potion.vanilla", "paper.particle.vanilla",
+                        "paper.attribute.modifier.key", "paper.itemmeta.glint.yes"))
+                        && java.util.Collections.disjoint(newIds, List.of("paper.enchantment.legacy",
+                                "paper.potion.legacy", "paper.particle.legacy",
+                                "paper.attribute.modifier.uuid", "paper.itemmeta.glint.no")));
+
+        // The SAME profile, opposite guidance — this is the defect the old two-era
+        // table could not express, since 1.20.4 and 1.21.8 are 13 versions apart
+        // but the profile split sits between neither of the boundaries they cross.
+        String oldPrompt = PromptLibrary.systemPrompt(oldFacts);
+        String newPrompt = PromptLibrary.systemPrompt(newFacts);
+        check("the attribute names injected are the ones the server declares",
+                oldPrompt.contains("GENERIC_MAX_HEALTH, GENERIC_MOVEMENT_SPEED")
+                        && !newPrompt.contains("GENERIC_MAX_HEALTH")
+                        && newPrompt.contains("MAX_HEALTH, MOVEMENT_SPEED"));
+        check("the constant lists are labelled exhaustive so the model does not add to them",
+                oldPrompt.contains("exhaustive - any other spelling is a compile error")
+                        && newPrompt.contains("Every `PotionEffectType` constant on this server"));
+        check("the glint guidance flips with the probe, on ONE profile",
+                oldPrompt.contains("does NOT exist on this server")
+                        && newPrompt.contains("IS available on this server"));
+
+        // The structural guarantee: a rule cannot outvote the vocabulary even
+        // when its own predicate says it should fire. This vocabulary is
+        // self-contradictory (both enchantment eras at once), so neither half of
+        // the pair may be emitted.
+        Map<String, List<String>> impossible = new java.util.LinkedHashMap<>(old);
+        impossible.put("Enchantment", List.of("DURABILITY", "DIG_SPEED", "PROTECTION_ENVIRONMENTAL",
+                "LOOT_BONUS_MOBS", "UNBREAKING", "EFFICIENCY", "PROTECTION", "LOOTING"));
+        List<String> confusedIds = PromptRules.applicableIds(PromptRules.PAPER,
+                new PromptFacts(PlatformProfiles.PAPER_LEGACY, null, stubVocabulary(impossible)));
+        check("a rule contradicted by the vocabulary is dropped, not emitted",
+                !confusedIds.contains("paper.enchantment.legacy")
+                        && !confusedIds.contains("paper.enchantment.vanilla")
+                        && confusedIds.contains("paper.potion.legacy"));
+
+        // Every symbol a rule names must be declared in one of its two lists, or
+        // the offline gate has nothing to check and the prose can drift silently.
+        checkRuleSymbolsAreDeclared();
+
+        System.out.println("PASS: the prompt's era guidance is driven by the measured vocabulary"
+                + " (" + oldIds.size() + " rules on the old shape, " + newIds.size() + " on the modern one)");
+    }
+
+    /**
+     * The anti-drift check: scan each rule's own text for {@code Type.CONSTANT}
+     * and {@code Type#method} references and require every one to appear in
+     * {@code requiresSymbols} or {@code forbidsSymbols}. Without this, someone
+     * adds a sentence naming a new constant and no gate ever notices it is
+     * wrong on nine versions — which is exactly how the prompt got into the
+     * state docs/API-VOCABULARY.md measured.
+     */
+    private static void checkRuleSymbolsAreDeclared() {
+        java.util.regex.Pattern ref = java.util.regex.Pattern.compile(
+                "`([A-Z][A-Za-z0-9]*)[.#]([A-Za-z_][A-Za-z0-9_]*)");
+        List<String> undeclared = new ArrayList<>();
+        List<com.gijsm.vibemod.llm.PromptRule> all = new ArrayList<>(PromptRules.PAPER);
+        all.addAll(PromptRules.LOADER);
+        for (com.gijsm.vibemod.llm.PromptRule rule : all) {
+            java.util.Set<String> declared = new java.util.HashSet<>();
+            declared.addAll(rule.requiresSymbols());
+            declared.addAll(rule.forbidsSymbols());
+            // A bare CONSTANT after a rename arrow ("`NAUSEA`") is written
+            // without its type; match those against the declared list by name.
+            java.util.Set<String> declaredNames = new java.util.HashSet<>();
+            for (String d : declared) {
+                int cut = Math.max(d.indexOf('#'), d.lastIndexOf('.'));
+                declaredNames.add(cut < 0 ? d : d.substring(cut + 1));
+            }
+            java.util.regex.Matcher m = ref.matcher(rule.text());
+            while (m.find()) {
+                String qualified = m.group(1) + (rule.text().charAt(m.end(1)) == '#' ? "#" : ".") + m.group(2);
+                if (!declared.contains(qualified) && !declaredNames.contains(m.group(2))) {
+                    undeclared.add(rule.id() + " names " + qualified
+                            + " but lists neither it nor " + m.group(2));
+                }
+            }
+        }
+        check("every symbol a rule's text names is declared in its requires/forbids lists"
+                + (undeclared.isEmpty() ? "" : " -> " + undeclared), undeclared.isEmpty());
     }
 
     private static void testPromptBuilders() {

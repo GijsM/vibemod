@@ -25,9 +25,12 @@ import com.gijsm.vibemod.gen.GeneratedProject;
  *
  * <p>v2.0 makes the platform-specific half of the prompt data: a
  * {@link PlatformProfile} supplies the role line, the verbatim sdk sources, the
- * import rules, the era cheat sheet, the threading contract, the icon rule and
- * the few-shots, and {@link #systemPrompt(PlatformProfile)} slots them into one
- * skeleton shared by every platform (ARCHITECTURE-V2 §6). The four user-message
+ * import rules, the rule table, the threading contract, the icon rule and
+ * the few-shots, and {@link #systemPrompt(PromptFacts)} slots them into one
+ * skeleton shared by every platform (ARCHITECTURE-V2 §6). The era-specific text
+ * is no longer a per-profile string but a {@link PromptRule} table evaluated
+ * against the running server's measured {@link PromptFacts}, so the prompt
+ * cannot contradict a probe the host already made. The four user-message
  * builders below stay profile-free: nothing in "Create a mod: X", the current
  * sources, the knob table or a javac diagnostic differs per platform, so
  * threading a profile through them would be a parameter nobody reads.
@@ -41,11 +44,18 @@ public final class PromptLibrary {
     private static final Set<String> VALID_KNOB_TYPES = Set.of("boolean", "integer", "decimal", "text", "choice");
 
     // ------------------------------------------------------------------
-    // The prompt is assembled from a fixed skeleton plus the running platform's
-    // PlatformProfile (ARCHITECTURE-V2 §6.1): the role line, the verbatim api
-    // sources, the import rules, the era cheat sheet, the threading contract,
-    // the icon rule and the few-shots all come from the profile, and everything
-    // between them is shared by every platform.
+    // The prompt is assembled from a fixed skeleton, the running platform's
+    // PlatformProfile (ARCHITECTURE-V2 §6.1) and the server's own measured facts
+    // (§6.5). The role line, the verbatim api sources, the import rules, the
+    // threading contract, the icon rule and the few-shots come from the profile;
+    // everything between them is shared by every platform.
+    //
+    // What used to be the profile's `cheatSheet` — one hand-written string per
+    // era saying which enum names are real — is gone. It could not be right: the
+    // vocabulary breaks at 1.20.5, 1.21 and 1.21.3, three boundaries inside what
+    // was one era, and it contradicted probes the host had already made. Era text
+    // is now a PromptRule table evaluated against PromptFacts, and the constant
+    // lists are read off the running server rather than described.
     //
     // The api sources inside the profile are NOT hand-copied: GeneratedApiSources
     // is emitted at build time straight from the sdk module's real files by the
@@ -56,8 +66,25 @@ public final class PromptLibrary {
     /**
      * The full system prompt sent with every generation/edit/repair call, for
      * the platform the host is actually running.
+     *
+     * <h2>Order: invariant first</h2>
+     *
+     * <p>Everything a jar cannot change comes first — the role line, the frozen
+     * api sources, the output contract, the hard rules, the edit shape — and the
+     * server-derived section sits between them and the few-shots. The role line
+     * used to be the first thing in the prompt AND the one sentence that differed
+     * between the two Paper eras, which made their shared prefix 27 characters;
+     * it is now identical for both, and the version it used to assert is stated
+     * as a measured fact in "THIS SERVER" instead.
+     *
+     * <p><b>Be honest about what this buys: nothing, today.</b> Within one boot
+     * the system prompt is byte-identical on every call, so no cache hit changes.
+     * This is hygiene that starts paying once there is more than one variable
+     * fragment. It is not a cost saving, and it deliberately does not add a
+     * {@code cache_control} breakpoint — that is a separate task.
      */
-    public static String systemPrompt(PlatformProfile profile) {
+    public static String systemPrompt(PromptFacts facts) {
+        PlatformProfile profile = facts.profile();
         StringBuilder sb = new StringBuilder();
 
         sb.append(profile.roleLine());
@@ -167,12 +194,6 @@ public final class PromptLibrary {
                 - Be defensive: null-check worlds, entities, and players before using them; use
                   `instanceof` checks before casting entities to more specific types; guard against
                   players being offline/dead when tasks fire later.
-                """);
-
-        sb.append(profile.cheatSheet());
-        sb.append('\n');
-
-        sb.append("""
                 - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
                   construct entity instances directly.
                 - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
@@ -232,6 +253,18 @@ public final class PromptLibrary {
                 - If you are told your previous edits did not apply cleanly, respond with the FULL
                   project shape (complete files) next, not another edit.
 
+                """);
+
+        // ---- the only part of the prompt that varies with the server --------
+        // Everything above is fixed for a platform; everything below was probed
+        // off the running server's own classpath at boot. Keeping the boundary
+        // this sharp is what lets the offline gate check the variable half in
+        // isolation, and what makes a diff between two versions' prompts small
+        // enough to read.
+        sb.append(serverSection(facts));
+
+        sb.append("""
+
                 ================ WORKED EXAMPLES ================
 
                 The following two examples show the exact expected input/output shape, including
@@ -259,9 +292,60 @@ public final class PromptLibrary {
     }
 
     /**
+     * The measured half of the prompt: what this server is, which rules its own
+     * classpath says are true, and the constant lists it actually declares.
+     *
+     * <p>Note what is NOT here. There is no sentence asserting which attribute
+     * names are real, because the names are listed instead; and no rule survives
+     * that the vocabulary contradicts, because {@link PromptRule#appliesTo}
+     * checks each rule's own symbol claims before it is emitted. Prose about the
+     * API is the thing this section exists to stop writing.
+     */
+    private static String serverSection(PromptFacts facts) {
+        PlatformProfile profile = facts.profile();
+        String rules = PromptRules.render(profile.rules(), facts);
+        String vocabulary = VocabularyBlock.render(facts);
+        if (rules.isEmpty() && vocabulary.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n================ THIS SERVER ================\n\n");
+        sb.append("""
+                Everything in this section was measured on the server you are writing for, when
+                it started. It overrides anything you remember about other Minecraft versions:
+                where they disagree, this section is right and your memory is wrong.
+
+                """);
+
+        String version = facts.mcVersion();
+        if (!version.isEmpty()) {
+            sb.append("This server reports Minecraft ").append(version)
+                    .append(" (").append(profile.displayName()).append(").\n\n");
+        } else {
+            sb.append("Target platform: ").append(profile.displayName()).append(".\n\n");
+        }
+
+        sb.append(rules);
+        sb.append(vocabulary);
+        return sb.toString();
+    }
+
+    /**
+     * The prompt for a profile with no host behind it: every vocabulary query
+     * answers UNKNOWN, so the capability-predicated rules drop out and the fixed
+     * text remains. Used by the self-tests and {@code JarExporter}; a running
+     * host always has {@link PromptFacts#of(com.gijsm.vibemod.platform.PlatformInfo)}
+     * and should never call this.
+     */
+    public static String systemPrompt(PlatformProfile profile) {
+        return systemPrompt(PromptFacts.unknown(profile));
+    }
+
+    /**
      * The Paper 1.21.7+ prompt. Kept as the no-argument default because the
      * whole stored corpus and every self-test assertion were written against
-     * it; a host always passes its own profile explicitly.
+     * it; a host always passes its own facts explicitly.
      */
     public static String systemPrompt() {
         return systemPrompt(PlatformProfiles.PAPER_MODERN);
