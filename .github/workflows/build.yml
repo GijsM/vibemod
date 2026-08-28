@@ -157,7 +157,7 @@ jobs:
         include:
           - name: paper 1.20
             gate: scripts/sweep-paper.sh 1.20
-            jdk: "21"
+            jdk: "25"
             cache-path: paper/run/.paper-cache
             cache-key: paper-1.20
           - name: paper 1.20.6
@@ -195,20 +195,37 @@ jobs:
 
       # ONE JDK PER LINE. Do not "simplify" this back to a single java-version.
       #
-      # A Paper server's bundled spark ships an async-profiler native library
-      # that can SIGSEGV the entire JVM seconds after boot on a JDK newer than
-      # that Paper line ever saw - confirmed for Paper 1.21 on JDK 25. The
-      # symptom is not a crash you can act on: the server simply stops, the gate
-      # reports "the canned mod never went live", and it reads as a VibeMod bug.
-      # That misdiagnosis costs a day. Hence smoke-paper.sh and sweep-paper.sh
-      # both honour JAVA_HOME, and hence this matrix names a JDK per line.
+      # The rule, measured on real dedicated servers (ARCHITECTURE-V2 §10.7):
+      # JDK 25 everywhere, EXCEPT the Paper 1.21 base release, which needs 21.
       #
-      #   paper 1.20     -> 21. The oldest JDK the shipped jar can run on
-      #                    (--release 21), and the conservative choice for the
-      #                    oldest Paper line. 1.20 has never been gated on 25
-      #                    here, so it is not gated on 25 here.
+      # Paper 1.21 bundles a spark whose async-profiler native library SIGSEGVs
+      # the whole JVM a few seconds after boot on JDK 25:
+      #
+      #   [spark] Starting background profiler...
+      #   # SIGSEGV (0xb) at pc=0x0000000000000000
+      #   # C  [spark-...-libasyncProfiler.so.tmp+0x2dcb4]
+      #        VMThread::nativeThreadId(JNIEnv_*, _jobject*)+0x70
+      #
+      # There is no VibeMod frame in it, and the server reaches "Done (9.507s)!"
+      # before dying - which is exactly why it masquerades as "the canned mod
+      # never went live" and reads as a VibeMod bug. That misdiagnosis costs a
+      # day. It is deterministic: 3 for 3 across deliberate re-runs.
+      #
+      # It is the 1.21 BASE RELEASE, not the 1.21 line. 1.21.1, 1.21.3, 1.21.4,
+      # 1.21.5, 1.21.6 and 1.21.7 all PASS on 25, and so does 1.20. If paper
+      # 1.21 is ever added to this matrix, it is the one line that gets 21.
+      #
+      # Hence smoke-paper.sh and sweep-paper.sh both honour JAVA_HOME, and hence
+      # this matrix names a JDK per line.
+      #
+      #   paper 1.20     -> 25. Measured PASS on 21 AND 25 in the §10.7 sweep.
+      #                    It ran on 21 here until that sweep, justified by
+      #                    nothing but never having run on 25 - and 1.20's own
+      #                    version.json declares java_version 17, so 21 was
+      #                    never a floor requirement either.
       #   paper 1.20.6   -> 25. Measured green: it is the JDK §10.2's gate was
-      #   paper 1.21.8   -> 25. developed and run on.
+      #   paper 1.21.8   -> 25. developed and run on. (The §10.7 sweep happened
+      #                    to run these two on 21; both JDKs are fine here.)
       #   paper 26.1.2   -> 25. 26.x REQUIRES 25.
       #   paper 26.2     -> 25. Same.
       #   fabric 26.2    -> 25. Same.

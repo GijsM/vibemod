@@ -122,11 +122,16 @@ Weigh that against three facts:
 - **They can run Paper instead, on the same hardware, for free, today.** Paper is a
   drop-in CraftBukkit/Spigot replacement. There is no migration cost story here comparable
   to the engineering cost above.
-- **The Paper-fork audience is already covered at zero cost.** Purpur 26.2 and Leaf 26.2
-  both pass the full gate *unmodified* — same profile, same UI, all assertions green.
-  Whatever "we support forks" is worth, VibeMod already has it.
-- **The floor work already widened reach where it was free.** Paper support is 1.20–26.2,
-  21 versions. That came from deleting a false claim, not from writing code.
+- **The Paper-fork audience is already covered at zero cost, and that is now measured.**
+  Purpur 26.2 (build 2627) and Leaf 26.2 (build 89) both pass the full gate *unmodified* —
+  same profile, same UI, all assertions green — and Folia 26.2 passes it too, with heavy
+  limits on what generated mods can do there (ARCHITECTURE-V2 §10.7). When this document
+  was first written the fork claim had no run behind it; it does now. Whatever "we support
+  forks" is worth, VibeMod already has it.
+- **The floor work already widened reach where it was free.** Paper support is 1.20–26.2:
+  **21 `paper-api` artifacts, 20 gateable server versions** — 1.20.3 has an API artifact and
+  no server build to boot, so it is not run and not claimed (§10.7). That came from deleting
+  a false claim, not from writing code.
 
 ## 3. What would change this answer
 
