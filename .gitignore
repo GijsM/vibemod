@@ -27,6 +27,11 @@ neoforge/clientgate-run/
 scripts/node_modules/
 scripts/.rcon-password
 
+# --- paper-api jars, one per supported version, downloaded by
+# scripts/fetch-api-jars.sh so the offline symbol tools can measure the real
+# API vocabulary. Regenerable, ~100MB, never source. ---
+paper/api-jars/
+
 # --- misc ---
 .DS_Store
 *.log

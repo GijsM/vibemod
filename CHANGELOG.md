@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The Paper floor is 1.20, not 1.20.6.** No code changed; the claim did. A version sweep across
+  real dedicated servers found VibeMod fully functional on **twenty consecutive Paper versions,
+  1.20 through 26.2** — compile in-process, hot-load, every command answering, disable/enable
+  clean. 2.0.0 shipped the floor as 1.20.6 and was four releases too conservative about its own
+  code. The 2.0.0 entry below is left as written: it is the record of what was claimed and tested
+  then, not a claim about today.
+- **What stops Paper below 1.20 is a declaration, not a capability.** 1.19.4, 1.19.2, 1.18.2,
+  1.17.1 and 1.16.5 all refuse identically with
+  `InvalidPluginException: Unsupported API version 1.20`, read straight out of
+  `api-version: '1.20'` in `plugin.yml`, before any VibeMod code runs. Lowering it is a real
+  project rather than a one-line edit — below 1.20, Bukkit's `Commodore` would have to rewrite
+  legacy calls for real, which needs a Java 17 retarget — and it is not done.
+- **Purpur 26.2 and Leaf 26.2 are verified working, unmodified.** Same jar, same profile, same
+  UI, all assertions green, driven through the same gate via `SMOKE_LABEL`/`SMOKE_SERVER_JAR`.
+  Folia still refuses to load (no `folia-supported` in `plugin.yml`) and Spigot/CraftBukkit still
+  cannot work as built (no bundled Adventure; `getCommandMap()` and `AsyncChatEvent` are
+  Paper-only). Neither is claimed.
+- **The CI smoke matrix gates five Paper lines instead of three**, and gates them with
+  `scripts/sweep-paper.sh` rather than `scripts/smoke-paper.sh`. `paper 1.20` (the real floor) and
+  `paper 26.1.2` are new: the whole 1.21.9 → 26.1.2 band, which is where a new Minecraft release
+  lands, had never been gated at all. The sweep wrapper is what makes the Paper gates *assert* —
+  `smoke-rcon.py` prints replies and checks none of them, so the old gates could go green with
+  every answer wrong. Each Paper line now names the JDK it runs on, because at least one Paper
+  line cannot be tested on JDK 25 (its bundled spark SIGSEGVs the JVM).
+
+### Documented
+
+- **The 125 `Commodore` errors on Paper 1.20**, in the README's Paper section. Paper 1.20 bundles
+  ASM 9.4, which cannot read the plugin's Java 21 bytecode (`Unsupported class file major version
+  65`); CraftBukkit catches each failure, falls back to the original bytes, and the plugin works.
+  Harmless **on 1.20 specifically, because no rewrite was actually needed** — not a general
+  guarantee that a failed `Commodore` pass is safe.
+- **The `api-version` invariant**, as a comment at every site that declares it: it governs legacy
+  data conversion, not which API exists, and raising it to signal a minimum supported version
+  makes Paper refuse the plugin outright. This has confused people once already.
+
 ## [2.0.0] - 2026-08-25
 
 VibeMod runs on **Fabric** and **NeoForge** as well as Paper, and the Paper floor drops from

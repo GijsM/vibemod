@@ -1,9 +1,29 @@
 name: VibeMod
 version: 2.0.0
 main: com.gijsm.vibemod.VibeMod
-# The floor is Paper 1.20.6 (ARCHITECTURE-V2 §0#5, §6.3). Everything newer than
-# that which VibeMod touches is capability-gated at runtime, never assumed —
-# the native dialog UI included, which is why 1.20.6 falls back to chat.
+# INVARIANT — do not raise this to declare a minimum supported version.
+#
+# `api-version` is NOT "the oldest API I need". It tells CraftBukkit which era's
+# semantics this plugin's code was written against, so it knows whether to run
+# legacy DATA CONVERSION (materials, the Commodore bytecode rewriter) before
+# handing the plugin its classes. It says nothing about which API exists.
+#
+# Declaring a value ABOVE the running server makes Paper refuse the plugin
+# outright, before any VibeMod code runs:
+#   org.bukkit.plugin.InvalidPluginException: Unsupported API version <value>
+# That refusal, not any capability, is the entire reason VibeMod does not load
+# on Paper 1.19.4 and below. This has been mistaken for a capability once
+# already, so: raising this number does not "require" a newer server, it just
+# stops older ones from loading a plugin that would otherwise have worked.
+#
+# Lowering it is not free either. Once it is below the running server,
+# Commodore must rewrite for real, and Paper 1.20 bundles ASM 9.4, which cannot
+# read Java 21 bytecode — so a lower floor needs a Java 17 retarget first.
+# (ARCHITECTURE-V2 §0#5, §6.3, §10.6.)
+#
+# Measured floor: Paper 1.20. Everything newer than that which VibeMod touches
+# is capability-gated at runtime, never assumed — the native dialog UI
+# included, which is why 1.20–1.21.6 falls back to the chat UI.
 api-version: '1.20'
 author: gijsm
 description: "Vibe-code gameplay mods from in-game prompts"

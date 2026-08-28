@@ -84,8 +84,12 @@ import com.gijsm.vibemod.ui.screens.SettingsScreens;
  *       exist, so the JVM must never be asked to link that renderer — a plain
  *       {@code new} in a dead branch is not a guarantee, a {@code Class.forName}
  *       behind a capability probe is.</li>
- *   <li><b>The floor is 1.20.6.</b> Anything newer that this class or its
- *       collaborators touch is capability-gated through
+ *   <li><b>The floor is 1.20</b> (shipped as 1.20.6; the sweep in
+ *       ARCHITECTURE-V2 §10.6 found four more releases already working), and it
+ *       is a declaration rather than a capability — {@code api-version: '1.20'}
+ *       in {@code plugin.yml} is what makes Paper 1.19.4 and below refuse the
+ *       plugin, before this class is ever constructed. Anything newer that this
+ *       class or its collaborators touch is capability-gated through
  *       {@link PaperPlatformInfo}, never version-compared.</li>
  * </ul>
  */

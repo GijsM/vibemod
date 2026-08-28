@@ -4,7 +4,7 @@
 # Boots a throwaway Paper server of <mc-version> with the freshly built
 # VibeMod.jar and a pre-seeded canned mod, then drives it over RCON and asserts
 # on the results. The Phase C acceptance gate (ARCHITECTURE-V2 §9) in one
-# command, for any version between the 1.20.6 floor and the newest supported
+# command, for any version between the 1.20 floor and the newest supported
 # line.
 #
 # The canned mod exists so the gate needs no LLM and no API key: VibeMod's

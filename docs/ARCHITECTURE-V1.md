@@ -7,7 +7,8 @@
 >
 > Specifically stale, and left standing on purpose rather than quietly corrected:
 >
-> - **"one Paper 1.21.8 plugin"** — the floor is Paper **1.20.6**, and there are two more hosts.
+> - **"one Paper 1.21.8 plugin"** — the floor is Paper **1.20** (ARCHITECTURE-V2 §10.6; it was
+>   claimed as 1.20.6 until a sweep measured lower), and there are two more hosts.
 > - **The "frozen surface" rules.** They froze `com.gijsm.vibemod.api` for the *stored corpus*,
 >   and that promise is kept — every source in it still compiles, and CI proves it. But the
 >   surfaces below are Bukkit-typed, and on the loaders the same class names carry a

@@ -64,10 +64,16 @@ tasks.assemble { dependsOn(tasks.shadowJar) }
 // ---------------------------------------------------------------------------
 // run-paper targets (ARCHITECTURE-V2 §9 Phase C)
 //
-// The three servers the acceptance gate names: the 1.20.6 floor (no dialog API,
-// so the chat renderer is the whole UI), the 1.21.8 dialog baseline, and the
-// newest 26.x line. Each gets its own run directory so worlds, configs and the
-// stored mods of one version never leak into another.
+// Three dev servers: the legacy chat-UI line (no dialog API, so the chat
+// renderer is the whole UI), the 1.21.8 dialog baseline, and the newest 26.x
+// line. Each gets its own run directory so worlds, configs and the stored mods
+// of one version never leak into another.
+//
+// The legacy line here is a convenient representative, NOT the support floor —
+// that is Paper 1.20 (ARCHITECTURE-V2 §10.6), and CI gates it directly. Note
+// that 1.20 itself is a poor dev-server default: it logs ~125 harmless
+// Commodore errors at load (ASM 9.4 cannot read Java 21 bytecode), which is
+// noise every dev would have to learn to ignore.
 // ---------------------------------------------------------------------------
 
 // Resolved here, not inside the task closures: inside a task configuration block
@@ -94,7 +100,7 @@ tasks.runServer {
 }
 
 listOf(
-    legacyRunVersion to "the 1.20.6 floor: no dialog API, so the chat renderer is the whole UI",
+    legacyRunVersion to "the legacy line: no dialog API, so the chat renderer is the whole UI",
     nextRunVersion to "the newest supported line",
 ).forEach { (version, why) ->
     tasks.register<xyz.jpenilla.runpaper.task.RunServer>("runServer${version.replace('.', '_')}") {

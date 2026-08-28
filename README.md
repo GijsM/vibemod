@@ -50,9 +50,22 @@ What that means in practice:
 | Platform | Versions | UI | Client features | `/vibe export` |
 |---|---|---|---|---|
 | **Paper** | 1.21.7 – 26.x | native dialogs | — | yes |
-| **Paper** | 1.20.6 – 1.21.6 | chat fallback | — | yes |
+| **Paper** | 1.20 – 1.21.6 | chat fallback | — | yes |
+| **Purpur**, **Leaf** | 26.2 (verified); other lines untested | as Paper | — | yes |
 | **Fabric** | 26.1+ (built against 26.2) | native dialogs | HUD, keys, `/vibec` | no |
 | **NeoForge** | 26.1+ (built against 26.2) | native dialogs | HUD, keys, `/vibec` | no |
+
+**Paper 1.20 through 26.2 is twenty consecutive versions, and every one of them has been
+measured**, not inferred. "Supported" here has one meaning and it is a high bar: a real dedicated
+server of that exact version booted the shipped jar, VibeMod compiled and hot-loaded a mod
+in-process, the mod's command answered, a config knob applied live, and disable/enable removed and
+restored the command cleanly. Anything that has not cleared that bar is called untested below,
+not supported.
+
+Purpur 26.2 and Leaf 26.2 clear the same bar **unmodified** — same jar, same profile, same UI,
+every assertion green. They are Paper forks and VibeMod never asks which fork it is on, only what
+the server can do, so other Paper forks are likely to work too; "likely" is not "verified", and
+only 26.2 has actually been run.
 
 Java: **25** on Fabric and NeoForge (Minecraft 26.x requires it). **21+** on Paper.
 
@@ -61,11 +74,25 @@ bundle the Eclipse compiler (ECJ) as a fallback backend — but the Paper plugin
 ECJ (Paper servers run a JDK), so Paper needs a real `javac`. VibeMod prints which compiler
 backend it resolved in its boot line either way.
 
-**Not supported, and not planned:** Spigot and CraftBukkit (Paper-only APIs throughout), Folia,
-Paper below 1.20.6, Fabric or NeoForge below 26.1 (VibeMod relies on the game shipping official
-Mojang names, which starts at 26.1), and legacy Forge. Chest/anvil GUIs, registry content
-(items, blocks) in generated mods, mixins in generated code, and VibeMod-to-VibeMod networking
-are out of scope on every platform.
+**Not supported:**
+
+- **Spigot and CraftBukkit** — structural, not a policy. The shipped jar bundles no Adventure and
+  24 source files import `net.kyori.adventure`; `Bukkit.getCommandMap()` and `AsyncChatEvent`
+  are Paper-only and the chat UI rides on both. It would not load usefully, so it is not offered.
+- **Folia** — refuses to load today, on purpose: `plugin.yml` carries no `folia-supported` key.
+  Folia support is being worked on separately and is not claimed here.
+- **Paper below 1.20** — refused by the plugin's own `api-version: '1.20'` declaration, with
+  `InvalidPluginException: Unsupported API version 1.20`, before a single line of VibeMod runs.
+  This is a **declaration, not a measured incapability**: 1.19.4, 1.19.2, 1.18.2, 1.17.1 and
+  1.16.5 were each tried and each gave the identical refusal, so nothing in the plugin was ever
+  given the chance to fail. Lowering the declaration is a real project (Bukkit's `Commodore`
+  would then have to rewrite legacy calls for real, which needs a Java 17 retarget) rather than
+  a one-line edit, and it is not done.
+- **Fabric or NeoForge below 26.1** — VibeMod relies on the game shipping official Mojang names,
+  which starts at 26.1. And legacy Forge.
+
+Chest/anvil GUIs, registry content (items, blocks) in generated mods, mixins in generated code,
+and VibeMod-to-VibeMod networking are out of scope on every platform.
 
 ## Install
 
@@ -84,11 +111,37 @@ the same everywhere: the config file → `$OPENROUTER_API_KEY` → `~/.config/vi
 4. Op yourself and run `/vibe make something fun`.
 
 On 1.21.7+ the whole UI is native dialogs: bare `/vibe` opens the mod browser, and config,
-manual, source, errors, history and settings are all dialog screens. On **1.20.6 – 1.21.6** there
+manual, source, errors, history and settings are all dialog screens. On **1.20 – 1.21.6** there
 is no dialog API, so VibeMod falls back to a **chat UI** — the same screens rendered as clickable
 chat blocks, with forms driven by typing into chat. Every subcommand works either way; the boot
 log says which renderer it picked. You can force the chat UI on a newer server with
 `ui.force-chat: true` in `config.yml`, which is how the fallback gets tested.
+
+#### Paper 1.20: the wall of `Commodore` errors at boot
+
+On **Paper 1.20 specifically**, the server logs roughly **125 errors** while loading VibeMod,
+each one a failure to convert a class, with `Unsupported class file major version 65` at the
+bottom of the stack. The plugin then enables normally and everything works. Both halves of that
+sentence are true and the errors can be ignored.
+
+What is happening: `plugin.yml` declares `api-version: '1.20'`, which is *below* the running
+server, so CraftBukkit runs each of VibeMod's classes through **`Commodore`**, its legacy-API
+rewriter. Paper 1.20 bundles **ASM 9.4**, which predates Java 21 and cannot parse class file
+major version 65 — which is exactly what VibeMod is compiled to. So `Commodore` throws on every
+class it is handed, CraftBukkit catches each failure, **falls back to the original unmodified
+bytes**, and the class loads as written.
+
+Why that is harmless *here*: VibeMod calls nothing that needs rewriting. The fallback bytes are
+the bytes the plugin wanted in the first place, so nothing is lost. **This is specific to 1.20,
+and it is not a general guarantee** — it holds because no rewrite was actually needed, not
+because failed rewrites are safe. On a server old enough that a rewrite *would* be required, the
+same failure would silently produce a broken class instead of a working one. That is the reason
+the `api-version` floor is not simply lowered.
+
+Why you do not see it on the versions above 1.20: Paper bumped its bundled ASM past the Java 21
+barrier — 1.20.6 ships ASM 9.7 — so `Commodore` reads the bytecode fine, finds nothing to change,
+and says nothing. The exact build where the bump landed has not been pinned down; what has been
+observed is that 1.20 emits the errors and no gated version above it does.
 
 ### Fabric
 
@@ -170,7 +223,7 @@ boilerplate, and it is not on the critical path.
 ## Legible, tunable, fixable mods
 
 Every generated mod documents and exposes itself. The whole UI is screens — native dialogs
-wherever the platform has them, chat blocks on Paper 1.20.6–1.21.6:
+wherever the platform has them, chat blocks on Paper 1.20–1.21.6:
 
 - **Config knobs** — mods declare tunable settings (type, default, min/max/step, description).
   Change them via the config screen (`/vibe config <mod>`: sliders, checkboxes, dropdowns) or
@@ -281,16 +334,33 @@ at one with `-Pvibemod.modsDir=<path>/plugins/VibeMod/mods` — a real stored-mo
 ### The gates
 
 Three scripts boot a **real dedicated server**, install the freshly built jar next to a pre-seeded
-canned mod, and drive the whole compile → load → command → config → unload flow over RCON with
-assertions on every reply. They need no LLM and no API key, and they run headless. These are the
-acceptance gates, and CI runs all of them:
+canned mod, and drive the whole compile → load → command → config → unload flow over RCON. They
+need no LLM and no API key, and they run headless. These are the acceptance gates, and CI runs all
+of them:
 
 ```bash
 ./gradlew build
-scripts/smoke-paper.sh 1.21.8      # or 1.20.6 (chat UI) or 26.2
+scripts/smoke-paper.sh 1.21.8      # or 1.20 (the floor, chat UI) or 26.2
+scripts/sweep-paper.sh 1.20 1.21.8 26.2   # the same gate, but asserted, one verdict per version
 scripts/smoke-fabric.sh
 scripts/smoke-neoforge.sh
 ```
+
+`smoke-paper.sh` proves the server booted and the canned mod went live, and it **prints** the RCON
+replies — but it does not check them, so on its own it can go green while every answer is wrong.
+`sweep-paper.sh` is the wrapper that adds the missing half: it reads the transcript back, requires
+eight specific replies, requires the boot log to have reached "VibeMod ready" with no VibeMod
+stack trace in it, and records which UI the plugin picked. It emits one PASS/FAIL line per version
+into `paper/run/sweep-results.tsv`, honours `JAVA_HOME`, and takes `<label>=<mc-version>=<jar>`
+arguments so a Paper **fork** runs the same protocol:
+
+```bash
+JAVA_HOME=/path/to/jdk21 scripts/sweep-paper.sh 1.20 1.20.6 1.21.8
+scripts/sweep-paper.sh purpur-26.2=26.2=/path/to/purpur-26.2.jar
+```
+
+CI uses the sweep for every Paper line, which is why the Paper gates assert and the fork claims
+above are checkable.
 
 They deliberately test the **installed jar**, not the dev classpath — on Loom's and ModDevGradle's
 dev classpaths Adventure and ECJ are plain classpath entries, while in the shipped jar they are
@@ -318,7 +388,7 @@ the gates.
 ./scripts/stop.sh
 ```
 
-`PAPER_VERSION` selects the line: `PAPER_VERSION=1.20.6 ./scripts/setup.sh` for the supported
+`PAPER_VERSION` selects the line: `PAPER_VERSION=1.20 ./scripts/setup.sh` for the supported
 floor, `26.2` for the newest. For a dev server on any platform with no shell scripts involved,
 `./gradlew :paper:runServer`, `:fabric:runServer` and `:neoforge:runServer` also work.
 

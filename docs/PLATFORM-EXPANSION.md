@@ -4,6 +4,10 @@
 > reality — [ARCHITECTURE-V2.md](ARCHITECTURE-V2.md) is.**
 >
 > The expansion shipped in VibeMod 2.0.0: Paper 1.20.6+, Fabric 26.1+ and NeoForge 26.1+.
+> **The Paper figure has since been corrected to 1.20+** — the code was working four releases
+> below the claimed floor all along, and Purpur and Leaf turned out to pass unmodified. See
+> ARCHITECTURE-V2 §10.6. Every "1.20.6" and every ranking of Paper forks below is the plan as
+> written in 2026, not the measured result.
 > Read this document for *why* those directions were chosen and what the 2026 landscape looked
 > like; read V2 (and especially its §10, the phase-by-phase record) for what was actually built,
 > what deviated from the plan, and why. Some of what is proposed here was overtaken by the work:
