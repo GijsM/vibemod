@@ -36,3 +36,13 @@ paper/api-jars/
 .DS_Store
 *.log
 fabric/smoke-cache/
+
+# --- The B5 compile-rate eval's output: raw LLM responses (the resumable
+# response cache), the rendered before/after system prompts, the usage log and
+# the generated report. Regenerable, and the response cache is a few MB of
+# model output that is not source. ---
+eval-out/
+
+# --- Same harness, free-tier models. Same reasons; kept in its own directory so
+# a free-model study can never collide with, or be mistaken for, a paid run. ---
+eval-free/

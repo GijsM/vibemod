@@ -335,11 +335,63 @@ tasks.register<JavaExec>("deriveRenames") {
     args(apiJarsDir)
 }
 
+/**
+ * The B4 gate: the prompt-caching wire shape. Offline, no key, no network —
+ * it reads the JSON body the client builds. See PromptCacheSelfTest for why
+ * this exists separately from the measurements in OpenRouterClient's javadoc.
+ */
+registerSelfTest("selfTestPromptCache", "com.gijsm.vibemod.llm.PromptCacheSelfTest")
+
 tasks.register("selfTest") {
     group = "verification"
     description = "Runs core's self-tests."
     dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog",
-        "selfTestErrors", "selfTestVocabulary", "selfTestPromptSymbols", "selfTestSymbolRepair")
+        "selfTestErrors", "selfTestVocabulary", "selfTestPromptSymbols", "selfTestSymbolRepair",
+        "selfTestPromptCache")
 }
 
 tasks.named("check") { dependsOn("selfTest") }
+
+// ---------------------------------------------------------------------------
+// The B5 eval: first-try compile rate, scored per condition and per version
+// (docs/MASTER-PROMPT-reach-and-context.md, Objective B5).
+//
+// Deliberately NOT wired into `check` or `selfTest`: it spends real money on
+// the OpenRouter API. It is resumable and content-addressed, so a re-run never
+// re-pays for a generation it already has, and it refuses to start a call once
+// `-Pvibemod.eval.budgetUsd` is reached.
+//
+//   gradlew :core:evalCompileRate -Pvibemod.eval.dryRun=true
+//   gradlew :core:evalCompileRate -Pvibemod.eval.pilot=3
+//   gradlew :core:evalCompileRate -Pvibemod.eval.n=12 -Pvibemod.eval.budgetUsd=3
+// ---------------------------------------------------------------------------
+tasks.register<JavaExec>("evalCompileRate") {
+    group = "verification"
+    description = "Scores first-try compile rate per prompt condition and Paper version."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "eval.CompileRateEval"
+    // Optional JVM override for the eval only; the BUILD stays on Java 21.
+    //
+    // Needed because paper-api 26.x ships class files at major version 69
+    // (Java 25) while 1.21.x ships major 65 (Java 21). A JDK 21 javac cannot
+    // read the 26.x jars at all -- it reports "cannot access org.bukkit.Material"
+    // for every generated source -- so scoring any 26.x cell on Java 21 measures
+    // the toolchain, not the prompt. Point this at a Java 25 JDK to score them:
+    //   -Pvibemod.eval.jdk=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+    (findProperty("vibemod.eval.jdk") as String?)?.let { jdkHome ->
+        setExecutable("$jdkHome/bin/java")
+    }
+    systemProperty("vibemod.eval.root", rootProject.layout.projectDirectory.asFile.absolutePath)
+    systemProperty("vibemod.apiJars", apiJarsDir)
+    systemProperty("vibemod.mods.dir", modsDir)
+    // Forward every -Pvibemod.eval.* straight through, so the harness owns its
+    // own option set and this block never needs editing to add one. The API key
+    // is deliberately NOT forwardable this way: the harness reads it from the
+    // environment or config.yml, and a -P value would land in the Gradle
+    // daemon's command line where `ps` can see it.
+    for ((key, value) in project.properties) {
+        if (key.startsWith("vibemod.eval.") && key != "vibemod.eval.apiKey" && value != null) {
+            systemProperty(key, value.toString())
+        }
+    }
+}

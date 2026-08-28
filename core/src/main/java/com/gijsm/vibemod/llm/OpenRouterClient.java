@@ -57,8 +57,47 @@ public final class OpenRouterClient {
     public record ChatMessage(String role, String content) {
     }
 
-    /** One completion: the assistant message text plus its real {@code usage.cost} in USD (0 if absent). */
-    public record Completion(String content, double costUsd) {
+    /**
+     * Token accounting for one round, read straight out of the response's
+     * {@code usage} object. {@code cachedPromptTokens} is
+     * {@code usage.prompt_tokens_details.cached_tokens} — prompt tokens served
+     * from the provider's cache at the cache-read rate — and
+     * {@code cacheWriteTokens} is the sibling {@code cache_write_tokens}, the
+     * segment this call paid a (usually 1.25x) premium to store.
+     *
+     * <p>Measured, not assumed: OpenRouter returns all of these <em>without</em>
+     * {@code "usage": {"include": true}} in the request body. Verified on
+     * 2026-08-28 against anthropic/claude-haiku-4.5 and openai/gpt-5.6-luna,
+     * both of which returned a full {@code prompt_tokens_details} on a body that
+     * never asked for one. That is why {@link #buildBody} does not send the
+     * field: it would be noise.
+     */
+    public record Usage(int promptTokens, int completionTokens,
+                        int cachedPromptTokens, int cacheWriteTokens) {
+
+        public static final Usage NONE = new Usage(0, 0, 0, 0);
+
+        /** Whether any part of the prompt was served from cache. */
+        public boolean cacheHit() {
+            return cachedPromptTokens > 0;
+        }
+
+        /** Fraction of the prompt served from cache, 0.0 when nothing was. */
+        public double cachedFraction() {
+            return promptTokens <= 0 ? 0.0 : (double) cachedPromptTokens / promptTokens;
+        }
+    }
+
+    /**
+     * One completion: the assistant message text, its real {@code usage.cost} in
+     * USD (0 if absent), and the round's {@link Usage} token accounting.
+     */
+    public record Completion(String content, double costUsd, Usage usage) {
+
+        /** A completion whose token accounting was not available. */
+        public Completion(String content, double costUsd) {
+            this(content, costUsd, Usage.NONE);
+        }
     }
 
     /**
@@ -97,6 +136,10 @@ public final class OpenRouterClient {
     private volatile int maxTokens = 0; // <= 0: omit, OpenRouter uses the model's own ceiling
     private volatile String reasoningEffort; // null: off — omit the "reasoning" field entirely
     private final DoubleAdder sessionCost = new DoubleAdder();
+    private final java.util.concurrent.atomic.LongAdder sessionPromptTokens =
+            new java.util.concurrent.atomic.LongAdder();
+    private final java.util.concurrent.atomic.LongAdder sessionCachedPromptTokens =
+            new java.util.concurrent.atomic.LongAdder();
 
     public OpenRouterClient(String apiKey, String model, Duration timeout) {
         this.apiKey = apiKey;
@@ -128,8 +171,122 @@ public final class OpenRouterClient {
         return effort == null ? "off" : effort;
     }
 
-    /** Shared request-body builder for both the buffered and streaming request shapes. */
-    private JsonObject buildBody(String systemPrompt, List<ChatMessage> messages, boolean stream) {
+    // ------------------------------------------------------------------
+    // Prompt caching (Objective B4)
+    // ------------------------------------------------------------------
+
+    /**
+     * Model-id vendor prefixes whose providers only cache a prompt prefix when
+     * the request marks an explicit {@code cache_control} breakpoint.
+     *
+     * <p><strong>Measured, on 2026-08-28, against the live OpenRouter API.</strong>
+     * The same ~7k-token system prefix was sent twice back to back to one model
+     * per featured vendor, once as a plain string and once as a content-block
+     * array carrying {@code cache_control: {"type": "ephemeral"}}, and the
+     * response's {@code usage.prompt_tokens_details} was read:
+     *
+     * <pre>
+     *   vendor      plain string (2nd call)     with breakpoint (2nd call)
+     *   anthropic   0 cached,   0% cheaper      8823 cached,  92% cheaper   NEEDS IT
+     *   google      0 cached,  -1% cheaper      7945 cached,  34% cheaper   NEEDS IT
+     *   x-ai      128 cached,   1% cheaper      7104 cached,  81% cheaper   NEEDS IT
+     *   openai   7008 cached,  92% cheaper      6998 cached,  92% cheaper   no-op
+     *   z-ai        (not run)                   6976 cached,  82% cheaper   automatic
+     *   moonshotai  (not run)                   6912 cached,  81% cheaper   automatic
+     *   mistralai   (not run)                   7168 cached,  89% cheaper   automatic
+     *   deepseek    (not run)                      0 cached,  no caching    automatic
+     *   nvidia      (not run)                      0 cached,  no caching    automatic
+     * </pre>
+     *
+     * <p>{@code qwen} is here on pricing evidence rather than a measurement:
+     * {@code GET /api/v1/models} prices {@code input_cache_write} on 14 of its
+     * models, which is the same signature anthropic, google and the newest
+     * openai models carry, and only providers that bill a cache <em>write</em>
+     * have an explicit breakpoint to bill for. It could not be confirmed
+     * directly — every qwen model answers 404 "No endpoints available matching
+     * your guardrail restrictions and data policy" on this account, with and
+     * without {@code cache_control} alike, so the model is unreachable rather
+     * than breakpoint-hostile. Treat the qwen entry as unverified.
+     *
+     * <p>Why this is an allowlist rather than "always send one". Sending a
+     * breakpoint to a provider that caches automatically buys nothing measurable
+     * — openai's numbers are identical to three significant figures with and
+     * without it — while every extra field in a request body is one more thing
+     * an endpoint can reject. The vendors listed here are the ones where it is
+     * the difference between 0% and 81-92%.
+     */
+    private static final java.util.Set<String> BREAKPOINT_VENDORS =
+            java.util.Set.of("anthropic", "google", "x-ai", "qwen");
+
+    /**
+     * Models for which a breakpoint was sent and the request came back rejected
+     * in a way that named caching. Belt and braces for {@link #BREAKPOINT_VENDORS}
+     * going stale: a provider that starts refusing the field degrades to the
+     * plain-string form for the rest of the process instead of failing
+     * generation. Never populated in any measured run to date.
+     */
+    private final java.util.Set<String> breakpointsDisabled =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** The vendor prefix of a model id: {@code "anthropic/claude-opus-5"} -> {@code "anthropic"}. */
+    private static String vendorOf(String modelId) {
+        if (modelId == null) {
+            return "";
+        }
+        int slash = modelId.indexOf('/');
+        return (slash <= 0 ? modelId : modelId.substring(0, slash))
+                .trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** Whether this round should mark cache breakpoints at all. */
+    private boolean useBreakpoints() {
+        String m = model;
+        return BREAKPOINT_VENDORS.contains(vendorOf(m)) && !breakpointsDisabled.contains(m);
+    }
+
+    /**
+     * A message whose content is the structured content-block array form, which
+     * is the only shape {@code cache_control} is read in. A plain string and a
+     * one-element text array are otherwise equivalent to every provider tested.
+     */
+    private static JsonObject blockMessage(String role, String content, boolean breakpoint) {
+        JsonObject block = new JsonObject();
+        block.addProperty("type", "text");
+        block.addProperty("text", content);
+        if (breakpoint) {
+            JsonObject cacheControl = new JsonObject();
+            cacheControl.addProperty("type", "ephemeral");
+            block.add("cache_control", cacheControl);
+        }
+        JsonArray blocks = new JsonArray();
+        blocks.add(block);
+        JsonObject message = new JsonObject();
+        message.addProperty("role", role);
+        message.add("content", blocks);
+        return message;
+    }
+
+    /**
+     * Whether a rejected response looks like a provider refusing the
+     * {@code cache_control} field, as opposed to any other 4xx. Deliberately
+     * narrow: a 404 that never mentions caching is a routing or data-policy
+     * problem (every qwen model answers exactly that on this account) and must
+     * not silently turn caching off.
+     */
+    private static boolean looksLikeCacheRejection(int status, String body) {
+        if (status != 400 && status != 404 && status != 422) {
+            return false;
+        }
+        String lower = body == null ? "" : body.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("cache_control") || lower.contains("cache control");
+    }
+
+    /**
+     * Shared request-body builder for both the buffered and streaming request
+     * shapes. Package-private rather than private so {@code PromptCacheSelfTest}
+     * can assert the wire shape of the cache breakpoints without a network call.
+     */
+    JsonObject buildBody(String systemPrompt, List<ChatMessage> messages, boolean stream) {
         JsonObject body = new JsonObject();
         body.addProperty("model", model);
         if (maxTokens > 0) {
@@ -151,16 +308,52 @@ public final class OpenRouterClient {
             // usage on the final SSE chunk; that field is deprecated cruft.
         }
 
+        // --- prompt caching -------------------------------------------------
+        // Breakpoint 1, at the end of the system message. Within one boot the
+        // system prompt is byte-identical on every call, so ordering the prompt
+        // "invariant first" would change nothing today and is deliberately left
+        // to B6; the whole system message IS the invariant prefix. What this
+        // buys is real but narrow: the SECOND and later calls of a boot — every
+        // self-heal round, and every later generation inside the cache TTL —
+        // read ~7k prompt tokens at the cache-read rate instead of full price.
+        // Measured 92% cheaper on anthropic and openai, 81% on x-ai.
+        boolean breakpoints = useBreakpoints();
+
         JsonArray msgs = new JsonArray();
-        JsonObject sys = new JsonObject();
-        sys.addProperty("role", "system");
-        sys.addProperty("content", systemPrompt);
-        msgs.add(sys);
-        for (ChatMessage m : messages) {
-            JsonObject o = new JsonObject();
-            o.addProperty("role", m.role());
-            o.addProperty("content", m.content());
-            msgs.add(o);
+        if (breakpoints) {
+            msgs.add(blockMessage("system", systemPrompt, true));
+        } else {
+            JsonObject sys = new JsonObject();
+            sys.addProperty("role", "system");
+            sys.addProperty("content", systemPrompt);
+            msgs.add(sys);
+        }
+
+        // Breakpoint 2, on the final message, but only once the conversation
+        // has an assistant turn in it — i.e. this is a self-heal round and the
+        // history now contains a whole generated project we would otherwise
+        // re-send at full price every round.
+        //
+        // The arithmetic, from the same measured run (anthropic/claude-haiku-4.5,
+        // a 6.3k-token assistant turn): writing that segment cost $0.00158, and
+        // the round after it cost $0.0016 instead of $0.0073 — a $0.0057 saving.
+        // A cache write is 1.25x and a read is 0.1x, so a write pays for itself
+        // once the chance of one further round exceeds 0.25/0.9 = 28%. With
+        // max-retries at 3, a run that has already failed once is well past that.
+        // It is a small net LOSS when healing stops immediately after this round.
+        int lastIndex = messages.size() - 1;
+        boolean hasAssistantTurn = messages.stream().anyMatch(m -> "assistant".equals(m.role()));
+        for (int i = 0; i < messages.size(); i++) {
+            ChatMessage m = messages.get(i);
+            boolean mark = breakpoints && hasAssistantTurn && i == lastIndex;
+            if (mark) {
+                msgs.add(blockMessage(m.role(), m.content(), true));
+            } else {
+                JsonObject o = new JsonObject();
+                o.addProperty("role", m.role());
+                o.addProperty("content", m.content());
+                msgs.add(o);
+            }
         }
         body.add("messages", msgs);
         return body;
@@ -178,11 +371,34 @@ public final class OpenRouterClient {
 
     /** POST to the chat-completions endpoint; returns the assistant message text plus its billed cost. */
     public CompletableFuture<Completion> complete(String systemPrompt, List<ChatMessage> messages) {
+        return complete(systemPrompt, messages, true);
+    }
+
+    /**
+     * {@link #complete} with one extra affordance: when {@code allowCacheRetry}
+     * and the response is a rejection that names {@code cache_control}, the
+     * breakpoint is switched off for this model and the round is retried once
+     * without it. See {@link #breakpointsDisabled} — no measured provider has
+     * ever needed this, but a stale {@link #BREAKPOINT_VENDORS} entry should
+     * cost one retry, not the generation.
+     */
+    private CompletableFuture<Completion> complete(String systemPrompt, List<ChatMessage> messages,
+                                                   boolean allowCacheRetry) {
         JsonObject body = buildBody(systemPrompt, messages, false);
         HttpRequest request = baseRequest(body).timeout(timeout).build();
 
         return HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenCompose(this::toResult);
+                .thenCompose(response -> {
+                    if (allowCacheRetry && useBreakpoints()
+                            && looksLikeCacheRejection(response.statusCode(), response.body())) {
+                        String rejected = model;
+                        breakpointsDisabled.add(rejected);
+                        LOG.warning("Provider for " + rejected + " rejected the cache_control breakpoint; "
+                                + "retrying without it and disabling prompt caching for this model");
+                        return complete(systemPrompt, messages, false);
+                    }
+                    return toResult(response);
+                });
     }
 
     /**
@@ -304,8 +520,9 @@ public final class OpenRouterClient {
         private volatile long lastEventNanosValue = System.nanoTime();
         private volatile Flow.Subscription subscription;
 
-        private String finishReason; // only touched on the HTTP callback thread
-        private double cost = 0.0;   // only touched on the HTTP callback thread
+        private String finishReason;      // only touched on the HTTP callback thread
+        private double cost = 0.0;        // only touched on the HTTP callback thread
+        private Usage usage = Usage.NONE; // only touched on the HTTP callback thread
 
         SseSubscriber(StreamObserver observer) {
             this.observer = observer;
@@ -393,6 +610,7 @@ public final class OpenRouterClient {
 
             if (chunk.has("usage") && chunk.get("usage").isJsonObject()) {
                 cost = extractCost(chunk);
+                usage = extractUsage(chunk);
             }
 
             JsonArray choices = chunk.has("choices") && chunk.get("choices").isJsonArray()
@@ -465,7 +683,8 @@ public final class OpenRouterClient {
                 return;
             }
             sessionCost.add(cost);
-            future.complete(new Completion(finalContent, cost));
+            creditCache(usage);
+            future.complete(new Completion(finalContent, cost, usage));
             cancelSubscription();
         }
     }
@@ -490,6 +709,7 @@ public final class OpenRouterClient {
         }
 
         double cost = extractCost(json);
+        Usage usage = extractUsage(json);
         try {
             JsonArray choices = json.getAsJsonArray("choices");
             JsonObject first = choices.get(0).getAsJsonObject();
@@ -505,11 +725,50 @@ public final class OpenRouterClient {
                         "response had empty content (finish_reason=" + finishReason + ")", cost));
             }
             sessionCost.add(cost);
-            return CompletableFuture.completedFuture(new Completion(content, cost));
+            creditCache(usage);
+            return CompletableFuture.completedFuture(new Completion(content, cost, usage));
         } catch (RuntimeException e) {
             String snippet = responseBody.length() > 500 ? responseBody.substring(0, 500) : responseBody;
             return CompletableFuture.failedFuture(
                     new IOException("OpenRouter response missing choices[0].message.content: " + snippet, e));
+        }
+    }
+
+    /**
+     * Defensive extraction of the round's token accounting. Absent, null or
+     * non-numeric fields read as zero and this never throws — usage is
+     * reporting, and must never be able to fail a generation.
+     *
+     * <p>{@code cached_tokens} and {@code cache_write_tokens} live under
+     * {@code usage.prompt_tokens_details}. Both arrive without the request
+     * asking for usage accounting; see {@link Usage}.
+     */
+    private static Usage extractUsage(JsonObject json) {
+        if (json == null || !json.has("usage") || !json.get("usage").isJsonObject()) {
+            return Usage.NONE;
+        }
+        JsonObject usage = json.getAsJsonObject("usage");
+        int prompt = intField(usage, "prompt_tokens");
+        int completion = intField(usage, "completion_tokens");
+        int cached = 0;
+        int written = 0;
+        if (usage.has("prompt_tokens_details") && usage.get("prompt_tokens_details").isJsonObject()) {
+            JsonObject details = usage.getAsJsonObject("prompt_tokens_details");
+            cached = intField(details, "cached_tokens");
+            written = intField(details, "cache_write_tokens");
+        }
+        return new Usage(prompt, completion, cached, written);
+    }
+
+    /** {@code obj.field} as an int, or 0 when absent/null/not a number. */
+    private static int intField(JsonObject obj, String field) {
+        if (obj == null || !obj.has(field) || obj.get(field).isJsonNull()) {
+            return 0;
+        }
+        try {
+            return obj.get(field).getAsInt();
+        } catch (RuntimeException notANumber) {
+            return 0;
         }
     }
 
@@ -527,6 +786,40 @@ public final class OpenRouterClient {
         } catch (RuntimeException notANumber) {
             return 0.0;
         }
+    }
+
+    /** Adds one round's token accounting to the session totals. */
+    private void creditCache(Usage usage) {
+        if (usage == null) {
+            return;
+        }
+        sessionPromptTokens.add(usage.promptTokens());
+        sessionCachedPromptTokens.add(usage.cachedPromptTokens());
+    }
+
+    /** Prompt tokens sent across every successful request this client has made. */
+    public long sessionPromptTokens() {
+        return sessionPromptTokens.sum();
+    }
+
+    /** How many of {@link #sessionPromptTokens()} were served from the provider's cache. */
+    public long sessionCachedPromptTokens() {
+        return sessionCachedPromptTokens.sum();
+    }
+
+    /**
+     * Fraction of this session's prompt tokens served from cache, 0.0 when
+     * nothing has been sent yet. The honest headline for whether prompt
+     * caching is doing anything on the model actually in use.
+     */
+    public double sessionCacheHitRate() {
+        long total = sessionPromptTokens.sum();
+        return total <= 0 ? 0.0 : (double) sessionCachedPromptTokens.sum() / total;
+    }
+
+    /** Whether this client marks cache breakpoints for the model currently set. */
+    public boolean cacheBreakpointsActive() {
+        return useBreakpoints();
     }
 
     /** Cumulative {@code usage.cost} across every successful request this client has made. */
