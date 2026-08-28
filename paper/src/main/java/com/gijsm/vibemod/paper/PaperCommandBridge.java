@@ -21,6 +21,7 @@ import org.bukkit.plugin.Plugin;
 
 import com.gijsm.vibemod.platform.CommandBridge;
 import com.gijsm.vibemod.platform.PlatformInfo;
+import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.platform.Registration;
 import com.gijsm.vibemod.runtime.ModDispatch;
 
@@ -45,13 +46,16 @@ public final class PaperCommandBridge implements CommandBridge {
     private final Plugin plugin;
     private final PlatformInfo platform;
     private final ModDispatch dispatch;
+    private final TickScheduler scheduler;
     private volatile boolean allowTopLevel;
     private final Map<String, VibeModCommand> ours = new ConcurrentHashMap<>();
 
-    public PaperCommandBridge(Plugin plugin, PlatformInfo platform, ModDispatch dispatch, boolean allowTopLevel) {
+    public PaperCommandBridge(Plugin plugin, PlatformInfo platform, ModDispatch dispatch,
+                              TickScheduler scheduler, boolean allowTopLevel) {
         this.plugin = plugin;
         this.platform = platform;
         this.dispatch = dispatch;
+        this.scheduler = scheduler;
         this.allowTopLevel = allowTopLevel;
     }
 
@@ -68,8 +72,17 @@ public final class PaperCommandBridge implements CommandBridge {
         String key = name.toLowerCase(Locale.ROOT);
         // Every invocation of a generated command goes through ModDispatch: timed by
         // the watchdog, guarded, and journalled against the mod (§2).
-        CommandExecutorLike wrapped = (sender, label, args) -> dispatch.run(modName,
-                PaperSender.of(sender), "command:" + name, () -> handler.run(PaperSender.of(sender), args));
+        //
+        // The runOnMain wrapper is what makes the prompt's threading promise true
+        // on a regionised server. Folia delivers a player's command on the region
+        // thread owning that player, so without this a generated command handler
+        // would run somewhere the prompt told it it never runs. On Paper
+        // runOnMain executes inline — same thread, same tick, no behaviour change.
+        CommandExecutorLike wrapped = (sender, label, args) -> {
+            com.gijsm.vibemod.platform.Sender s = PaperSender.of(sender);
+            scheduler.runOnMain(() ->
+                    dispatch.run(modName, s, "command:" + name, () -> handler.run(s, args)));
+        };
         try {
             CommandMap map = Bukkit.getCommandMap();
             if (map == null) {

@@ -131,6 +131,18 @@ public record PromptFacts(PlatformProfile profile, PlatformInfo info, ApiVocabul
         return v == null ? "" : v.trim();
     }
 
+    /**
+     * Whether this server ticks in more than one ordering domain (Folia).
+     *
+     * <p>False with no host, which is the right default for the self-tests and
+     * the jar exporter: they build the single-threaded prompt, which is what
+     * every non-regionised platform gets and what an exported mod source should
+     * describe.
+     */
+    public boolean regionised() {
+        return info != null && info.isRegionised();
+    }
+
     /** Whether a host is behind these facts at all. */
     public boolean hasHost() {
         return info != null;

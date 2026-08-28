@@ -38,6 +38,42 @@ public final class PaperPlatformInfo implements PlatformInfo {
     /** The class whose presence marks a server with the vanilla dialog API. */
     private static final String DIALOG_CLASS = "io.papermc.paper.dialog.Dialog";
 
+    /**
+     * The class whose presence marks a genuinely regionised server.
+     *
+     * <p>Choosing this correctly took three wrong answers, every one of them
+     * caught on a real server rather than by reading, so the reasoning is
+     * recorded here instead of being rediscovered:
+     *
+     * <ul>
+     *   <li>{@code ...threadedregions.scheduler.GlobalRegionScheduler} and every
+     *       other type in that package ship in ordinary {@code paper-api}
+     *       ({@code javap}, 1.21.8) and work on single-threaded Paper, where they
+     *       delegate to the main thread. Probing the scheduler API reports every
+     *       Paper server as regionised.
+     *   <li>{@code ...threadedregions.RegionizedServerInitEvent} is likewise in
+     *       {@code paper-api}.
+     *   <li>{@code ...threadedregions.TickRegions} — which this probe briefly
+     *       used — is in the plain <b>Paper server jar</b>: observed loading from
+     *       {@code paper-1.20.6.jar} on a real Paper 1.20.6 boot. Paper carries
+     *       parts of Folia's regionised source without running regionised.
+     * </ul>
+     *
+     * <p>{@code RegionizedServer} is the one that holds. Measured across four
+     * real boots with {@code -Xlog:class+load}: present on Folia 26.2 (loaded
+     * four times), absent on Paper 1.20.6, 1.21.8 and 26.2.
+     *
+     * <p>Getting this wrong is not a soft failure, and modern Paper will not tell
+     * you. A false positive selects {@link FoliaTickScheduler} on a server that
+     * is not Folia; Paper 1.20.6 then dies on its first async hop with
+     * {@code NoSuchMethodError: Bukkit.isGlobalTickThread()}, because that method
+     * postdates 1.20.6. On Paper 1.21.8 and 26.2 the same false positive is
+     * silent, because the global region scheduler genuinely works there.
+     */
+    private static final String[] REGIONISED_CLASSES = {
+        "io.papermc.paper.threadedregions.RegionizedServer",
+    };
+
     private final String mcVersion;
     private final String profileId;
     private final boolean hasDialogs;
@@ -45,6 +81,7 @@ public final class PaperPlatformInfo implements PlatformInfo {
     private final boolean hasNativeCommandMap;
     private final boolean hasItemGlintOverride;
     private final boolean hasCommandResync;
+    private final boolean regionised;
     private final int maxTargetRelease;
     /** Measured once here; reflecting Material alone walks 1,900+ fields. */
     private final com.gijsm.vibemod.platform.ApiVocabulary vocabulary;
@@ -58,6 +95,7 @@ public final class PaperPlatformInfo implements PlatformInfo {
         this.hasNativeCommandMap = detectCommandMap();
         this.hasItemGlintOverride = methodPresent(ItemMeta.class, "setEnchantmentGlintOverride", Boolean.class);
         this.hasCommandResync = methodPresent(org.bukkit.entity.Player.class, "updateCommands");
+        this.regionised = detectRegionised();
         this.maxTargetRelease = detectMaxTargetRelease();
         this.vocabulary = PaperApiVocabulary.measure();
     }
@@ -74,6 +112,7 @@ public final class PaperPlatformInfo implements PlatformInfo {
                 + " · commandMap=" + hasNativeCommandMap
                 + " · glintOverride=" + hasItemGlintOverride
                 + " · commandResync=" + hasCommandResync
+                + " · regionised=" + regionised
                 + " · target=java" + maxTargetRelease
                 + " · vocabulary=" + vocabulary;
     }
@@ -121,6 +160,11 @@ public final class PaperPlatformInfo implements PlatformInfo {
     @Override
     public boolean hasCommandResync() {
         return hasCommandResync;
+    }
+
+    @Override
+    public boolean isRegionised() {
+        return regionised;
     }
 
     @Override
@@ -191,6 +235,45 @@ public final class PaperPlatformInfo implements PlatformInfo {
                     + "); targeting Java " + fallback);
             return fallback;
         }
+    }
+
+    /**
+     * Whether this server ticks in more than one ordering domain.
+     *
+     * <p>Never asks {@code Bukkit.getScheduler()}. That call is precisely what
+     * blows up on Folia — {@code CraftScheduler.handle} throws
+     * {@link UnsupportedOperationException} — so using it as a feature test
+     * would mean triggering the crash in order to learn that the crash happens.
+     *
+     * <p>Two independent signals, either of which is sufficient. The class probe
+     * is the precise one; the name check is the belt, because a regionised fork
+     * may rename the internals but still has to identify itself, and reporting a
+     * regionised server as single-threaded is the expensive direction of this
+     * error — it would hand every generated mod a threading contract that is
+     * false and let it race silently.
+     */
+    private static boolean detectRegionised() {
+        for (String fqcn : REGIONISED_CLASSES) {
+            if (classPresent(fqcn)) {
+                LOG.fine("Regionised server detected via " + fqcn);
+                return true;
+            }
+        }
+        try {
+            String name = Bukkit.getName();
+            String version = Bukkit.getVersion();
+            if (containsFolia(name) || containsFolia(version)) {
+                LOG.fine("Regionised server detected via server identity: " + name + " / " + version);
+                return true;
+            }
+        } catch (Throwable t) {
+            LOG.fine("Could not read the server identity (" + t + "); assuming not regionised");
+        }
+        return false;
+    }
+
+    private static boolean containsFolia(String s) {
+        return s != null && s.toLowerCase(java.util.Locale.ROOT).contains("folia");
     }
 
     private static boolean classPresent(String fqcn) {

@@ -72,10 +72,25 @@ public final class PlatformProfiles {
               send a player (`Component.text(...)`), and `Player`/`CommandSender` are
               Adventure `Audience`s, so `sendMessage(Component)` just works.""";
 
-    private static final String PAPER_THREADING = """
-            - Event handler methods and Runnables passed to ctx.repeat/ctx.later already run
-              on the main server thread — do not spawn your own threads and do not attempt to
-              hop threads yourself.""";
+    /**
+     * Empty on purpose: Paper's threading contract is now a probe-predicated
+     * rule pair, {@code paper.threading.main} / {@code paper.threading.regionised}
+     * in {@link PromptRules#PAPER}.
+     *
+     * <p>It had to move. A {@code threadingContract} on the profile can only say
+     * one thing per profile, and Folia is served by BOTH Paper profiles — it
+     * exists at 1.20.6 and at 26.2 — so there is no profile split that could
+     * carry the difference. Adding a third {@code paper-folia} profile would have
+     * meant four, since the era axis does not go away, and each with a
+     * hand-maintained copy of the other profile's text: precisely the duplication
+     * the rule table replaced.
+     *
+     * <p>The loader profiles keep their {@code LOADER_THREADING} string, and that
+     * is not an inconsistency. On Fabric and NeoForge one profile really does
+     * mean one threading model, so the field still states a fact about the
+     * profile. On Paper it no longer does.
+     */
+    private static final String PAPER_THREADING = "";
 
     /**
      * Shared by BOTH Paper profiles, and deliberately free of a version number.
@@ -128,7 +143,7 @@ public final class PlatformProfiles {
             PAPER_ROLE,
             PAPER_API_SOURCE_BLOCK,
             PAPER_IMPORT_RULES,
-            PromptRules.PAPER,
+            PromptRules.PAPER_PROFILE,
             PAPER_THREADING,
             PromptExamples.PAPER_FEW_SHOTS,
             "1.20",
@@ -153,7 +168,7 @@ public final class PlatformProfiles {
             PAPER_ROLE,
             PAPER_API_SOURCE_BLOCK,
             PAPER_IMPORT_RULES,
-            PromptRules.PAPER,
+            PromptRules.PAPER_PROFILE,
             PAPER_THREADING,
             PromptExamples.PAPER_FEW_SHOTS,
             "1.20",

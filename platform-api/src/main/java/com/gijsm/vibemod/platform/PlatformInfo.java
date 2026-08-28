@@ -54,6 +54,28 @@ public interface PlatformInfo {
     }
 
     /**
+     * True when this server ticks the world in more than one ordering domain —
+     * Folia's regionised threading, and any fork that adopts it.
+     *
+     * <p>This is the probe that decides which scheduler runs generated mods and
+     * which threading contract the prompt states, so it is worth being exact
+     * about what it does <em>not</em> mean. It is not "does this server have the
+     * regionised scheduler API": {@code Bukkit.getGlobalRegionScheduler()} and
+     * the whole {@code io.papermc.paper.threadedregions.scheduler} package ship
+     * in ordinary {@code paper-api} and answer perfectly well on a single-threaded
+     * Paper, where they simply delegate to the main thread. Verified with
+     * {@code javap} against {@code paper-api:1.21.8}. A host must therefore
+     * probe for a regionised <em>implementation</em>, not for the API surface.
+     *
+     * <p>False is the safe default and the honest one for every non-regionised
+     * platform: one main thread, one ordering domain, callbacks that may touch
+     * anything.
+     */
+    default boolean isRegionised() {
+        return false;
+    }
+
+    /**
      * The highest {@code --release} generated code may target on this host.
      *
      * <p>Not the same question as "what can this JVM run". A server's bytecode

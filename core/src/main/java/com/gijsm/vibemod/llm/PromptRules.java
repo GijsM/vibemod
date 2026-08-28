@@ -267,6 +267,70 @@ public final class PromptRules {
             List.of(),
             List.of());
 
+    // ------------------------------------------------------------------
+    // Threading
+    // ------------------------------------------------------------------
+    //
+    // This pair used to be one fixed string on PlatformProfile
+    // (PlatformProfiles.PAPER_THREADING), shared by both Paper profiles. That
+    // was safe only while every Paper-shaped server was single-threaded, and it
+    // stopped being safe the moment Folia was supported: Folia is selected by
+    // BOTH Paper profiles (it exists at 1.20.6 and at 26.2), so no profile split
+    // can express the difference — exactly the situation this rule table is for.
+    //
+    // The stakes are higher than the other pairs here. A wrong glint rule costs
+    // a self-heal round. A wrong threading rule produces a mod that compiles,
+    // loads, passes its first test and then corrupts state under load, because
+    // the model was told it had a guarantee it does not have. The old sentence
+    // is FALSE on Folia, and false in the silent direction.
+
+    private static final PromptRule PAPER_THREADING_MAIN = new PromptRule(
+            "paper.threading.main",
+            facts -> !facts.regionised(),
+            """
+            - Event handler methods and Runnables passed to ctx.repeat/ctx.later already run
+              on the main server thread — do not spawn your own threads and do not attempt to
+              hop threads yourself.""",
+            List.of(),
+            List.of());
+
+    /**
+     * Folia and any fork that adopts its regionised threading.
+     *
+     * <p>What this text says is deliberately narrower than "Folia is supported".
+     * The host pins every scheduled task and every command handler to the global
+     * region thread, so those two are genuinely single-threaded. Event handlers
+     * are not and cannot be: Folia delivers them on the region thread that owns
+     * the subject, and hopping them to the global region would arrive a tick late
+     * and break {@code setCancelled}. So the honest contract is "two domains, and
+     * here is which is which" — not a promise of one thread that the host cannot
+     * keep.
+     */
+    private static final PromptRule PAPER_THREADING_REGIONISED = new PromptRule(
+            "paper.threading.regionised",
+            PromptFacts::regionised,
+            """
+            - THIS SERVER IS NOT SINGLE-THREADED. It ticks the world as several regions in
+              parallel, so your callbacks do NOT all run on one thread:
+              - Runnables passed to `ctx.repeat(...)` / `ctx.later(...)` run on the global
+                region thread.
+              - Event handler methods run on whichever region thread owns the entity or chunk
+                the event is about. That is a DIFFERENT thread from the one above, and your
+                handler can be running in several regions at the same moment.
+            - Therefore: any state shared between an event handler and a scheduled task MUST be
+              thread-safe. Use `ConcurrentHashMap`, never a plain `HashMap`, for per-player
+              maps; use `AtomicInteger` / `AtomicLong` instead of a plain counter field. This
+              overrides the usual advice about plain `HashMap` fields.
+            - Do the work where the object lives. An event handler may freely touch the player,
+              entity or block its event is about. A `ctx.repeat` / `ctx.later` task runs on the
+              global region and must NOT assume it can touch an arbitrary player, entity or
+              block — this server rejects touching something another region owns. Prefer doing
+              world changes in the event handler that handed you the object, and keep scheduled
+              tasks to bookkeeping and to work on things you have re-checked are still valid.
+            - Still never spawn your own threads, and never hop threads yourself.""",
+            List.of(),
+            List.of());
+
     /**
      * Paper's table. Order is the emission order, so the pairs sit where their
      * subject does and a diff between two versions' prompts stays readable.
@@ -287,6 +351,47 @@ public final class PromptRules {
             PAPER_ITEM_MODEL_YES,
             PAPER_ITEM_MODEL_NO,
             PAPER_NO_REGISTRY_LOOKUPS);
+
+    /**
+     * Paper rules whose firing is a property of the RUNNING HOST, not of any
+     * {@code paper-api} jar — and which therefore must not sit in {@link #PAPER}.
+     *
+     * <p>{@code PromptSymbolGate} measures the prompt against every supported
+     * version's jar, and one of its checks ({@code checkNoDeadRules}) fails any
+     * rule in {@link #PAPER} that fires on none of them. That check rests on an
+     * assumption which holds for all fifteen jar-decidable rules and fails for
+     * these two: that whether a rule fires can be decided by reading a jar.
+     * "Is this server regionised?" cannot. Folia ships the same
+     * {@code paper-api} surface as Paper — the entire
+     * {@code io.papermc.paper.threadedregions.scheduler} package is in ordinary
+     * {@code paper-api}, verified with {@code javap} — so no jar the gate can
+     * open distinguishes the two. {@link PromptFacts#regionised()} reads a boot
+     * probe on the live host, and the gate's stub host is not one.
+     *
+     * <p>These rules are NOT unchecked. The gate's other two checks iterate
+     * {@code facts.profile().rules()}, which is {@link #PAPER_PROFILE} and
+     * includes them, so their symbol claims are still measured on all 21
+     * versions. Only the dead-rule check — the one that cannot decide them — does
+     * not see them.
+     *
+     * <p><strong>Follow-up owed:</strong> the right long-term fix is for the gate
+     * to run each version twice, once with a regionised stub host, at which point
+     * these belong back in {@link #PAPER}. That is a change to
+     * {@code core/src/test/java/symbols/}, which this work was explicitly scoped
+     * out of.
+     */
+    public static final List<PromptRule> PAPER_HOST_PREDICATED = List.of(
+            PAPER_THREADING_MAIN,
+            PAPER_THREADING_REGIONISED);
+
+    /**
+     * What a Paper profile actually carries: the jar-decidable table followed by
+     * the host-predicated one. Threading lands last, next to the defensive-coding
+     * guidance it qualifies.
+     */
+    public static final List<PromptRule> PAPER_PROFILE =
+            java.util.stream.Stream.concat(PAPER.stream(), PAPER_HOST_PREDICATED.stream())
+                    .toList();
 
     // ------------------------------------------------------------------
     // Fabric / NeoForge

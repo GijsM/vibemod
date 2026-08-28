@@ -18,12 +18,11 @@ import net.kyori.adventure.text.event.ClickCallback;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.plugin.Plugin;
+import com.gijsm.vibemod.platform.TickScheduler;
 
 /**
  * The dialog design language in code — the visual vocabulary and the plumbing
@@ -180,9 +179,20 @@ final class DialogKit {
      * closeInventory(): showDialog replaces the client screen on its own, and a
      * close-container packet from here has stalled the main thread before
      * (regression: commits 639dd32/3666bf0 — do not "helpfully" add it back).
+     *
+     * <p>Routed through {@link TickScheduler} rather than
+     * {@code Bukkit.getScheduler()} because that call throws on Folia, and
+     * dialogs probe TRUE there (measured on a real Folia 26.2 boot:
+     * {@code dialogs=true}), so the crash would have hit the DEFAULT UI on
+     * every dialog a player opened.
+     *
+     * <p>{@code later(0L, …)} and not {@code runOnMain(…)}: {@code runOnMain}
+     * runs inline when it is already on the main thread, and "never inline" is
+     * the entire point of this method. {@code later(0)} is next-tick on both
+     * platforms — on Paper it is literally what {@code runTask} compiles to.
      */
-    static void show(Plugin plugin, Player p, Dialog dialog) {
-        Bukkit.getScheduler().runTask(plugin, () -> p.showDialog(dialog));
+    static void show(TickScheduler scheduler, Player p, Dialog dialog) {
+        scheduler.later(0L, () -> p.showDialog(dialog));
     }
 
     /** A no-op click action for buttons (e.g. Cancel/Done) that should just close the dialog. */
@@ -197,10 +207,10 @@ final class DialogKit {
      * instead. {@code uses(1)} makes it one-shot: a second click on the same button is a no-op
      * (a renderer obligation, ARCHITECTURE-V2 §3).
      */
-    static DialogAction mainThreadClick(Plugin plugin, Logger log,
+    static DialogAction mainThreadClick(TickScheduler scheduler, Logger log,
                                         BiConsumer<DialogResponseView, Audience> body) {
         return DialogAction.customClick((view, audience) ->
-                        Bukkit.getScheduler().runTask(plugin, () -> runSafely(log, view, audience, body)),
+                        scheduler.later(0L, () -> runSafely(log, view, audience, body)),
                 ClickCallback.Options.builder().uses(1).build());
     }
 

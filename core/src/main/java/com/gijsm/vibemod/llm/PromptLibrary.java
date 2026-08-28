@@ -187,8 +187,13 @@ public final class PromptLibrary {
                   `/vibe do <mod> <name>` action.
                 """);
 
-        sb.append(profile.threadingContract());
-        sb.append('\n');
+        // Blank on Paper, whose threading contract is a probe-predicated rule pair
+        // in the THIS SERVER section instead — see PlatformProfiles.PAPER_THREADING.
+        // Skipping the blank keeps a stray empty line out of the prompt.
+        if (!profile.threadingContract().isBlank()) {
+            sb.append(profile.threadingContract());
+            sb.append('\n');
+        }
 
         sb.append("""
                 - Be defensive: null-check worlds, entities, and players before using them; use

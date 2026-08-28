@@ -25,6 +25,25 @@ main: com.gijsm.vibemod.VibeMod
 # is capability-gated at runtime, never assumed — the native dialog UI
 # included, which is why 1.20–1.21.6 falls back to the chat UI.
 api-version: '1.20'
+# Folia support. Deliberately the LAST thing added, because on its own it is a
+# regression: with this flag and nothing else, VibeMod enables cleanly on Folia
+# 26.2 (dialogs and command map both probe true) and then dies during
+# restore-on-boot, in applyStoredVersion, on its OWN async compile hop —
+# UnsupportedOperationException from CraftScheduler.handle, because
+# Bukkit.getScheduler() does not exist on Folia. The flag alone converts an
+# honest refusal to load into a boot-time crash that disables the plugin.
+#
+# What makes it true rather than merely permitted: FoliaTickScheduler (global
+# region + async schedulers, selected by PaperPlatformInfo#isRegionised), the
+# command-dispatch hop that keeps /vibe panic working when a PLAYER types it,
+# and the probe-predicated threading rule that stops telling generated mods
+# they are on a single thread.
+#
+# What it does NOT claim: per-region parallelism. Every mod callback this host
+# schedules is pinned to the global region thread, which forgoes the main reason
+# to run Folia. Event handlers still arrive on region threads and remain the
+# unsound edge — see ARCHITECTURE-V2 and the release notes.
+folia-supported: true
 author: gijsm
 description: "Vibe-code gameplay mods from in-game prompts"
 
