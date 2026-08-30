@@ -46,7 +46,7 @@ public final class PromptVocabularyProof {
     /** The lines worth showing: the ones the old prompt got wrong. */
     private static final List<String> INTERESTING = List.of(
             "AttributeModifier", "setEnchantmentGlintOverride", "setItemModel",
-            "enchantment spellings", "Potion effects use", "Particles use");
+            "switch` over an `Attribute", "main server thread");
 
     public static void main(String[] args) throws Exception {
         Path jars = Path.of(args.length > 0 ? args[0] : "paper/api-jars");

@@ -297,20 +297,29 @@ public final class PromptLibrary {
     }
 
     /**
-     * The measured half of the prompt: what this server is, which rules its own
-     * classpath says are true, and the constant lists it actually declares.
+     * The measured half of the prompt: what this server is, and which rules its
+     * own classpath says are true.
      *
-     * <p>Note what is NOT here. There is no sentence asserting which attribute
-     * names are real, because the names are listed instead; and no rule survives
-     * that the vocabulary contradicts, because {@link PromptRule#appliesTo}
-     * checks each rule's own symbol claims before it is emitted. Prose about the
-     * API is the thing this section exists to stop writing.
+     * <p>No rule survives that the vocabulary contradicts, because
+     * {@link PromptRule#appliesTo} checks each rule's own symbol claims before
+     * it is emitted. Prose about the API is the thing this section exists to
+     * stop writing.
+     *
+     * <p>This section used to end with exhaustive {@code Attribute},
+     * {@code Enchantment} and {@code PotionEffectType} constant lists read off
+     * the running server. They were deleted after being measured: the ablation
+     * scored {@code after-novocab} 18/25 against {@code after} 19/25, so ~850
+     * tokens on every call and every self-heal round bought at most one
+     * generation in twenty-five. The same eval found only ONE targeted
+     * vocabulary failure in 225 generations — a capable model writes the real
+     * names whatever the prompt claims — and {@link
+     * com.gijsm.vibemod.gen.SymbolRepair} repairs the rest deterministically for
+     * free. Listing the names was insurance against a fire that does not start.
      */
     private static String serverSection(PromptFacts facts) {
         PlatformProfile profile = facts.profile();
         String rules = PromptRules.render(profile.rules(), facts);
-        String vocabulary = VocabularyBlock.render(facts);
-        if (rules.isEmpty() && vocabulary.isEmpty()) {
+        if (rules.isEmpty()) {
             return "";
         }
 
@@ -332,7 +341,6 @@ public final class PromptLibrary {
         }
 
         sb.append(rules);
-        sb.append(vocabulary);
         return sb.toString();
     }
 

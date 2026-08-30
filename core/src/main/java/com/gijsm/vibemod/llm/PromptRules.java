@@ -153,106 +153,6 @@ public final class PromptRules {
             List.of("ItemMeta#setItemModel", "ItemMeta#setTooltipStyle"));
 
     /**
-     * The 1.20.5 boundary, the larger of the two and the one no prose ever
-     * mentioned: 1.20.4 -> 1.20.5 replaces Bukkit's legacy {@code Enchantment}
-     * spellings with the vanilla ones wholesale, deleting 19 names in one step.
-     * The old sheet's single worked enchantment example, {@code DURABILITY}, is
-     * on the losing side of it and exists on only 5 of 21 versions.
-     */
-    private static final PromptRule PAPER_ENCHANTMENT_LEGACY = new PromptRule(
-            "paper.enchantment.legacy",
-            facts -> facts.declares("Enchantment.DURABILITY"),
-            """
-            - This server still uses Bukkit's OLD enchantment spellings, not the vanilla ones:
-              `Enchantment.DURABILITY` (not `UNBREAKING`), `Enchantment.DIG_SPEED` (not
-              `EFFICIENCY`), `Enchantment.PROTECTION_ENVIRONMENTAL` (not `PROTECTION`),
-              `Enchantment.LOOT_BONUS_MOBS` (not `LOOTING`). The exhaustive list is below.""",
-            List.of("Enchantment.DURABILITY", "Enchantment.DIG_SPEED",
-                    "Enchantment.PROTECTION_ENVIRONMENTAL", "Enchantment.LOOT_BONUS_MOBS"),
-            List.of("Enchantment.UNBREAKING", "Enchantment.EFFICIENCY",
-                    "Enchantment.PROTECTION", "Enchantment.LOOTING"));
-
-    private static final PromptRule PAPER_ENCHANTMENT_VANILLA = new PromptRule(
-            "paper.enchantment.vanilla",
-            facts -> facts.lacks("Enchantment.DURABILITY"),
-            """
-            - This server uses the VANILLA enchantment spellings: `Enchantment.UNBREAKING`,
-              `Enchantment.EFFICIENCY`, `Enchantment.PROTECTION`, `Enchantment.LOOTING`.
-              Bukkit's old names (`DURABILITY`, `DIG_SPEED`, `PROTECTION_ENVIRONMENTAL`,
-              `LOOT_BONUS_MOBS`) are gone. The exhaustive list is below.""",
-            List.of("Enchantment.UNBREAKING", "Enchantment.EFFICIENCY",
-                    "Enchantment.PROTECTION", "Enchantment.LOOTING"),
-            List.of("Enchantment.DURABILITY", "Enchantment.DIG_SPEED",
-                    "Enchantment.PROTECTION_ENVIRONMENTAL", "Enchantment.LOOT_BONUS_MOBS"));
-
-    /** Same 1.20.5 boundary, {@code PotionEffectType}: 9 names deleted in one step. */
-    private static final PromptRule PAPER_POTION_LEGACY = new PromptRule(
-            "paper.potion.legacy",
-            facts -> facts.declares("PotionEffectType.CONFUSION"),
-            """
-            - Potion effects use the OLD Bukkit spellings here: `PotionEffectType.CONFUSION`
-              (not `NAUSEA`), `DAMAGE_RESISTANCE` (not `RESISTANCE`), `FAST_DIGGING` (not
-              `HASTE`), `INCREASE_DAMAGE` (not `STRENGTH`), `JUMP` (not `JUMP_BOOST`), `SLOW`
-              (not `SLOWNESS`). The exhaustive list is below.""",
-            List.of("PotionEffectType.CONFUSION", "PotionEffectType.DAMAGE_RESISTANCE",
-                    "PotionEffectType.FAST_DIGGING", "PotionEffectType.INCREASE_DAMAGE",
-                    "PotionEffectType.JUMP", "PotionEffectType.SLOW"),
-            List.of("PotionEffectType.NAUSEA", "PotionEffectType.RESISTANCE",
-                    "PotionEffectType.HASTE", "PotionEffectType.STRENGTH",
-                    "PotionEffectType.JUMP_BOOST", "PotionEffectType.SLOWNESS"));
-
-    private static final PromptRule PAPER_POTION_VANILLA = new PromptRule(
-            "paper.potion.vanilla",
-            facts -> facts.lacks("PotionEffectType.CONFUSION"),
-            """
-            - Potion effects use the VANILLA spellings here: `PotionEffectType.NAUSEA`,
-              `RESISTANCE`, `HASTE`, `STRENGTH`, `JUMP_BOOST`, `SLOWNESS`. The old Bukkit
-              names (`CONFUSION`, `DAMAGE_RESISTANCE`, `FAST_DIGGING`, `INCREASE_DAMAGE`,
-              `JUMP`, `SLOW`) are gone. The exhaustive list is below.""",
-            List.of("PotionEffectType.NAUSEA", "PotionEffectType.RESISTANCE",
-                    "PotionEffectType.HASTE", "PotionEffectType.STRENGTH",
-                    "PotionEffectType.JUMP_BOOST", "PotionEffectType.SLOWNESS"),
-            List.of("PotionEffectType.CONFUSION", "PotionEffectType.DAMAGE_RESISTANCE",
-                    "PotionEffectType.FAST_DIGGING", "PotionEffectType.INCREASE_DAMAGE",
-                    "PotionEffectType.JUMP", "PotionEffectType.SLOW"));
-
-    /**
-     * Same 1.20.5 boundary, {@code Particle}: 38 names deleted in one step, the
-     * single largest removal anywhere in the supported range. Particle is too
-     * large to dump, so this rule carries the renames the model is most likely
-     * to reach for, plus three spellings that never changed.
-     */
-    private static final PromptRule PAPER_PARTICLE_LEGACY = new PromptRule(
-            "paper.particle.legacy",
-            facts -> facts.declares("Particle.BLOCK_CRACK"),
-            """
-            - Particles use the OLD Bukkit spellings here: `Particle.BLOCK_CRACK` (not
-              `BLOCK`), `CRIT_MAGIC` (not `ENCHANTED_HIT`), `EXPLOSION_NORMAL` (not `POOF`),
-              `SMOKE_NORMAL` (not `SMOKE`), `VILLAGER_HAPPY` (not `HAPPY_VILLAGER`).
-              `Particle.CLOUD`, `Particle.FLAME` and `Particle.HEART` are spelled the same on
-              every version and are the safest choices.""",
-            List.of("Particle.BLOCK_CRACK", "Particle.CRIT_MAGIC", "Particle.EXPLOSION_NORMAL",
-                    "Particle.SMOKE_NORMAL", "Particle.VILLAGER_HAPPY",
-                    "Particle.CLOUD", "Particle.FLAME", "Particle.HEART"),
-            List.of("Particle.BLOCK", "Particle.ENCHANTED_HIT", "Particle.POOF",
-                    "Particle.SMOKE", "Particle.HAPPY_VILLAGER"));
-
-    private static final PromptRule PAPER_PARTICLE_VANILLA = new PromptRule(
-            "paper.particle.vanilla",
-            facts -> facts.lacks("Particle.BLOCK_CRACK"),
-            """
-            - Particles use the VANILLA spellings here: `Particle.BLOCK`, `ENCHANTED_HIT`,
-              `POOF`, `SMOKE`, `HAPPY_VILLAGER`. The old Bukkit names (`BLOCK_CRACK`,
-              `CRIT_MAGIC`, `EXPLOSION_NORMAL`, `SMOKE_NORMAL`, `VILLAGER_HAPPY`) are gone.
-              `Particle.CLOUD`, `Particle.FLAME` and `Particle.HEART` are spelled the same on
-              every version and are the safest choices.""",
-            List.of("Particle.BLOCK", "Particle.ENCHANTED_HIT", "Particle.POOF",
-                    "Particle.SMOKE", "Particle.HAPPY_VILLAGER",
-                    "Particle.CLOUD", "Particle.FLAME", "Particle.HEART"),
-            List.of("Particle.BLOCK_CRACK", "Particle.CRIT_MAGIC", "Particle.EXPLOSION_NORMAL",
-                    "Particle.SMOKE_NORMAL", "Particle.VILLAGER_HAPPY"));
-
-    /**
      * A style rule, kept from the old sheet. Its premise was checked and holds:
      * {@code Registry} exists on all 21 versions, so this forbids something real
      * rather than something absent. Predicated on the type being present so it
@@ -340,12 +240,6 @@ public final class PromptRules {
             PAPER_ATTRIBUTE_SHAPE,
             PAPER_ATTRIBUTE_MODIFIER_KEY,
             PAPER_ATTRIBUTE_MODIFIER_UUID,
-            PAPER_ENCHANTMENT_LEGACY,
-            PAPER_ENCHANTMENT_VANILLA,
-            PAPER_POTION_LEGACY,
-            PAPER_POTION_VANILLA,
-            PAPER_PARTICLE_LEGACY,
-            PAPER_PARTICLE_VANILLA,
             PAPER_GLINT_YES,
             PAPER_GLINT_NO,
             PAPER_ITEM_MODEL_YES,

@@ -51,14 +51,9 @@ import com.gijsm.vibemod.platform.ApiVocabulary.Known;
  *       {@link Known#UNKNOWN} is not good enough. A forbids entry that is
  *       UNKNOWN — a typo'd type name, say — would suppress nothing and prove
  *       nothing, and would otherwise sit in the table unnoticed.
- *   <li><strong>The injected constant lists are the jar's real sets.</strong>
- *       The {@code Attribute}/{@code Enchantment}/{@code PotionEffectType} block
- *       is parsed back out of the rendered prompt and compared to
- *       {@link ClassFileVocabulary} exactly: no extras, nothing missing, and the
- *       count in the header right.
- *   <li><strong>The right rules fire.</strong> Six sibling pairs straddle the
- *       three measured vocabulary boundaries (1.20.5, 1.21, 1.21.3). Exactly one
- *       of each pair must fire on each version, and it must be the side the
+ *   <li><strong>The right rules fire.</strong> Three sibling pairs straddle the
+ *       measured capability boundaries (1.20.5, 1.21, 1.21.3). Exactly one of
+ *       each pair must fire on each version, and it must be the side the
  *       measurements say is true there.
  *   <li><strong>No dead rules.</strong> Every rule fires on at least one
  *       supported version — see {@link #checkNoDeadRules}, which catches the
@@ -112,21 +107,12 @@ public final class PromptSymbolGate {
     }
 
     private static final List<Boundary> BOUNDARIES = List.of(
-            new Boundary("enchantment spellings", "1.20.5",
-                    "paper.enchantment.legacy", "paper.enchantment.vanilla"),
-            new Boundary("potion effect spellings", "1.20.5",
-                    "paper.potion.legacy", "paper.potion.vanilla"),
-            new Boundary("particle spellings", "1.20.5",
-                    "paper.particle.legacy", "paper.particle.vanilla"),
             new Boundary("ItemMeta glint override", "1.20.5",
                     "paper.itemmeta.glint.no", "paper.itemmeta.glint.yes"),
             new Boundary("AttributeModifier constructor", "1.21",
                     "paper.attribute.modifier.uuid", "paper.attribute.modifier.key"),
             new Boundary("ItemMeta data-component setters", "1.21.3",
                     "paper.itemmeta.model.no", "paper.itemmeta.model.yes"));
-
-    /** The types {@code VocabularyBlock} dumps in full. */
-    private static final List<String> DUMPED = List.of("Attribute", "Enchantment", "PotionEffectType");
 
     // ------------------------------------------------------------------
 
@@ -142,10 +128,6 @@ public final class PromptSymbolGate {
 
     /** The heading after it: everything from here on is fixed text again. */
     private static final String EXAMPLES_SECTION = "================ WORKED EXAMPLES ================";
-
-    /** {@code Every `Attribute` constant on this server (40, exhaustive ...):} */
-    private static final Pattern VOCABULARY_HEADER = Pattern.compile(
-            "Every `([A-Za-z]+)` constant on this server \\((\\d+), exhaustive[^)]*\\):");
 
     /**
      * Placeholders the prompt writes in symbol position on purpose. Exactly one,
@@ -211,8 +193,8 @@ public final class PromptSymbolGate {
                 + " paper-api jars ===");
         System.out.println("    " + jars.toAbsolutePath());
         System.out.println();
-        System.out.printf("%-9s %-14s %7s  %5s %5s %5s  %s%n",
-                "VERSION", "PROFILE", "PROMPT", "SYMS", "RULES", "CONST", "VERDICT");
+        System.out.printf("%-9s %-14s %7s  %5s %5s  %s%n",
+                "VERSION", "PROFILE", "PROMPT", "SYMS", "RULES", "VERDICT");
 
         for (String version : versions) {
             checkVersion(jars, version, inventory);
@@ -240,12 +222,11 @@ public final class PromptSymbolGate {
 
         int symbols = checkNamedSymbols(version, prompt, rules, fired, vocabulary, inventory);
         checkFiredRuleClaims(version, rules, facts, fired);
-        int constants = checkVocabularyBlock(version, prompt, vocabulary);
         checkBoundaries(version, fired);
 
         int failed = FAILURES.size() - before;
-        System.out.printf("%-9s %-14s %7d  %5d %5d %5d  %s%n",
-                version, facts.profile().id(), prompt.length(), symbols, fired.size(), constants,
+        System.out.printf("%-9s %-14s %7d  %5d %5d  %s%n",
+                version, facts.profile().id(), prompt.length(), symbols, fired.size(),
                 failed == 0 ? "ok" : failed + " FAILED");
     }
 
@@ -492,62 +473,6 @@ public final class PromptSymbolGate {
                 }
             }
         }
-    }
-
-    /**
-     * Check 3: the injected constant lists ARE the jar's sets. Parsed back out of
-     * the rendered prompt, so what is compared is what the model is shown.
-     *
-     * @return how many constants were compared
-     */
-    private static int checkVocabularyBlock(String version, String prompt,
-                                            ClassFileVocabulary vocabulary) {
-        int compared = 0;
-        String[] lines = prompt.split("\n", -1);
-        Set<String> found = new LinkedHashSet<>();
-        for (int i = 0; i < lines.length; i++) {
-            Matcher m = VOCABULARY_HEADER.matcher(lines[i]);
-            if (!m.find()) {
-                continue;
-            }
-            String type = m.group(1);
-            found.add(type);
-            Set<String> claimed = new TreeSet<>();
-            if (i + 1 < lines.length && !lines[i + 1].isBlank()) {
-                for (String name : lines[i + 1].split(",")) {
-                    claimed.add(name.trim());
-                }
-            }
-            Set<String> real = new TreeSet<>(vocabulary.constants(type));
-
-            assertions++;
-            if (Integer.parseInt(m.group(2)) != claimed.size()) {
-                fail(version, "vocabulary block", type, "count matches list",
-                        "header says " + m.group(2) + " but the list has " + claimed.size());
-            }
-
-            Set<String> extra = new TreeSet<>(claimed);
-            extra.removeAll(real);
-            Set<String> missing = new TreeSet<>(real);
-            missing.removeAll(claimed);
-            assertions++;
-            if (!extra.isEmpty() || !missing.isEmpty()) {
-                fail(version, "vocabulary block", type, "exactly the jar's set",
-                        (extra.isEmpty() ? "" : "prompt invents " + extra + " ")
-                                + (missing.isEmpty() ? "" : "prompt omits " + missing));
-            }
-            compared += claimed.size();
-        }
-
-        for (String type : DUMPED) {
-            assertions++;
-            if (!found.contains(type) && !vocabulary.constants(type).isEmpty()) {
-                fail(version, "vocabulary block", type, "present in the prompt",
-                        "the jar declares " + vocabulary.constants(type).size()
-                                + " constants but the prompt lists none");
-            }
-        }
-        return compared;
     }
 
     /**

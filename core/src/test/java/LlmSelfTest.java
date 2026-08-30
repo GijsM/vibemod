@@ -651,42 +651,36 @@ public class LlmSelfTest {
         List<String> oldIds = PromptRules.applicableIds(PromptRules.PAPER, oldFacts);
         List<String> newIds = PromptRules.applicableIds(PromptRules.PAPER, newFacts);
 
-        check("an old server gets the legacy enchantment/potion/particle rules",
-                oldIds.contains("paper.enchantment.legacy")
-                        && oldIds.contains("paper.potion.legacy")
-                        && oldIds.contains("paper.particle.legacy"));
         check("an old server gets the UUID AttributeModifier rule and no glint",
                 oldIds.contains("paper.attribute.modifier.uuid")
                         && oldIds.contains("paper.itemmeta.glint.no")
                         && !oldIds.contains("paper.itemmeta.glint.yes"));
-        check("a modern server gets the vanilla enchantment/potion/particle rules",
-                newIds.contains("paper.enchantment.vanilla")
-                        && newIds.contains("paper.potion.vanilla")
-                        && newIds.contains("paper.particle.vanilla"));
         check("a modern server gets the key AttributeModifier rule and the glint setter",
                 newIds.contains("paper.attribute.modifier.key")
                         && newIds.contains("paper.itemmeta.glint.yes")
                         && newIds.contains("paper.itemmeta.model.yes"));
         check("no rule pair ever fires both halves",
-                java.util.Collections.disjoint(oldIds, List.of("paper.enchantment.vanilla",
-                        "paper.potion.vanilla", "paper.particle.vanilla",
-                        "paper.attribute.modifier.key", "paper.itemmeta.glint.yes"))
-                        && java.util.Collections.disjoint(newIds, List.of("paper.enchantment.legacy",
-                                "paper.potion.legacy", "paper.particle.legacy",
-                                "paper.attribute.modifier.uuid", "paper.itemmeta.glint.no")));
+                java.util.Collections.disjoint(oldIds, List.of(
+                        "paper.attribute.modifier.key", "paper.itemmeta.glint.yes",
+                        "paper.itemmeta.model.yes"))
+                        && java.util.Collections.disjoint(newIds, List.of(
+                                "paper.attribute.modifier.uuid", "paper.itemmeta.glint.no",
+                                "paper.itemmeta.model.no")));
 
         // The SAME profile, opposite guidance — this is the defect the old two-era
         // table could not express, since 1.20.4 and 1.21.8 are 13 versions apart
         // but the profile split sits between neither of the boundaries they cross.
         String oldPrompt = PromptLibrary.systemPrompt(oldFacts);
         String newPrompt = PromptLibrary.systemPrompt(newFacts);
-        check("the attribute names injected are the ones the server declares",
-                oldPrompt.contains("GENERIC_MAX_HEALTH, GENERIC_MOVEMENT_SPEED")
-                        && !newPrompt.contains("GENERIC_MAX_HEALTH")
-                        && newPrompt.contains("MAX_HEALTH, MOVEMENT_SPEED"));
-        check("the constant lists are labelled exhaustive so the model does not add to them",
-                oldPrompt.contains("exhaustive - any other spelling is a compile error")
-                        && newPrompt.contains("Every `PotionEffectType` constant on this server"));
+        // The constant dumps were deleted after being measured: the ablation put
+        // after-novocab at 18/25 against after at 19/25, so ~850 tokens on every
+        // call bought at most one generation in twenty-five, and SymbolRepair
+        // already repairs those renames deterministically. This check exists so
+        // nobody reintroduces them without re-measuring.
+        check("no exhaustive constant list is injected into either prompt",
+                !oldPrompt.contains("exhaustive - any other spelling is a compile error")
+                        && !newPrompt.contains("constant on this server")
+                        && !oldPrompt.contains("GENERIC_MAX_HEALTH, GENERIC_MOVEMENT_SPEED"));
         check("the glint guidance flips with the probe, on ONE profile",
                 oldPrompt.contains("does NOT exist on this server")
                         && newPrompt.contains("IS available on this server"));
@@ -695,15 +689,19 @@ public class LlmSelfTest {
         // when its own predicate says it should fire. This vocabulary is
         // self-contradictory (both enchantment eras at once), so neither half of
         // the pair may be emitted.
+        // glint.no's PREDICATE fires on this shape (the server lacks the glint
+        // setter), but its text names ItemFlag.HIDE_ENCHANTS as the alternative
+        // to use — and this vocabulary does not declare it. The rule must be
+        // dropped rather than sent, because it would be advising a symbol that
+        // is not there.
         Map<String, List<String>> impossible = new java.util.LinkedHashMap<>(old);
-        impossible.put("Enchantment", List.of("DURABILITY", "DIG_SPEED", "PROTECTION_ENVIRONMENTAL",
-                "LOOT_BONUS_MOBS", "UNBREAKING", "EFFICIENCY", "PROTECTION", "LOOTING"));
+        impossible.put("ItemFlag", List.of());
         List<String> confusedIds = PromptRules.applicableIds(PromptRules.PAPER,
                 new PromptFacts(PlatformProfiles.PAPER_LEGACY, null, stubVocabulary(impossible)));
         check("a rule contradicted by the vocabulary is dropped, not emitted",
-                !confusedIds.contains("paper.enchantment.legacy")
-                        && !confusedIds.contains("paper.enchantment.vanilla")
-                        && confusedIds.contains("paper.potion.legacy"));
+                !confusedIds.contains("paper.itemmeta.glint.no")
+                        && !confusedIds.contains("paper.itemmeta.glint.yes")
+                        && confusedIds.contains("paper.attribute.modifier.uuid"));
 
         // Every symbol a rule names must be declared in one of its two lists, or
         // the offline gate has nothing to check and the prose can drift silently.

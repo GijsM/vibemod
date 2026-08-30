@@ -505,7 +505,12 @@ public final class CompileRateEval {
         }
         String after = PromptLibrary.systemPrompt(EvalFacts.factsFor(cell.version(), vocab));
         if ("after-novocab".equals(cell.condition())) {
-            return stripVocabularyDump(after);
+            // Historical condition. The dumps it stripped were deleted from the
+            // shipping prompt after this ablation measured them at 18/25 against
+            // 19/25 for `after`, so there is nothing left to strip and the two
+            // conditions are now the same prompt. Kept so the recorded runs in
+            // eval-out/ stay re-scorable rather than becoming unreadable.
+            return after;
         }
         // after+<nudge>: the shipping prompt with one or more extra rules appended.
         // These are eval-side text, NOT a change to PromptRules — the point is to

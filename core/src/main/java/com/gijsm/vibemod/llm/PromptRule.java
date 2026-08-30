@@ -42,14 +42,14 @@ import java.util.function.Predicate;
  * {@code AttributeModifier} rules key off {@code AttributeModifier#getKey} to
  * decide which constructor era they are in, and say so in a comment.
  *
- * @param id              stable identifier, {@code "paper.enchantment.vanilla"};
+ * @param id              stable identifier, {@code "paper.itemmeta.glint.yes"};
  *                        used by the gate and the self-tests to name a rule
  *                        without quoting its prose
  * @param when            evaluated against the running server's facts
  * @param text            the prompt text, emitted verbatim. Deliberately a
- *                        literal: anything derived from the vocabulary belongs
- *                        in {@link VocabularyBlock}, so that what the gate reads
- *                        is what the model reads
+ *                        literal rather than anything generated from the
+ *                        vocabulary, so that what the gate reads is exactly what
+ *                        the model reads
  * @param requiresSymbols symbols the text presents as usable
  * @param forbidsSymbols  symbols the text presents as absent or banned
  */
