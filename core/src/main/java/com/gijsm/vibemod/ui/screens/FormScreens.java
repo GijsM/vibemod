@@ -409,19 +409,50 @@ public final class FormScreens {
 
     // ---- 7. delete confirm ----
 
-    /** Confirms permanently deleting {@code mod} and all its stored versions. */
+    /** {@link #deleteConfirm(String, String, int, List)} for a mod that registered no blocks. */
     public Screen deleteConfirm(String mod, String icon, int versionCount) {
+        return deleteConfirm(mod, icon, versionCount, List.of());
+    }
+
+    /**
+     * Confirms permanently deleting {@code mod} and all its stored versions.
+     *
+     * <p>{@code blockIds} is the part a player has to be told <em>before</em>
+     * the click rather than after, because it is the one consequence of a delete
+     * that no later action can undo (V4 Phase 1). A deleted mod's item ids are
+     * simply gone, and a save drops an unknown item. A deleted mod's <b>block</b>
+     * ids cannot be gone: a chunk section's palette is a {@code ListCodec},
+     * which drops an entry it cannot decode and hands back the shortened list,
+     * and the packed data indexes that palette by position — so releasing a
+     * block id rewrites the terrain of every section holding it. The ids stay
+     * claimed, and come back as inert stubs, forever. Empty for the
+     * overwhelming majority of mods, and the paragraph is then absent rather
+     * than reassuring.
+     */
+    public Screen deleteConfirm(String mod, String icon, int versionCount, List<String> blockIds) {
         Button delete = new Button(Component.text("✖ Delete forever", Style.ERROR),
                 Component.text("Permanently delete this mod", Style.INFO),
                 WidthHint.BODY,
                 new UiAction.RunCommand("/vibe delete " + mod + " confirm"));
 
+        List<BodyBlock> body = new ArrayList<>();
+        body.add(ScreenKit.icon(icon, false, Component.text(mod, NamedTextColor.WHITE)));
+        body.add(ScreenKit.text(Component.text(
+                "This permanently deletes " + mod + " and its " + versionCount
+                        + " stored version" + (versionCount == 1 ? "" : "s")
+                        + ". This cannot be undone.", Style.ERROR)));
+        if (!blockIds.isEmpty()) {
+            body.add(ScreenKit.text(Component.text(
+                    "It registered " + blockIds.size() + " block"
+                            + (blockIds.size() == 1 ? "" : "s") + " (" + String.join(", ", blockIds)
+                            + "). Those ids stay claimed forever and come back as inert stubs on "
+                            + "every restart, because releasing them would corrupt the chunks they "
+                            + "sit in. Blocks you have already placed stay standing, as stubs.",
+                    Style.WARN)));
+        }
+
         return new Screen(ScreenKit.title("Delete " + mod + "?"), Screen.Kind.FORM,
-                List.of(ScreenKit.icon(icon, false, Component.text(mod, NamedTextColor.WHITE)),
-                        ScreenKit.text(Component.text(
-                                "This permanently deletes " + mod + " and its " + versionCount
-                                        + " stored version" + (versionCount == 1 ? "" : "s")
-                                        + ". This cannot be undone.", Style.ERROR))),
+                List.copyOf(body),
                 List.of(),
                 List.of(delete),
                 ScreenKit.cancel("Keep the mod"),

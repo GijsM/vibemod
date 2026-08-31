@@ -1,0 +1,29 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "key": {"R": "minecraft:amethyst_shard", "S": "minecraft:stick"},
+  "pattern": [" R ", " R ", " S "],
+  "result": {
+    "id": "minecraft:iron_sword",
+    "components": {
+      "minecraft:custom_name": {"text": "Ruby Blade", "color": "red", "italic": false},
+      "minecraft:item_model": "vibemod_rubyeconomy:ruby_blade",
+      "minecraft:enchantment_glint_override": true,
+      "minecraft:attribute_modifiers": [
+        {
+          "type": "minecraft:attack_damage",
+          "id": "vibemod_rubyeconomy:blade_damage",
+          "amount": 7.0,
+          "operation": "add_value",
+          "slot": "mainhand"
+        },
+        {
+          "type": "minecraft:attack_speed",
+          "id": "vibemod_rubyeconomy:blade_speed",
+          "amount": -2.2,
+          "operation": "add_value",
+          "slot": "mainhand"
+        }
+      ]
+    }
+  }
+}

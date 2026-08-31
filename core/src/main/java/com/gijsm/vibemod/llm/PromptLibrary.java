@@ -12,6 +12,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 import com.gijsm.vibemod.gen.GeneratedProject;
+import com.gijsm.vibemod.store.ModResources;
+import com.gijsm.vibemod.store.PixelGrid;
 
 /**
  * Builds the prompts sent to the LLM and parses its responses back into a
@@ -84,12 +86,42 @@ public final class PromptLibrary {
      * {@code cache_control} breakpoint — that is a separate task.
      */
     public static String systemPrompt(PromptFacts facts) {
+        return systemPrompt(facts, null);
+    }
+
+    /**
+     * The system prompt plus one short block of facts about <em>this</em>
+     * running host (V3 Phase 4).
+     *
+     * <p>A profile describes a platform; {@code hostFacts} describes the
+     * process. The distinction earns its keep on Fabric, where the same profile
+     * serves a singleplayer client and a dedicated server and several of its
+     * rules branch on which one you are: {@code assets/**} render or are inert,
+     * {@code ClientModInitializer} runs or is skipped, a registered item works
+     * or is refused. Before this existed the prompt stated both branches and
+     * left the model to guess, and the live demo showed what that costs — a
+     * model that followed the prompt perfectly wrote a registered item on a
+     * dedicated server, was refused, and burned a whole repair round rediscovering
+     * a fact the host knew all along.
+     *
+     * <p>It goes in the SYSTEM prompt rather than the request because it is
+     * constant for the life of a host, which is what keeps it cacheable.
+     * {@code null} or blank reproduces {@link #systemPrompt(PromptFacts)}
+     * byte for byte — asserted, so a host that supplies nothing is not paying
+     * for this.
+     */
+    public static String systemPrompt(PromptFacts facts, String hostFacts) {
         PlatformProfile profile = facts.profile();
         StringBuilder sb = new StringBuilder();
 
         sb.append(profile.roleLine());
         if (!profile.roleLine().endsWith("\n")) {
             sb.append('\n');
+        }
+        if (hostFacts != null && !hostFacts.isBlank()) {
+            sb.append("\n================ THIS HOST ================\n\n")
+                    .append(hostFacts.strip())
+                    .append('\n');
         }
         sb.append("""
 
@@ -153,13 +185,20 @@ public final class PromptLibrary {
 
         sb.append("""
                 - "mainClass" is the simple (no package) name of the one public class that
-                  implements Mod, and must have a public no-arg constructor.
-                - Every entry in "files" has a "path" ending in ".java" and "content" holding the
-                  complete, compilable source of that file (proper escaping of quotes/newlines
-                  since this is a JSON string).
-                - ALL files declare `package vibemod.<name lowercased>;` at the top (the mod name
-                  from the JSON, lowercased, no dots, no dashes).
-                - Exactly one public class across all files implements Mod.
+                  implements ENTRYPOINT, and must have a public no-arg constructor.
+                """.replace("ENTRYPOINT", profile.entrypointName()));
+
+        // What may be in files[] is profile data (V3 Phase 2 §E): every profile
+        // but the native Fabric one accepts .java and nothing else, and saying
+        // "paths end in .java" AND "here is how to write a recipe" in the same
+        // prompt would be a contradiction the model has to resolve for itself.
+        sb.append(profile.filesContract());
+        if (!profile.filesContract().endsWith("\n")) {
+            sb.append('\n');
+        }
+
+        sb.append("""
+                - Exactly one public class across all files implements ENTRYPOINT.
                 - "config" is an array of tunable knobs, one object per knob:
                   {"key", "type", "default", "description", "min"?, "max"?, "step"?, "choices"?}.
                   "type" is one of boolean | integer | decimal | text | choice. "default" is
@@ -173,19 +212,10 @@ public final class PromptLibrary {
 
                 ================ HARD RULES ================
 
-                """);
+                """.replace("ENTRYPOINT", profile.entrypointName()));
 
         sb.append(profile.importRules());
         sb.append('\n');
-
-        sb.append("""
-                - NEVER call `Bukkit.getPluginManager().registerEvents(...)`,
-                  `Bukkit.getScheduler()...`, or `Bukkit.getCommandMap()` directly. Registration
-                  always goes through the VibeContext you are given: `ctx.listen(...)` for event
-                  listeners, `ctx.repeat(...)` / `ctx.later(...)` for scheduled work,
-                  `ctx.command(...)` for a real top-level command, `ctx.action(...)` for a named
-                  `/vibe do <mod> <name>` action.
-                """);
 
         // Blank on Paper, whose threading contract is a probe-predicated rule pair
         // in the THIS SERVER section instead — see PlatformProfiles.PAPER_THREADING.
@@ -199,29 +229,15 @@ public final class PromptLibrary {
                 - Be defensive: null-check worlds, entities, and players before using them; use
                   `instanceof` checks before casting entities to more specific types; guard against
                   players being offline/dead when tasks fire later.
-                - To spawn an entity, use `world.spawnEntity(location, EntityType.X)`. Never try to
-                  construct entity instances directly.
-                - Persistent per-player state is fine as a plain `HashMap<UUID, ...>` field on your
-                  Mod class or listener, keyed by `player.getUniqueId()`. Do not use static
-                  mutable state shared across mod instances beyond that.
                 - Keep each file under roughly 150 lines. Split into a couple of small classes if a
                   single file would run long; every class still lives in the same
                   `vibemod.<name>` package.
-                - Make effects juicy where it fits the request: pair visual feedback
-                  (`world.spawnParticle(...)` / `player.spawnParticle(...)`) with a sound
-                  (`world.playSound(...)` / `player.playSound(...)`) so the mod feels alive, not
-                  silent.
-                - Expose any value a player would obviously want to tweak — counts, durations,
-                  radii, chances, on/off toggles, named choices — as a "config" knob instead of a
-                  hardcoded constant. Pick the narrowest fitting type (boolean/integer/decimal/
-                  text/choice) and sane min/max/step for numeric knobs.
-                - Read config knobs with `ctx.configBool/configInt/configDouble/configString(key)`
-                  INSIDE the event handler or task body, at the exact moment you need the value.
-                  NEVER read a config value once in onEnable (or a constructor) and cache it in a
-                  field — a knob change must take effect on the very next event/tick, not require
-                  a reload. Use `configBool` for boolean knobs, `configInt` for integer knobs,
-                  `configDouble` for decimal knobs, and `configString` for text or choice knobs.
+                """);
 
+        sb.append(profile.configContract());
+        sb.append('\n');
+
+        sb.append("""
                 ================ EDIT RESPONSE SHAPE (edit/repair rounds only) ================
 
                 Initial generation of a brand-new mod always uses the full JSON shape above. On an
@@ -272,13 +288,17 @@ public final class PromptLibrary {
 
                 ================ WORKED EXAMPLES ================
 
-                The following two examples show the exact expected input/output shape, including
-                config knobs read live via ctx.configX. Study the JSON formatting (escaped
-                newlines and quotes inside "content") as closely as the Java itself.
-
                 """);
 
         List<PlatformProfile.FewShot> fewShots = profile.fewShots();
+        // The count was hardcoded as "two" while the loader profiles ship three
+        // and the native Fabric profile ships one — a small lie in the prompt is
+        // still a lie the model has to reconcile with what it can see.
+        sb.append("The following ").append(numberWord(fewShots.size()))
+                .append(fewShots.size() == 1 ? " example shows" : " examples show")
+                .append(" the exact expected input/output shape.\n")
+                .append("Study the JSON formatting (escaped newlines and quotes inside \"content\") ")
+                .append("as closely as the Java itself.\n\n");
         for (int i = 0; i < fewShots.size(); i++) {
             sb.append("--- Example ").append(i + 1).append(" ---\n");
             sb.append("User: ").append(fewShots.get(i).user()).append('\n');
@@ -294,6 +314,19 @@ public final class PromptLibrary {
                 """);
 
         return sb.toString();
+    }
+
+    /** Small numbers as words, so the worked-examples preamble reads like English. */
+    private static String numberWord(int n) {
+        return switch (n) {
+            case 0 -> "no";
+            case 1 -> "one";
+            case 2 -> "two";
+            case 3 -> "three";
+            case 4 -> "four";
+            case 5 -> "five";
+            default -> String.valueOf(n);
+        };
     }
 
     /**
@@ -492,7 +525,7 @@ public final class PromptLibrary {
 
     /** Prompt asking the model to fix a project that failed to compile. */
     public static String repairPrompt(String javacDiagnostics) {
-        return repairPrompt(javacDiagnostics, List.of());
+        return repairPrompt(javacDiagnostics, List.of(), null);
     }
 
     /**
@@ -511,9 +544,42 @@ public final class PromptLibrary {
      * has to be told this outranks its training data, or it will argue.
      */
     public static String repairPrompt(String javacDiagnostics, List<String> vocabularyNotes) {
+        return repairPrompt(javacDiagnostics, vocabularyNotes, null);
+    }
+
+    /**
+     * {@link #repairPrompt(String)} plus an {@code API HINTS} block from the
+     * {@link com.gijsm.vibemod.compile.SymbolOracle} (V3 Phase 0 §D).
+     *
+     * <p>The hints go <em>after</em> the diagnostics and before the instruction,
+     * deliberately: the model has to read the error first or it will patch the
+     * wrong call. {@code hints} being blank collapses this to the one-argument
+     * form exactly, so a host with no oracle installed sends the prompt it
+     * always sent.
+     */
+    public static String repairPrompt(String javacDiagnostics, String hints) {
+        return repairPrompt(javacDiagnostics, List.of(), hints);
+    }
+
+    /**
+     * Both repair aids at once, which is what a live host actually has: the
+     * {@link com.gijsm.vibemod.compile.SymbolOracle}’s hints about symbols javac
+     * could not resolve, and {@link com.gijsm.vibemod.gen.SymbolRepair}’s notes
+     * about names it rewrote off the running server.
+     *
+     * <p>They are separate blocks because they answer different questions. The
+     * hints say <em>where to look</em>; the notes say <em>what is true here</em>,
+     * and the notes come last so the measured facts are the final thing read
+     * before the instruction.
+     */
+    public static String repairPrompt(String javacDiagnostics, List<String> vocabularyNotes,
+            String hints) {
         StringBuilder sb = new StringBuilder();
         sb.append("Your previous JSON response failed to compile. javac says:\n\n")
                 .append(javacDiagnostics);
+        if (hints != null && !hints.isBlank()) {
+            sb.append("\n\n").append(hints.strip());
+        }
         if (vocabularyNotes != null && !vocabularyNotes.isEmpty()) {
             sb.append("\n\nThis server's API was measured directly at boot. These facts about it beat "
                     + "anything you remember about Minecraft versions:\n");
@@ -626,14 +692,69 @@ public final class PromptLibrary {
             JsonObject fileObj = element.getAsJsonObject();
             String path = requireString(fileObj, "path");
             String content = requireString(fileObj, "content");
-            if (!path.endsWith(".java")) {
+            // V3 Phase 2 §A: files[] carries resources as well as sources now.
+            // Both halves are validated HERE rather than at the store, because a
+            // rejection here is a self-heal round with the model's own text in
+            // it, and a rejection at the store is a stack trace after the money
+            // has already been spent.
+            if (ModResources.isResourcePath(path)) {
+                ModResources.validate(path);
+                if (ModResources.isGridPath(path)) {
+                    try {
+                        PixelGrid.parse(content);
+                    } catch (IllegalArgumentException bad) {
+                        throw new IllegalArgumentException(path + ": " + bad.getMessage());
+                    }
+                }
+            } else if (!path.endsWith(".java")) {
                 throw new IllegalArgumentException("File path must end with .java, got: " + path);
             }
             files.add(new GeneratedProject.GeneratedFile(path, content));
         }
+        requireBlockstatesForBlockRegistrations(files);
 
         return new GeneratedProject(name, description, usage, manual, changelog, icon, mainClass,
                 files, config, null);
+    }
+
+    /**
+     * V4 Phase 1: a mod that registers into {@code minecraft:block} must ship the
+     * blockstate file that maps the block to a model, or every copy of it in the
+     * world is the missing model.
+     *
+     * <p>Reported the way every other contract violation here is — an
+     * {@link IllegalArgumentException} carrying the fix — because this one is
+     * invisible until somebody places the block, and a repair round that adds one
+     * small JSON file is the cheapest moment to catch it. Matched on the
+     * registration call with whitespace squeezed out, so a wrapped
+     * {@code Registry.register(} still trips it and a mere {@code BLOCK} lookup
+     * does not.
+     */
+    private static void requireBlockstatesForBlockRegistrations(
+            List<GeneratedProject.GeneratedFile> files) {
+        String registrar = null;
+        for (GeneratedProject.GeneratedFile file : files) {
+            if (file.path().endsWith(".java")
+                    && file.content().replaceAll("\\s+", "")
+                            .contains("register(BuiltInRegistries.BLOCK,")) {
+                registrar = file.path();
+                break;
+            }
+        }
+        if (registrar == null) {
+            return;
+        }
+        for (GeneratedProject.GeneratedFile file : files) {
+            String path = file.path();
+            if (path.startsWith(ModResources.ASSETS_ROOT) && path.contains("/blockstates/")
+                    && path.endsWith(".json")) {
+                return;
+            }
+        }
+        throw new IllegalArgumentException(registrar + " registers a block in minecraft:block, "
+                + "but the project ships no assets/<namespace>/blockstates/<name>.json - "
+                + "without it the block renders as the missing model. Add one per registered "
+                + "block: {\"variants\": {\"\": {\"model\": \"<namespace>:block/<name>\"}}}");
     }
 
     // ------------------------------------------------------------------
@@ -648,8 +769,9 @@ public final class PromptLibrary {
             }
             JsonObject editObj = element.getAsJsonObject();
             String path = requireString(editObj, "path");
-            if (!path.endsWith(".java")) {
-                throw new IllegalArgumentException("Edit \"path\" must end with .java, got: " + path);
+            if (!path.endsWith(".java") && !ModResources.isResourcePath(path)) {
+                throw new IllegalArgumentException("Edit \"path\" must end with .java, or name a "
+                        + "data/ or assets/ resource file, got: " + path);
             }
             String find = requireString(editObj, "find");
             if (find.isEmpty()) {

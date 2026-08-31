@@ -735,13 +735,28 @@ public final class VibeRouter {
         }
         boolean confirmed = args.length >= 2 && args[1].equalsIgnoreCase("confirm");
         UUID viewer = sender.idOrNull();
+        // Asked before the click, not reported after it: a block id is the one
+        // thing a delete cannot give back (V4 Phase 1). Empty on every host
+        // without a registry channel and for every mod that registered no block,
+        // which is nearly all of them.
+        List<String> blockIds = InstallCard.registeredBlocks(mod.name());
         if (viewer != null && !confirmed) {
-            show(viewer, forms.deleteConfirm(mod.name(), mod.icon(), mod.versions().size()));
+            show(viewer, forms.deleteConfirm(mod.name(), mod.icon(), mod.versions().size(),
+                    blockIds));
             return;
         }
         lifecycle.unload(modName);
         store.delete(modName);
         sender.audience().sendMessage(Style.warn("Deleted " + modName + "."));
+        if (!blockIds.isEmpty()) {
+            // The console path reaches here without ever seeing the screen, and
+            // this is the only notice it gets.
+            sender.audience().sendMessage(Style.warn(
+                    "Its block id" + (blockIds.size() == 1 ? "" : "s") + " ("
+                            + String.join(", ", blockIds) + ") stay" + (blockIds.size() == 1 ? "s" : "")
+                            + " claimed forever and come back as inert stubs on every restart, "
+                            + "because releasing them would corrupt the chunks they sit in."));
+        }
     }
 
     private void cmdExport(Sender sender, String[] args) {

@@ -1,5 +1,5 @@
 name: VibeMod
-version: 2.0.0
+version: 3.0.0
 main: com.gijsm.vibemod.VibeMod
 # INVARIANT — do not raise this to declare a minimum supported version.
 #

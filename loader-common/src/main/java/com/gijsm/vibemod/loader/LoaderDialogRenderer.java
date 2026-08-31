@@ -5,7 +5,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -505,11 +504,10 @@ public final class LoaderDialogRenderer implements UiRenderer {
          * placeholder so it stays a legal key.
          */
         static String sanitize(String raw) {
-            if (raw == null) {
-                return "input";
-            }
-            String out = raw.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_]", "_");
-            return out.isEmpty() ? "input" : out;
+            // V3 Phase 2 §A moved the rule itself into core so the datapack
+            // namespace and the dialog input key cannot drift apart. The
+            // behaviour here is unchanged, fallback included.
+            return com.gijsm.vibemod.util.Ids.sanitize(raw, "input");
         }
 
         /**

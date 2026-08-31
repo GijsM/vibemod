@@ -110,6 +110,16 @@ jobs:
       - name: Self-test with the ECJ backend forced
         run: ./gradlew selfTestEcj --stacktrace
 
+      # V3 Phase 4 §D. The client gates live in their own source sets
+      # (fabric/src/gametest, neoforge/src/clientgate) which NOTHING in `build`
+      # compiles - the only task that pulls them in is the run task, and that
+      # lives in the `client-gates` job below, which is continue-on-error
+      # because it needs a display. So a plain compile error in 1200 lines of
+      # gate code produced a green required build and a yellow advisory job.
+      # Compiling them here costs seconds and needs no GL at all.
+      - name: Compile the client-gate sources
+        run: ./gradlew :fabric:compileGametestJava :neoforge:compileClientgateJava --stacktrace
+
       - name: Upload jars
         uses: actions/upload-artifact@v4
         with:

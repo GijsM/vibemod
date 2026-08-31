@@ -24,6 +24,7 @@ import javax.tools.JavaFileObject;
 import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 
+import com.gijsm.vibemod.platform.ClassSurgeon;
 import com.gijsm.vibemod.platform.ClasspathProvider;
 import com.gijsm.vibemod.platform.CompilerProvider;
 
@@ -33,18 +34,28 @@ import com.gijsm.vibemod.platform.CompilerProvider;
  * input — nor on anything else: compilation failures are reported via
  * {@link CompileResult}.
  *
- * <p>Two injected seams (ARCHITECTURE-V2 §7): a {@link CompilerProvider} for
- * the backend (system javac, or a bundled ECJ where the runtime has no
- * compiler) and a {@link ClasspathProvider} for what generated code compiles
- * against. The classpath is always the running game's own jars, never a shipped
- * or pinned API jar (§0#7) — which is why assembling it is the host's job, not
- * this class's.
+ * <p>Three injected seams (ARCHITECTURE-V2 §7, V3 Phase 0): a
+ * {@link CompilerProvider} for the backend (system javac, or a bundled ECJ
+ * where the runtime has no compiler), a {@link ClasspathProvider} for what
+ * generated code compiles against, and a {@link ClassSurgeon} that gets the
+ * last word on the bytecode before anyone can define it. The classpath is
+ * always the running game's own jars, never a shipped or pinned API jar
+ * (§0#7) — which is why assembling it is the host's job, not this class's.
+ *
+ * <p>The surgeon hook lives HERE, and that placement is the whole point: every
+ * path that turns mod source into live classes — a fresh generation, a repair
+ * round, {@code /vibe edit}, a rollback, restore-on-boot — goes through
+ * {@link #compile}, so one hook gates all of them. A surgeon rejection is
+ * reported as a failed {@link CompileResult}, which means the existing
+ * self-heal loop repairs a policy violation exactly as it repairs a typo.
  */
 public final class InMemoryCompiler {
 
     private final CompilerProvider provider;
     private final ClasspathProvider classpath;
     private final int hostMaxRelease;
+    /** The host's bytecode pass, or null (Paper) for a pass-through. */
+    private volatile ClassSurgeon surgeon;
 
     /**
      * Host constructor: the resolved backend, the host's classpath provider, and
@@ -79,6 +90,22 @@ public final class InMemoryCompiler {
     public InMemoryCompiler(Path... extraClasspath) {
         this(CompilerProvider.resolve().orElse(null),
                 new JvmClasspathProvider(List.of(extraClasspath)));
+    }
+
+    /**
+     * Installs the host's bytecode pass (V3 Phase 0). Null — the default, and
+     * what Paper leaves it as — is a pass-through.
+     *
+     * <p>Set once at boot, before any compile; {@code volatile} only so a
+     * generation running on a pool thread is guaranteed to see it.
+     */
+    public void setSurgeon(ClassSurgeon surgeon) {
+        this.surgeon = surgeon;
+    }
+
+    /** The installed bytecode pass, or null. */
+    public ClassSurgeon surgeon() {
+        return surgeon;
     }
 
     /** true if some Java compiler backend is available (system javac, or a bundled ECJ). */
@@ -134,7 +161,7 @@ public final class InMemoryCompiler {
             for (Map.Entry<String, ByteArrayOutputStream> entry : outputs.entrySet()) {
                 classes.put(entry.getKey(), entry.getValue().toByteArray());
             }
-            return new CompileResult(true, classes, formatDiagnostics(diagnostics));
+            return operate(classes, formatDiagnostics(diagnostics));
         } catch (IOException e) {
             return new CompileResult(false, Map.of(), "Compiler file manager failed: " + e.getMessage());
         } catch (RuntimeException | Error hostile) {
@@ -145,6 +172,44 @@ public final class InMemoryCompiler {
         } finally {
             deleteRecursively(staging);
         }
+    }
+
+    /**
+     * Runs the installed {@link ClassSurgeon} over a successful compile's
+     * output and folds its verdict back into a {@link CompileResult}.
+     *
+     * <p>Fail-safe in both directions, because {@link #compile} is documented
+     * never to throw (§10.1): a surgeon that blows up is a failed round with a
+     * diagnostic, not a crashed server, and a surgeon that hands back nothing
+     * usable is treated the same way rather than silently defining unchecked
+     * bytecode.
+     */
+    private CompileResult operate(Map<String, byte[]> classes, String warnings) {
+        ClassSurgeon live = surgeon;
+        if (live == null) {
+            return new CompileResult(true, classes, warnings);
+        }
+        ClassSurgeon.Result result;
+        try {
+            result = live.operate(classes);
+        } catch (RuntimeException | Error hostile) {
+            return new CompileResult(false, Map.of(),
+                    "bytecode policy check failed: " + hostile);
+        }
+        if (result == null) {
+            return new CompileResult(false, Map.of(),
+                    "bytecode policy check returned no verdict");
+        }
+        if (!result.ok()) {
+            // The surgeon's diagnostics are already javac-shaped, so they feed
+            // the self-heal loop unchanged. Compiler warnings ride along after
+            // them when there were any: the model gets the whole picture.
+            String message = warnings == null || warnings.isBlank()
+                    ? result.diagnostics()
+                    : result.diagnostics() + "\n" + warnings;
+            return new CompileResult(false, Map.of(), message);
+        }
+        return new CompileResult(true, result.classes(), warnings);
     }
 
     /**

@@ -3,8 +3,11 @@ package com.gijsm.vibemod.fabric.client;
 import java.util.logging.Logger;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 
 import com.gijsm.vibemod.fabric.VibeModFabric;
+import com.gijsm.vibemod.fabric.shim.ClientShims;
+import com.gijsm.vibemod.fabric.shim.Shims;
 import com.gijsm.vibemod.loader.client.DeferredTickScheduler;
 import com.gijsm.vibemod.loader.client.LoaderClientContext;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -41,10 +44,17 @@ public final class VibeModFabricClient implements ClientModInitializer {
     private static final long DEFAULT_BUDGET_MS = 500;
 
     private static volatile FabricClientEventBridge bridge;
+    /** The process-lived runtime resource pack (V3 Phase 2 §D); built once, here. */
+    private static volatile FabricClientPacks packs;
 
     /** The live client bridge, for the acceptance gate's state assertions. */
     public static FabricClientEventBridge bridge() {
         return bridge;
+    }
+
+    /** The runtime resource pack, for the acceptance gate's state assertions. */
+    public static FabricClientPacks packs() {
+        return packs;
     }
 
     @Override
@@ -77,10 +87,53 @@ public final class VibeModFabricClient implements ClientModInitializer {
         created.install();
         bridge = created;
 
+        // V3 Phase 1 (§B, §C, §D, §E). Both installs happen HERE, in the client
+        // entrypoint, for the same reason the bridge itself is built here: they
+        // are process-lived, they must exist before the first mod loads, and
+        // their absence on a dedicated server is how the server side knows there
+        // is no client. `Shims` holds the server-safe half (thread checks,
+        // watchdog, screen close) and `ClientShims` the half whose descriptors
+        // name client-only classes.
+        Shims.installClient(created);
+        ClientShims.install(created);
+
+        // V4 Phase 2, the client half of Lane A: the payload types and the two
+        // configuration receivers that answer the manifest and the bind. Here
+        // for the same process-lived reason as everything above it — a
+        // PayloadTypeRegistry entry and a global receiver cannot be undone, and
+        // configuration happens before any world exists to own them.
+        //
+        // The seam is already built: Fabric runs `main` entrypoints before
+        // `client` ones, so VibeModFabric.onInitialize has run and its
+        // process-lived seam is non-null. Reading it here rather than holding a
+        // copy keeps the one-owner rule — the server half builds it, this half
+        // subscribes to it.
+        ClientContentSync.install(VibeModFabric.registrySeam());
+
+        // V3 Phase 2 §D. Built here for the same "process-lived, before the first
+        // mod" reason — and RESET here, which is the stale guard: at client init
+        // no world is loaded, so no mod is live, so the pack must be empty.
+        // Anything on disk at this moment is residue from a crash.
+        FabricClientPacks createdPacks =
+                new FabricClientPacks(FabricLoader.getInstance().getGameDir().resolve("vibemod"));
+        try {
+            createdPacks.resetOnClientInit();
+            // Best-effort: Minecraft's own repository field may not be assigned
+            // yet at this point in its constructor. The coordinator joins again
+            // before every reload, so "not yet" is never "not at all".
+            createdPacks.joinRepository();
+        } catch (Throwable t) {
+            LOG.warning("Could not prepare VibeMod's runtime resource pack: " + t);
+        }
+        packs = createdPacks;
+
         VibeModFabric.setClientHooks(new VibeModFabric.ClientHooks(
                 created,
                 handle -> new LoaderClientContext(created, handle),
-                renderWatchdog));
-        LOG.info("VibeMod client hooks installed (" + created.describeState() + ")");
+                renderWatchdog,
+                createdPacks,
+                createdPacks));
+        LOG.info("VibeMod client hooks installed (" + created.describeState()
+                + " " + createdPacks.describeState() + ")");
     }
 }

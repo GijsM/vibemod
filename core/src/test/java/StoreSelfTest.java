@@ -43,6 +43,12 @@ public class StoreSelfTest {
 
         testRoundTripAndFqcnDerivation();
         testPathTraversalRejected();
+        testResourceFilesRoundTripAndNamespaceRewrite();
+        testPixelGridEncoding();
+        testRegistryLedger();
+        testBlockSchemaRoundTrip();
+        testBlockModIsPinnedNotTombstoned();
+        testLedgerIsTheOrderOfRecord();
         testNullFieldMetaJsonNormalized();
         testMetaSchemaV3Normalization();
         testVersionMetadataAndVersionsOnDisk();
@@ -150,6 +156,478 @@ public class StoreSelfTest {
         check("delete removes mod from all()", store.all().isEmpty());
 
         System.out.println("PASS: ModStore round-trip, FQCN derivation, rollback, enable/delete");
+    }
+
+    /**
+     * V3 Phase 2 §A. The claim under test is the one that makes collisions
+     * structurally impossible: whatever namespace the model wrote, what lands on
+     * disk is {@code vibemod_<mod>} — in the path AND in every id inside the
+     * bodies — while {@code minecraft:} is left alone, and the compiler never
+     * sees any of it.
+     */
+    private static void testResourceFilesRoundTripAndNamespaceRewrite() throws Exception {
+        Path modsDir = tempDir("modstore-resources");
+        ModStore store = new ModStore(modsDir);
+
+        String recipe = "{\"type\":\"minecraft:crafting_shaped\","
+                + "\"key\":{\"#\":\"minecraft:redstone\"},"
+                + "\"result\":{\"id\":\"minecraft:amethyst_shard\","
+                + "\"components\":{\"minecraft:item_model\":\"charm:ruby\"}}}";
+        GeneratedProject project = new GeneratedProject("RubyCharm", "a charm", "craft it", "manual",
+                null, "AMETHYST_SHARD", "RubyCharm", List.of(
+                new GeneratedProject.GeneratedFile("RubyCharm.java",
+                        "package vibemod.rubycharm;\n\npublic class RubyCharm {}\n"),
+                new GeneratedProject.GeneratedFile("data/charm/recipe/ruby.json", recipe),
+                new GeneratedProject.GeneratedFile("assets/charm/lang/en_us.json",
+                        "{\"item.charm.ruby\":\"Ruby\"}")),
+                List.of(), null);
+        store.saveNewVersion("RubyCharm", "a charm", "RubyCharm", "gijs",
+                "make it", "model-x", null, null, 0.0, null, project);
+
+        Map<String, String> sources = store.sources("RubyCharm", 1);
+        check("sources() hands the compiler ONLY the java file", sources.size() == 1
+                && sources.containsKey("vibemod.rubycharm.RubyCharm"));
+
+        Map<String, String> resources = store.resources("RubyCharm", 1);
+        check("resources() returns both non-java files", resources.size() == 2);
+        check("the model's namespace was rewritten in the data path",
+                resources.containsKey("data/vibemod_rubycharm/recipe/ruby.json"));
+        check("the model's namespace was rewritten in the assets path",
+                resources.containsKey("assets/vibemod_rubycharm/lang/en_us.json"));
+        String storedRecipe = resources.get("data/vibemod_rubycharm/recipe/ruby.json");
+        check("an id inside the body was rewritten too",
+                storedRecipe.contains("\"vibemod_rubycharm:ruby\"")
+                        && !storedRecipe.contains("\"charm:ruby\""));
+        check("minecraft: ids were left alone",
+                storedRecipe.contains("\"minecraft:redstone\"")
+                        && storedRecipe.contains("\"minecraft:crafting_shaped\""));
+        check("a dotted translation key is NOT rewritten (java names it, and java is not)",
+                resources.get("assets/vibemod_rubycharm/lang/en_us.json").contains("item.charm.ruby"));
+        check("the canonical namespace is derived from the mod name",
+                "vibemod_rubycharm".equals(
+                        com.gijsm.vibemod.store.ModResources.canonicalNamespace("RubyCharm")));
+        check("a mod name with punctuation still yields a legal namespace",
+                "vibemod_my_mod_2".equals(
+                        com.gijsm.vibemod.store.ModResources.canonicalNamespace("My-Mod 2")));
+
+        // §F: a version that changes ONLY a resource still round-trips.
+        GeneratedProject v2 = new GeneratedProject("RubyCharm", "a charm", "craft it", "manual",
+                null, "AMETHYST_SHARD", "RubyCharm", List.of(
+                new GeneratedProject.GeneratedFile("RubyCharm.java",
+                        "package vibemod.rubycharm;\n\npublic class RubyCharm {}\n"),
+                new GeneratedProject.GeneratedFile("data/charm/recipe/ruby.json",
+                        recipe.replace("amethyst_shard", "emerald")),
+                new GeneratedProject.GeneratedFile("assets/charm/lang/en_us.json",
+                        "{\"item.charm.ruby\":\"Ruby\"}")),
+                List.of(), null);
+        ModStore.StoredMod saved2 = store.saveNewVersion("RubyCharm", "a charm", "RubyCharm", "gijs",
+                "swap the result", "model-x", null, null, 0.0, null, v2);
+        check("a resource-only change makes a new version", saved2.currentVersion() == 2);
+        check("v2's resource carries the change",
+                store.resources("RubyCharm", 2).get("data/vibemod_rubycharm/recipe/ruby.json")
+                        .contains("emerald"));
+        check("v1's resource is untouched by v2",
+                store.resources("RubyCharm", 1).get("data/vibemod_rubycharm/recipe/ruby.json")
+                        .contains("amethyst_shard"));
+        check("resources() of a mod with none is empty", store.resources("NoSuchMod", 1).isEmpty());
+
+        System.out.println("PASS: resource files round-trip, and the canonical namespace is enforced");
+    }
+
+    /**
+     * The hand-rolled PNG encoder (§D). Asserted on the bytes, because the only
+     * consumer that matters is a texture loader that will reject a malformed
+     * one silently.
+     */
+    /**
+     * The registry ledger (V3 Phase 3 §A): live entries are idempotent, an
+     * unload is a tombstone, and both survive a restart.
+     *
+     * <p>The restart is the point. The ledger's whole job is to be read by the
+     * NEXT boot of a world, so a version of it that only works in memory would
+     * pass every runtime assertion and re-register a deleted mod's ids anyway.
+     */
+    private static void testRegistryLedger() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "ledger")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        check("a fresh ledger knows nothing", ledger.modNames().isEmpty()
+                && ledger.describeState().contains("ledgerIds=0"));
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+        check("recording the same id twice records it once",
+                ledger.entriesOf("RubySword").size() == 1);
+        ledger.record("RubySword", 1, "minecraft:entity_type", "vibemod_rubysword:ruby_pig");
+        check("a second registry is a second entry (" + ledger.describeState() + ")",
+                ledger.describeState().contains("ledgerIds=2"));
+        check("a live mod is not tombstoned", !ledger.isTombstoned("RubySword"));
+
+        check("it wrote itself to disk", Files.isRegularFile(file));
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("and a fresh reader sees the same two ids",
+                reopened.entriesOf("RubySword").size() == 2);
+
+        reopened.tombstone("RubySword");
+        check("unloading tombstones every id the mod owned",
+                reopened.isTombstoned("RubySword")
+                        && reopened.describeState().contains("ledgerTombstones=1"));
+        check("the tombstone survives a restart, which is the only thing it is for",
+                new com.gijsm.vibemod.store.RegistryLedger(file).isTombstoned("RubySword"));
+        check("and the ids are still listed, so the UI can say what became of them",
+                new com.gijsm.vibemod.store.RegistryLedger(file)
+                        .entriesOf("RubySword").size() == 2);
+        check("a mod that never registered anything is not tombstoned",
+                !reopened.isTombstoned("SomeOtherMod"));
+
+        // The install card is where a player is told the id outlives the mod.
+        com.gijsm.vibemod.ui.InstallCard.setRegisteredContent(
+                name -> reopened.entriesOf(name).stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList());
+        try {
+            ModStore store = new ModStore(tempDir("registry-card"));
+            GeneratedProject project = new GeneratedProject("RubySword", "a sword", "craft it",
+                    "manual", null, "IRON_SWORD", "RubySword", List.of(
+                    new GeneratedProject.GeneratedFile("RubySword.java",
+                            "package vibemod.rubysword;\n\npublic class RubySword {}\n")),
+                    List.of(), null);
+            store.saveNewVersion("RubySword", "a sword", "RubySword", "tester",
+                    "make a sword", "model-x", null, null, 0.0, null, project);
+            java.util.List<String> lines = com.gijsm.vibemod.ui.InstallCard.verifiedFactLines(
+                    store.get("RubySword"), null, java.util.Map.of());
+            check("/vibe info reports the ids a mod registered",
+                    lines.stream().anyMatch(line -> line.startsWith("registered content: ")
+                            && line.contains("vibemod_rubysword:ruby_sword")));
+            check("and says out loud that they outlive the mod",
+                    lines.stream().anyMatch(line ->
+                            line.contains("stays registered until the world is restarted")));
+        } finally {
+            com.gijsm.vibemod.ui.InstallCard.setRegisteredContent(null);
+        }
+
+        System.out.println("PASS: the registry ledger records ids, tombstones an unloaded mod, "
+                + "and survives a restart");
+    }
+
+    /**
+     * The block state schema (V4 Phase 1): it survives the ledger's JSON
+     * round-trip with property AND value order intact, and it refuses itself
+     * when the recorded state count disagrees with the recorded properties.
+     *
+     * <p>Order is the point. A save records a state as its property names and
+     * value strings, and the stub rebuilt from this record has to decode those
+     * to the same state — so a round-trip that preserved the names but scrambled
+     * the value order would pass a naive equality check and still hand a player
+     * the wrong block. The count check is the other half: it is the only thing
+     * that can catch a schema that is internally well-formed and still not the
+     * original's, and a wrong stub is worse than a missing one.
+     */
+    private static void testBlockSchemaRoundTrip() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "schema")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        // Deliberately NOT alphabetical within the property: "north" before
+        // "east" is what a real EnumProperty's declaration order can look like,
+        // and it is exactly what a sort would silently destroy.
+        com.gijsm.vibemod.store.BlockSchema schema = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault",
+                List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("facing",
+                                List.of("north", "east", "south", "west")),
+                        new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                                List.of("false", "true"))),
+                8);
+        check("a well-formed schema has no problems (" + schema.problems() + ")", schema.usable());
+        check("and its recorded count is the cartesian product",
+                schema.cartesianStateCount() == 8);
+
+        ledger.record("GlowVault", 1, "minecraft:block", schema.id(), schema);
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        com.gijsm.vibemod.store.BlockSchema back = reopened.entriesOf("GlowVault").get(0).block();
+        check("the schema survives the ledger's JSON round-trip", schema.equals(back));
+        check("with property order preserved",
+                back.properties().stream()
+                        .map(com.gijsm.vibemod.store.BlockSchema.Prop::name).toList()
+                        .equals(List.of("facing", "lit")));
+        check("and value order preserved, which is what decodes a save to the right state",
+                back.properties().get(0).values()
+                        .equals(List.of("north", "east", "south", "west")));
+
+        com.gijsm.vibemod.store.BlockSchema miscounted = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault", schema.properties(), 6);
+        check("a schema whose recorded count disagrees with its properties is refused",
+                !miscounted.usable() && miscounted.problems().stream()
+                        .anyMatch(reason -> reason.contains("wrong state index")));
+        check("a property with one value is refused, because StateDefinition rejects it",
+                !new com.gijsm.vibemod.store.BlockSchema("a:b",
+                        List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                                List.of("true"))), 1).usable());
+        check("and so is a value name vanilla's NAME_PATTERN would reject",
+                !new com.gijsm.vibemod.store.BlockSchema("a:b",
+                        List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("facing",
+                                List.of("North", "east"))), 2).usable());
+        check("a block with no properties at all is one state, and is fine",
+                new com.gijsm.vibemod.store.BlockSchema("a:b", List.of(), 1).usable());
+
+        System.out.println("PASS: a block schema round-trips through the ledger with order "
+                + "intact, and refuses itself when its state count disagrees");
+    }
+
+    /**
+     * The V4 Phase 2 rule: the ledger, not the disk, is the order of record.
+     *
+     * <p>Lane A works only if a dedicated server and a VibeMod client build the
+     * same registries in the same sequence, and the sequence is only meaningful
+     * if it survives a restart and is enforced against the mod that claims it.
+     * So four things are asserted here, and each one is a different failure:
+     * that a sequence is assigned once and never reassigned; that the order
+     * outlives the file and does not come from the map's iteration order; that a
+     * mod registering out of turn is <em>refused</em> rather than tolerated; and
+     * that the hash both ends compare is order-sensitive, which is the only
+     * property that makes it worth sending.
+     */
+    private static void testLedgerIsTheOrderOfRecord() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "order")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        ledger.record("Alpha", 1, "minecraft:item", "vibemod_alpha:one");
+        ledger.record("Beta", 2, "minecraft:item", "vibemod_beta:two");
+        ledger.record("Alpha", 1, "minecraft:block", "vibemod_alpha:three");
+
+        check("every entry gets a sequence, 1-based and monotonic across mods",
+                ledger.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2, 3)));
+        check("and the global order interleaves mods, because the ids were minted interleaved",
+                ledger.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList()
+                        .equals(List.of("vibemod_alpha:one", "vibemod_beta:two",
+                                "vibemod_alpha:three")));
+        check("restore order is by first recorded id, not by mod name",
+                ledger.restoreOrder().equals(List.of("Alpha", "Beta")));
+        check("a mod's version is readable, for the manifest's log lines",
+                ledger.versionOf("Beta") == 2 && ledger.versionOf("Nobody") == 0);
+
+        String installationId = ledger.installationId();
+        check("an installation id is minted and is a real one", installationId.length() > 8);
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("the installation id survives a restart — it is what tells two servers apart",
+                installationId.equals(reopened.installationId()));
+        check("and so does the sequence, unchanged",
+                reopened.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2, 3)));
+
+        // Re-recording an id must not renumber it: a re-sequenced id IS a
+        // reordered registry, which is the thing the sequence exists to prevent.
+        reopened.record("Alpha", 2, "minecraft:item", "vibemod_alpha:one");
+        check("re-recording an existing id keeps its sequence",
+                reopened.orderedEntries().get(0).seq() == 1);
+        reopened.record("Alpha", 2, "minecraft:item", "vibemod_alpha:four");
+        check("and a genuinely new id is appended at the end of the sequence",
+                reopened.orderedEntries().get(3).id().equals("vibemod_alpha:four")
+                        && reopened.orderedEntries().get(3).seq() == 4);
+
+        // The refusal. A fresh ledger object is a fresh boot, which is exactly
+        // when the replay cursor starts over.
+        com.gijsm.vibemod.store.RegistryLedger booting =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("registering in recorded order is not a problem",
+                booting.orderProblem("Alpha", "minecraft:item", "vibemod_alpha:one") == null);
+        check("nor is skipping an id the mod no longer registers",
+                booting.orderProblem("Alpha", "minecraft:item", "vibemod_alpha:four") == null);
+        String drift = booting.orderProblem("Alpha", "minecraft:block", "vibemod_alpha:three");
+        check("but going back to an earlier id is refused, by name (" + drift + ")",
+                drift != null && drift.contains("vibemod_alpha:three")
+                        && drift.contains("out of order"));
+        check("a mod the ledger has never seen cannot be out of order",
+                booting.orderProblem("BrandNew", "minecraft:item", "vibemod_brandnew:x") == null);
+
+        // The hash both ends compare. Order-sensitive is the whole property.
+        List<String> forward = List.of(
+                com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:one"),
+                com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:two"));
+        List<String> swapped = List.of(forward.get(1), forward.get(0));
+        check("the order hash is stable for the same list",
+                com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)
+                        .equals(com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)));
+        check("and different for the same ids in a different order",
+                !com.gijsm.vibemod.store.RegistryLedger.orderHash(forward)
+                        .equals(com.gijsm.vibemod.store.RegistryLedger.orderHash(swapped)));
+        check("the same path in two registries is two different keys",
+                !com.gijsm.vibemod.store.RegistryLedger.orderKey("minecraft:item", "a:x")
+                        .equals(com.gijsm.vibemod.store.RegistryLedger
+                                .orderKey("minecraft:block", "a:x")));
+        check("an empty list still hashes to something a client can send",
+                com.gijsm.vibemod.store.RegistryLedger.orderHash(List.of()).length() == 16);
+
+        // A ledger written before the sequence existed: numbered in FILE order,
+        // because that is the order those ids were appended in and any other
+        // guess would invent an ordering for ids already in somebody's world.
+        java.nio.file.Path legacyFile = Files.createTempDirectory(scratchRoot, "legacy-order")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        Files.writeString(legacyFile, """
+                {"mods":{"Old":{"state":"live","version":1,"entries":[
+                  {"registry":"minecraft:item","id":"vibemod_old:first"},
+                  {"registry":"minecraft:item","id":"vibemod_old:second"}]}}}
+                """, StandardCharsets.UTF_8);
+        com.gijsm.vibemod.store.RegistryLedger legacy =
+                new com.gijsm.vibemod.store.RegistryLedger(legacyFile);
+        check("a pre-sequence ledger is numbered in file order",
+                legacy.orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::id).toList()
+                        .equals(List.of("vibemod_old:first", "vibemod_old:second")));
+        check("and the numbering is written back, so it is the same next boot",
+                new com.gijsm.vibemod.store.RegistryLedger(legacyFile).orderedEntries().stream()
+                        .map(com.gijsm.vibemod.store.RegistryLedger.Entry::seq).toList()
+                        .equals(List.of(1, 2)));
+
+        System.out.println("PASS: the registry ledger is the order of record — sequences survive "
+                + "a restart, a mod registering out of turn is refused, and the order hash both "
+                + "ends compare changes when the order does");
+    }
+
+    /**
+     * Teardown, the V4 Phase 1 rule: a mod that registered a block is PINNED and
+     * never tombstoned, because a blockstate id that is simply absent at the
+     * next boot shifts every palette entry after it and rewrites terrain.
+     */
+    private static void testBlockModIsPinnedNotTombstoned() throws Exception {
+        java.nio.file.Path file = Files.createTempDirectory(scratchRoot, "pinned")
+                .resolve(com.gijsm.vibemod.store.RegistryLedger.FILE_NAME);
+        com.gijsm.vibemod.store.RegistryLedger ledger =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+
+        com.gijsm.vibemod.store.BlockSchema schema = new com.gijsm.vibemod.store.BlockSchema(
+                "vibemod_glowvault:glow_vault",
+                List.of(new com.gijsm.vibemod.store.BlockSchema.Prop("lit",
+                        List.of("false", "true"))),
+                2);
+        ledger.record("GlowVault", 1, "minecraft:block", schema.id(), schema);
+        ledger.record("GlowVault", 1, "minecraft:item", "vibemod_glowvault:glow_vault");
+        ledger.record("RubySword", 1, "minecraft:item", "vibemod_rubysword:ruby_sword");
+
+        ledger.tombstone("GlowVault");
+        ledger.tombstone("RubySword");
+
+        check("a block mod is pinned, never tombstoned (" + ledger.describeState() + ")",
+                ledger.isPinned("GlowVault")
+                        && ledger.describeState().contains("ledgerPinned=1"));
+        check("an item-only mod is still tombstoned",
+                !ledger.isPinned("RubySword")
+                        && ledger.describeState().contains("ledgerTombstones=1"));
+        check("isTombstoned is true for both, so the re-registration guard refuses both",
+                ledger.isTombstoned("GlowVault") && ledger.isTombstoned("RubySword"));
+
+        com.gijsm.vibemod.store.RegistryLedger reopened =
+                new com.gijsm.vibemod.store.RegistryLedger(file);
+        check("the pin survives a restart, which is the only thing it is for",
+                reopened.isPinned("GlowVault") && reopened.isTombstoned("GlowVault"));
+        check("and the replay reads back exactly the block schemas, not the item ids",
+                reopened.pinnedBlockSchemas().equals(List.of(schema)));
+        check("a tombstoned mod contributes no schema to the replay",
+                reopened.pinnedBlockSchemas().size() == 1);
+        check("the ledger can name a mod's block ids for the delete card",
+                reopened.blockIdsOf("GlowVault").equals(List.of(schema.id()))
+                        && reopened.blockIdsOf("RubySword").isEmpty());
+
+        // The delete confirmation is where a player is told the id outlives the
+        // world, not just the mod.
+        com.gijsm.vibemod.ui.InstallCard.setRegisteredBlocks(reopened::blockIdsOf);
+        try {
+            ModStore store = new ModStore(tempDir("pinned-card"));
+            GeneratedProject project = new GeneratedProject("GlowVault", "a vault", "place it",
+                    "manual", null, "STONE", "GlowVault", List.of(
+                    new GeneratedProject.GeneratedFile("GlowVault.java",
+                            "package vibemod.glowvault;\n\npublic class GlowVault {}\n")),
+                    List.of(), null);
+            store.saveNewVersion("GlowVault", "a vault", "GlowVault", "tester",
+                    "make a vault", "model-x", null, null, 0.0, null, project);
+            java.util.List<String> lines = com.gijsm.vibemod.ui.InstallCard.verifiedFactLines(
+                    store.get("GlowVault"), null, java.util.Map.of());
+            check("/vibe info says a block id is claimed forever",
+                    lines.stream().anyMatch(line -> line.startsWith("blocks: ")
+                            && line.contains("claimed forever")
+                            && line.contains("corrupt the chunks they sit in")));
+        } finally {
+            com.gijsm.vibemod.ui.InstallCard.setRegisteredBlocks(null);
+        }
+
+        System.out.println("PASS: deleting a block mod pins its ids instead of tombstoning them, "
+                + "and the card says so");
+    }
+
+    private static void testPixelGridEncoding() {
+        com.gijsm.vibemod.store.PixelGrid grid = com.gijsm.vibemod.store.PixelGrid.parse(
+                "{\"palette\":{\".\":\"transparent\",\"r\":\"#ff0000\",\"g\":\"#00ff0080\"},"
+                        + "\"rows\":[\".r\",\"g.\"]}");
+        check("a grid knows its size", grid.size() == 2);
+        byte[] png = grid.toPng();
+        check("the PNG starts with the 8-byte signature",
+                png.length > 8 && (png[0] & 0xff) == 0x89 && png[1] == 'P' && png[2] == 'N'
+                        && png[3] == 'G' && png[4] == '\r' && png[5] == '\n' && png[6] == 0x1a
+                        && png[7] == '\n');
+        String asLatin1 = new String(png, java.nio.charset.StandardCharsets.ISO_8859_1);
+        check("the PNG carries IHDR, IDAT and IEND", asLatin1.contains("IHDR")
+                && asLatin1.contains("IDAT") && asLatin1.contains("IEND"));
+        check("the IHDR declares 8-bit RGBA (colour type 6)",
+                png[24] == 8 && png[25] == 6);
+        // IHDR data starts at 16 (8 signature + 4 length + 4 type): width is
+        // 16..19, height 20..23, then depth and colour type.
+        check("the IHDR declares the right dimensions", png[19] == 2 && png[23] == 2);
+        check("every chunk's CRC checks out", crcsAreValid(png));
+
+        // The failure modes the prompt promises are caught at generation time.
+        expectGridFailure("a grid with a rows array that is not square",
+                "{\"palette\":{\"a\":\"#ff0000\"},\"rows\":[\"aaa\",\"aaa\"]}");
+        expectGridFailure("a grid bigger than 64x64",
+                "{\"palette\":{\"a\":\"#ff0000\"},\"rows\":[" + "\"a\",".repeat(64) + "\"a\"]}");
+        expectGridFailure("a palette key that is not one character",
+                "{\"palette\":{\"ab\":\"#ff0000\"},\"rows\":[\"a\"]}");
+        expectGridFailure("a colour that is not hex", "{\"palette\":{\"a\":\"#gggggg\"},\"rows\":[\"a\"]}");
+        expectGridFailure("a grid that is not JSON at all", "not json");
+
+        System.out.println("PASS: the pixel-grid PNG encoder produces a CRC-valid RGBA PNG");
+    }
+
+    private static void expectGridFailure(String what, String json) {
+        try {
+            com.gijsm.vibemod.store.PixelGrid.parse(json);
+            check("PixelGrid rejects " + what, false);
+        } catch (IllegalArgumentException expected) {
+            // the message is the point: it is what the model is shown
+            check("PixelGrid rejects " + what + " (" + expected.getMessage() + ")", true);
+        }
+    }
+
+    /** Walks a PNG's chunk list and verifies every CRC32, the way a decoder would. */
+    private static boolean crcsAreValid(byte[] png) {
+        int at = 8;
+        while (at + 8 <= png.length) {
+            int length = ((png[at] & 0xff) << 24) | ((png[at + 1] & 0xff) << 16)
+                    | ((png[at + 2] & 0xff) << 8) | (png[at + 3] & 0xff);
+            int typeAt = at + 4;
+            int crcAt = typeAt + 4 + length;
+            if (crcAt + 4 > png.length) {
+                return false;
+            }
+            java.util.zip.CRC32 crc = new java.util.zip.CRC32();
+            crc.update(png, typeAt, 4 + length);
+            int stored = ((png[crcAt] & 0xff) << 24) | ((png[crcAt + 1] & 0xff) << 16)
+                    | ((png[crcAt + 2] & 0xff) << 8) | (png[crcAt + 3] & 0xff);
+            if (stored != (int) crc.getValue()) {
+                return false;
+            }
+            at = crcAt + 4;
+        }
+        return at == png.length;
     }
 
     private static void testPathTraversalRejected() throws Exception {

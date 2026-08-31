@@ -1,0 +1,14 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "key": {"S": "minecraft:stick", "C": "minecraft:iron_chain", "I": "minecraft:iron_ingot"},
+  "pattern": ["  I", " S ", "C  "],
+  "result": {
+    "id": "minecraft:fishing_rod",
+    "components": {
+      "minecraft:custom_name": {"text": "Grappling Hook", "color": "aqua", "italic": false},
+      "minecraft:lore": [{"text": "Right-click a wall up to 40 blocks away.", "color": "gray", "italic": false}],
+      "minecraft:item_model": "vibemod_grapplinghook:grappling_hook",
+      "minecraft:enchantment_glint_override": true
+    }
+  }
+}

@@ -16,12 +16,14 @@ import java.util.logging.Logger;
 
 import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
+import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
 import com.gijsm.vibemod.llm.PromptFacts;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.runtime.ModLifecycle;
+import com.gijsm.vibemod.store.ModResources;
 import com.gijsm.vibemod.store.ModStore;
 
 /**
@@ -100,6 +102,19 @@ public final class ModGenerator {
     /** Submitted-but-unfinished runs; anything past {@link #poolSize} is waiting in the pool's queue. */
     private final java.util.concurrent.atomic.AtomicInteger unfinished =
             new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * Turns "cannot find symbol" into the real member list (V3 Phase 0 §D), or
+     * null where no host installed one (the self-tests, which have no game to
+     * ask).
+     */
+    private volatile SymbolOracle oracle;
+    /**
+     * Facts about this running host, appended to the system prompt (V3 Phase 4
+     * §C). Null where no host supplied any — every self-test, and every host
+     * whose profile does not branch on the side it is running — in which case
+     * the prompt is byte-for-byte the one this generator always sent.
+     */
+    private volatile String hostFacts;
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
     public ModGenerator(TickScheduler scheduler, PromptFacts facts, OpenRouterClient client,
@@ -120,6 +135,29 @@ public final class ModGenerator {
         this.lifecycle = lifecycle;
         this.maxRetries = maxRetries;
         this.streamingEnabled = streamingEnabled;
+    }
+
+    /**
+     * Installs the host's {@link SymbolOracle} (V3 Phase 0 §D). Optional: with
+     * none, every repair prompt is exactly the one this generator always sent.
+     */
+    public void setSymbolOracle(SymbolOracle oracle) {
+        this.oracle = oracle;
+    }
+
+    /**
+     * Installs this host's "THIS HOST" prompt block (V3 Phase 4 §C). Optional,
+     * for the same reason {@link #setSymbolOracle} is: with none, the prompt is
+     * exactly the one this generator always sent.
+     */
+    public void setHostFacts(String facts) {
+        this.hostFacts = facts == null || facts.isBlank() ? null : facts;
+    }
+
+    /** The {@code API HINTS} block for a set of diagnostics, or {@code null} when there is no oracle. */
+    private String hintsFor(String diagnostics) {
+        SymbolOracle live = oracle;
+        return live == null ? null : live.hints(diagnostics);
     }
 
     /**
@@ -175,7 +213,9 @@ public final class ModGenerator {
                 return new Result(false, modName, 0, 0, "No mod named '" + modName + "'.", 0.0);
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
-            return pipeline(prompt, creator, "edit", existing.name(), baseProject(existing, sources),
+            Map<String, String> resources = store.resources(existing.name(), existing.currentVersion());
+            return pipeline(prompt, creator, "edit", existing.name(),
+                    baseProject(existing, sources, resources),
                     PromptLibrary.editPrompt(prompt, sources, existing.config(),
                             store.resolvedConfigValues(existing.name())), l);
         });
@@ -193,7 +233,8 @@ public final class ModGenerator {
             }
             Map<String, String> sources = store.sources(existing.name(), existing.currentVersion());
             return pipeline("fix: " + errorHeadline(errorReport), creator, "fix", existing.name(),
-                    baseProject(existing, sources),
+                    baseProject(existing, sources,
+                            store.resources(existing.name(), existing.currentVersion())),
                     PromptLibrary.fixPrompt(errorReport, sources, existing.config(),
                             store.resolvedConfigValues(existing.name())), l);
         });
@@ -278,9 +319,9 @@ public final class ModGenerator {
             String response;
             try {
                 OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
-                        ? client.completeStreaming(PromptLibrary.systemPrompt(facts), messages,
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(facts, hostFacts), messages,
                                 new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
-                        : client.complete(PromptLibrary.systemPrompt(facts), messages)
+                        : client.complete(PromptLibrary.systemPrompt(facts, hostFacts), messages)
                                 .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();
@@ -352,7 +393,8 @@ public final class ModGenerator {
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
                 messages.add(new OpenRouterClient.ChatMessage("user",
                         PromptLibrary.repairPrompt(compiled.diagnostics(),
-                                symbols.notesFor(compiled.diagnostics()))));
+                                symbols.notesFor(compiled.diagnostics()),
+                                hintsFor(compiled.diagnostics()))));
                 current = project; // repairs now apply against this round's REPAIRED sources
                 continue;
             }
@@ -380,12 +422,16 @@ public final class ModGenerator {
                             "Mod failed to start: " + brief(enableFail), costUsd);
                 }
                 l.detail("Mod crashed on enable, asking the model to fix it…");
+                String failure = "The project compiled but threw on enable: " + stackTop(enableFail);
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
-                messages.add(new OpenRouterClient.ChatMessage("user", PromptLibrary.repairPrompt(
-                        "The project compiled but threw on enable: " + stackTop(enableFail),
-                        // It compiled, so no unresolved-symbol suspicion survives:
-                        // only the repairs actually applied are worth restating.
-                        symbols.notesFor(null))));
+                // The oracle sees a stack trace rather than diagnostics here and
+                // usually finds nothing, which is fine — but a NoSuchMethodError
+                // from a stale API IS a missing symbol, and that is exactly the
+                // case worth a hint. It compiled, so no unresolved-symbol
+                // suspicion survives: only the repairs actually applied are
+                // worth restating.
+                messages.add(new OpenRouterClient.ChatMessage("user",
+                        PromptLibrary.repairPrompt(failure, symbols.notesFor(null), hintsFor(failure))));
                 current = project;
             }
         }
@@ -399,11 +445,11 @@ public final class ModGenerator {
         }
         Map<String, String> byPath = new LinkedHashMap<>();
         for (GeneratedProject.GeneratedFile f : current.files()) {
-            byPath.put(fileName(f.path()), f.content());
+            byPath.put(editKey(f.path()), f.content());
         }
         int applied = 0;
         for (GeneratedProject.EditBlock edit : editResponse.edits()) {
-            String path = fileName(edit.path());
+            String path = editKey(edit.path());
             String content = byPath.get(path);
             if (content == null) {
                 throw new IllegalArgumentException("edit targets unknown file '" + edit.path() + "'");
@@ -449,26 +495,72 @@ public final class ModGenerator {
                 // Reversed preference: the run's first changelog wins (see applyEdits).
                 firstNonBlank(previous.changelog(), full.changelog()),
                 firstNonBlank(full.icon(), previous.icon()),
-                full.mainClass(), full.files(),
+                full.mainClass(), carryForwardResources(previous, full),
                 full.config() != null && !full.config().isEmpty() ? full.config() : previous.config(),
                 List.of());
     }
 
-    /** Reconstruct a project-state view of a stored mod so edits can apply against it. */
-    private static GeneratedProject baseProject(ModStore.StoredMod mod, Map<String, String> sources) {
-        List<GeneratedProject.GeneratedFile> files = sources.entrySet().stream()
-                .map(e -> new GeneratedProject.GeneratedFile(simpleName(e.getKey()) + ".java", e.getValue()))
-                .toList();
+    /**
+     * A full-project response replaces the Java sources outright — but keeps any
+     * resource file it did not mention (V3 Phase 2 §A).
+     *
+     * <p>The case this exists for: a mod ships a recipe, a later round fails to
+     * compile, and the repair response contains only the one Java file it fixed.
+     * Under "the response is the project" that repair silently deletes the
+     * recipe, and the player's mod comes back subtly less than it was. Carrying
+     * unmentioned resources forward makes the safe direction the default; the
+     * cost is that deleting a resource takes an edit round rather than an
+     * omission, which is a trade the "no silent drops" rule already implies.
+     */
+    private static List<GeneratedProject.GeneratedFile> carryForwardResources(
+            GeneratedProject previous, GeneratedProject full) {
+        List<GeneratedProject.GeneratedFile> files = new ArrayList<>(full.files());
+        List<String> present = files.stream().map(GeneratedProject.GeneratedFile::path).toList();
+        int carried = 0;
+        for (GeneratedProject.GeneratedFile f : previous.files()) {
+            if (ModResources.isResourcePath(f.path()) && !present.contains(f.path())) {
+                files.add(f);
+                carried++;
+            }
+        }
+        if (carried > 0) {
+            LOG.info("Carried " + carried + " unmentioned resource file(s) forward from the previous state");
+        }
+        return files;
+    }
+
+    /**
+     * Reconstruct a project-state view of a stored mod so edits can apply
+     * against it. V3 Phase 2 §A: the resource tree is part of that state, so an
+     * edit round can change a recipe and a repair round cannot lose one.
+     */
+    private static GeneratedProject baseProject(ModStore.StoredMod mod, Map<String, String> sources,
+                                                Map<String, String> resources) {
+        List<GeneratedProject.GeneratedFile> files = new ArrayList<>();
+        sources.forEach((fqcn, content) ->
+                files.add(new GeneratedProject.GeneratedFile(simpleName(fqcn) + ".java", content)));
+        resources.forEach((path, content) ->
+                files.add(new GeneratedProject.GeneratedFile(path, content)));
         // changelog is null on purpose: a stored mod's old state must never seed a
         // fresh run's changelog — the first response of the run supplies it instead.
         return new GeneratedProject(mod.name(), mod.description(), mod.usage(), mod.manual(),
                 null, mod.icon(), simpleName(mod.mainClass()), files, mod.config(), List.of());
     }
 
-    /** Derive FQCN -> source, trusting each file's own package declaration. */
+    /**
+     * Derive FQCN -> source, trusting each file's own package declaration.
+     *
+     * <p>V3 Phase 2 §A: {@code files[]} also carries {@code data/**} and
+     * {@code assets/**} entries now. They are skipped here — resources bypass
+     * the compiler entirely, which is what lets a version that changes only a
+     * recipe round-trip without a single javac invocation.
+     */
     private static Map<String, String> toFqcnSources(GeneratedProject project) {
         Map<String, String> out = new LinkedHashMap<>();
         for (GeneratedProject.GeneratedFile f : project.files()) {
+            if (ModResources.isResourcePath(f.path())) {
+                continue;
+            }
             String simple = fileName(f.path()).replaceAll("\\.java$", "");
             Matcher m = PACKAGE_DECL.matcher(f.content());
             String pkg = m.find() ? m.group(1) : "vibemod." + project.name().toLowerCase();
@@ -559,6 +651,19 @@ public final class ModGenerator {
 
     private static String fileName(String path) {
         return path.substring(path.lastIndexOf('/') + 1);
+    }
+
+    /**
+     * The key an edit block addresses a file by.
+     *
+     * <p>A Java source is its bare simple name — the model is told to write
+     * {@code "Foo.java"} and sometimes writes {@code "src/Foo.java"} anyway, and
+     * that has always been forgiven. A resource is its WHOLE path: two mods'
+     * worth of {@code en_us.json} live in one project, so collapsing them to a
+     * file name would let one edit silently rewrite the wrong file.
+     */
+    private static String editKey(String path) {
+        return ModResources.isResourcePath(path) ? path : fileName(path);
     }
 
     private static String simpleName(String fqcnOrSimple) {

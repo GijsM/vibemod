@@ -11,9 +11,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import com.gijsm.vibemod.compile.SymbolOracle;
 import com.gijsm.vibemod.gen.GeneratedProject;
 import com.gijsm.vibemod.llm.PlatformProfile;
-import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PlatformProfiles;
 import com.gijsm.vibemod.llm.PromptFacts;
 import com.gijsm.vibemod.llm.PromptLibrary;
@@ -32,6 +32,15 @@ public class LlmSelfTest {
 
     private static int failures = 0;
 
+    /**
+     * What the native Fabric prompt is allowed to cost, as SENT (the profile plus
+     * its "THIS HOST" block). It was 30000 until V4 Phase 1: blocks brought a
+     * fourth few-shot and a block-rules section, and there is no way to teach a
+     * block's nine-file shape for less. Raised deliberately, in one place, so the
+     * next person raising it has to mean it.
+     */
+    private static final int NATIVE_FABRIC_BUDGET = 40000;
+
     public static void main(String[] args) {
         testParseCleanJson();
         testParseFencedWithProse();
@@ -40,11 +49,18 @@ public class LlmSelfTest {
         testParseEditShape();
         testParseBothShapesThrows();
         testParseNeitherShapeThrows();
+        testParseResourceFiles();
         testConfigKnobParsing();
         testParseIconMapping();
         testParseChangelogMapping();
         testSystemPromptContent();
         testPlatformProfiles();
+        testPromptHygiene();
+        testNativeFabricProfile();
+        testBlockContentPrompt();
+        testPromptBudgets();
+        testRepairPromptBudget();
+        testSymbolOracle();
         testPromptBuilders();
         testFewShotPlansMatchFiles();
         testStreamScannerFullShapeWithDecoy();
@@ -166,6 +182,59 @@ public class LlmSelfTest {
             System.out.println("PASS: parse() rejects BOTH files+edits: " + expected.getMessage());
         } catch (Exception e) {
             fail("both-shapes input threw wrong exception type: " + e.getClass() + ": " + e);
+        }
+    }
+
+    /**
+     * V3 Phase 2 §A: {@code files[]} carries resources, and the malformed ones
+     * are refused HERE — where the refusal becomes a self-heal round with the
+     * model's own text in it, rather than a stack trace at load time.
+     */
+    private static void testParseResourceFiles() {
+        String ok = "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                + "{\"path\":\"Foo.java\",\"content\":\"package vibemod.foo;\\n\"},"
+                + "{\"path\":\"data/foo/recipe/thing.json\",\"content\":\"{}\"},"
+                + "{\"path\":\"assets/foo/textures/item/t.png.grid\","
+                + "\"content\":\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"aa\\\",\\\"aa\\\"]}\"}]}";
+        var project = PromptLibrary.parse(ok);
+        check("parse() accepts data/ and assets/ paths alongside .java",
+                project.files().size() == 3);
+        check("parse() keeps a resource file's full path",
+                project.files().get(1).path().equals("data/foo/recipe/thing.json"));
+
+        expectParseFailure("a path that is neither .java nor a resource root",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"notes.txt\",\"content\":\"x\"}]}");
+        expectParseFailure("a resource path that escapes its root",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"data/foo/../../evil.json\",\"content\":\"{}\"}]}");
+        expectParseFailure("a resource path with no file in it",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"data/foo\",\"content\":\"{}\"}]}");
+        expectParseFailure("a non-square pixel grid",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"assets/foo/textures/item/t.png.grid\",\"content\":"
+                        + "\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"aaa\\\",\\\"aaa\\\"]}\"}]}");
+        expectParseFailure("a pixel grid using a character it never declared",
+                "{\"name\":\"Foo\",\"description\":\"d\",\"mainClass\":\"Foo\",\"files\":["
+                        + "{\"path\":\"assets/foo/textures/item/t.png.grid\",\"content\":"
+                        + "\"{\\\"palette\\\":{\\\"a\\\":\\\"#ff0000\\\"},\\\"rows\\\":[\\\"ab\\\",\\\"aa\\\"]}\"}]}");
+
+        // The edit shape learned resources too, or an edit round could never
+        // touch a recipe it had already written.
+        var edited = PromptLibrary.parse("{\"name\":\"Foo\",\"edits\":[{"
+                + "\"path\":\"data/foo/recipe/thing.json\",\"find\":\"a\",\"replace\":\"b\"}]}");
+        check("parse() accepts an edit block that targets a resource file",
+                edited.isEditResponse()
+                        && edited.edits().get(0).path().equals("data/foo/recipe/thing.json"));
+    }
+
+    private static void expectParseFailure(String what, String json) {
+        try {
+            PromptLibrary.parse(json);
+            fail("parse() accepted " + what);
+        } catch (IllegalArgumentException expected) {
+            System.out.println("PASS: parse() rejects " + what + ": " + expected.getMessage());
         }
     }
 
@@ -346,64 +415,69 @@ public class LlmSelfTest {
      * and above all the absence of any Bukkit vocabulary.
      */
     private static void testFabricProfilePrompt() {
-        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_ID);
-        check("byId('fabric') resolves the fabric profile, not the paper fallback",
-                PlatformProfiles.FABRIC_ID.equals(fabric.id()));
+        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_LEGACY_ID);
+        check("byId('fabric-legacy') resolves the v2 loader profile, not the paper fallback",
+                PlatformProfiles.FABRIC_LEGACY_ID.equals(fabric.id()));
 
         String prompt = PromptLibrary.systemPrompt(fabric);
-        System.out.println("fabric systemPrompt() length = " + prompt.length() + " chars");
+        System.out.println("fabric-legacy systemPrompt() length = " + prompt.length() + " chars");
 
         // The api block is the MOD flavor, generated from sdk/src/mod/java.
-        check("fabric prompt embeds the Mojang-typed VibeContext",
+        check("fabric-legacy prompt embeds the Mojang-typed VibeContext",
                 prompt.contains("MinecraftServer server();"));
-        check("fabric prompt embeds the CommandSourceStack-typed handler",
+        check("fabric-legacy prompt embeds the CommandSourceStack-typed handler",
                 prompt.contains("void run(CommandSourceStack src, String[] args)"));
-        check("fabric prompt embeds the ClientContext", prompt.contains("KeyLease key(String label"));
-        check("fabric prompt embeds the HudCanvas", prompt.contains("int textWidth(String s);"));
-        check("fabric prompt never embeds the Paper flavor",
+        check("fabric-legacy prompt embeds the ClientContext", prompt.contains("KeyLease key(String label"));
+        check("fabric-legacy prompt embeds the HudCanvas", prompt.contains("int textWidth(String s);"));
+        check("fabric-legacy prompt never embeds the Paper flavor",
                 !prompt.contains("void listen(Listener listener)") && !prompt.contains("BukkitTask"));
 
         // The curated hook table is the whole event surface; a missing entry is a
         // hook the model will never use.
         for (String hook : new String[] {"onPlayerJoin", "onPlayerQuit", "onServerTick", "onChat",
                 "onBlockBreak", "onUseBlock", "onUseItem", "onEntityDeath", "onPlayerDeath", "onRespawn"}) {
-            check("fabric prompt teaches ctx." + hook, prompt.contains(hook));
+            check("fabric-legacy prompt teaches ctx." + hook, prompt.contains(hook));
         }
 
-        check("fabric prompt bans net.fabricmc.*", prompt.contains("NEVER import `net.fabricmc.*`"));
-        check("fabric prompt bans registry content", prompt.contains("NEVER register content"));
-        check("fabric prompt bans mixins and Screen", prompt.contains("NEVER write a mixin, subclass `Screen`"));
-        check("fabric prompt teaches the 26.x Identifier rename",
+        check("fabric-legacy prompt bans net.fabricmc.*", prompt.contains("NEVER import `net.fabricmc.*`"));
+        check("fabric-legacy prompt bans registry content", prompt.contains("NEVER register content"));
+        check("fabric-legacy prompt bans mixins and Screen", prompt.contains("NEVER write a mixin, subclass `Screen`"));
+        check("fabric-legacy prompt teaches the 26.x Identifier rename",
                 prompt.contains("net.minecraft.resources.Identifier"));
-        check("fabric prompt carries the render-thread contract",
+        check("fabric-legacy prompt carries the render-thread contract",
                 prompt.contains("RENDER THREAD") && prompt.contains("silent and unreproducible"));
-        check("fabric prompt says a mod is not a Fabric mod",
+        check("fabric-legacy prompt says a mod is not a Fabric mod",
                 prompt.contains("A mod is NOT a\nFabric mod"));
 
-        check("fabric prompt carries the HUD few-shot", prompt.contains("WorldTimer"));
-        check("fabric prompt carries the keybind few-shot", prompt.contains("CoordToggle"));
-        check("fabric prompt carries the gameplay few-shot", prompt.contains("BlockTally"));
+        check("fabric-legacy prompt carries the HUD few-shot", prompt.contains("WorldTimer"));
+        check("fabric-legacy prompt carries the keybind few-shot", prompt.contains("CoordToggle"));
+        check("fabric-legacy prompt carries the gameplay few-shot", prompt.contains("BlockTally"));
         // By few-shot MARKER, not by mod name: the shared prompt body uses
         // "ChickenCreepers"/"SpeedPulse" as PascalCase naming examples on every
         // platform, so their absence is not the question - the absence of the
         // Paper EXAMPLES is.
-        check("fabric few-shots are the three loader ones, not Paper's",
+        check("fabric-legacy few-shots are the three loader ones, not Paper's",
                 !prompt.contains("\"icon\":\"CHICKEN\"") && !prompt.contains("\"icon\":\"SUGAR\""));
-        check("fabric prompt has no Bukkit vocabulary at all",
+        check("fabric-legacy prompt has no Bukkit vocabulary at all",
                 !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
 
         testNeoForgeProfilePrompt(prompt);
 
         if (failures == 0) {
-            System.out.println("PASS: the fabric profile's prompt teaches the mod flavor, "
+            System.out.println("PASS: the fabric-legacy profile's prompt teaches the mod flavor, "
                     + "the curated hooks, the loader bans and the render-thread contract");
         }
     }
 
     /**
      * The neoforge profile (ARCHITECTURE-V2 6.2, Phase E) — asserted as being
-     * the fabric one with a different role line, because that is the claim
-     * 10.4 makes and it is worth guarding.
+     * the fabric-legacy one with a different role line, because that is the
+     * claim 10.4 makes and it is worth guarding.
+     *
+     * <p>V3 note: the pairing moved from {@code FABRIC} to {@code FABRIC_LEGACY}
+     * when Phase 0 gave Fabric a native profile. NeoForge has no bytecode seams
+     * yet, so it stays on the v2 contract, and the claim still worth guarding is
+     * that the v2 contract is loader-neutral.
      *
      * <p>The sdk mod flavor is loader-neutral, so the two prompts SHOULD be
      * identical apart from the loader's name and its manifest file. If someone
@@ -435,14 +509,610 @@ public class LlmSelfTest {
                 // The "THIS SERVER" section names the profile it was built for,
                 // which for a loader is the loader's own name — still the same
                 // one word, just now appearing twice.
-                .replace("NeoForge 26.1+", "Fabric 26.1+");
-        check("the neoforge and fabric prompts differ ONLY in the loader's name "
+                .replace("NeoForge 26.1+", "Fabric 26.1+ (VibeContext)");
+        check("the neoforge and fabric-legacy prompts differ ONLY in the loader's name "
                         + "and manifest (the sdk mod flavor is loader-neutral)",
                 neutralised.equals(fabricPrompt));
         if (failures == 0) {
-            System.out.println("PASS: the neoforge profile is the fabric one with a NeoForge role line"
-                    + " (" + prompt.length() + " chars, diff = loader name + manifest)");
+            System.out.println("PASS: the neoforge profile is the fabric-legacy one with a NeoForge "
+                    + "role line (" + prompt.length() + " chars, diff = loader name + manifest)");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // V3 Phase 0 §D/§E
+    // ------------------------------------------------------------------
+
+    /**
+     * Prompt hygiene (V3 Phase 0 §D): Bukkit vocabulary belongs to the Paper
+     * profiles and nowhere else.
+     *
+     * <p>Three blocks used to live in {@code PromptLibrary}'s shared skeleton
+     * and therefore went into every prompt — teaching a loader mod about
+     * {@code Bukkit.getPluginManager()}, {@code ctx.listen} and
+     * {@code world.spawnEntity(...)}, none of which exist there. Tokens spent
+     * teaching a vocabulary the compiler will reject are not free, so this is
+     * asserted in both directions: gone from the loaders, still present on
+     * Paper.
+     */
+    private static void testPromptHygiene() {
+        String[] bukkitOnly = {"Bukkit.", "ctx.listen", "spawnEntity("};
+
+        for (String id : new String[] {PlatformProfiles.PAPER_MODERN_ID, PlatformProfiles.PAPER_LEGACY_ID}) {
+            String prompt = PromptLibrary.systemPrompt(PlatformProfiles.byId(id));
+            for (String marker : bukkitOnly) {
+                check("the " + id + " prompt still teaches '" + marker + "'", prompt.contains(marker));
+            }
+        }
+
+        for (String id : new String[] {PlatformProfiles.FABRIC_ID, PlatformProfiles.FABRIC_LEGACY_ID,
+                PlatformProfiles.NEOFORGE_ID}) {
+            String prompt = PromptLibrary.systemPrompt(PlatformProfiles.byId(id));
+            for (String marker : bukkitOnly) {
+                check("the " + id + " prompt does NOT carry the Bukkit-only text '" + marker + "'",
+                        !prompt.contains(marker));
+            }
+        }
+
+        // The hardcoded "two examples" said "two" while the loader profiles ship
+        // three and the native profile ships one.
+        check("the paper prompt counts its own few-shots",
+                PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                        .contains("The following two examples show"));
+        check("the fabric-legacy prompt counts its own few-shots (three)",
+                PromptLibrary.systemPrompt(PlatformProfiles.FABRIC_LEGACY)
+                        .contains("The following three examples show"));
+        check("the native fabric prompt counts its own few-shots (four)",
+                PromptLibrary.systemPrompt(PlatformProfiles.FABRIC)
+                        .contains("The following four examples show"));
+
+        if (failures == 0) {
+            System.out.println("PASS: Bukkit vocabulary is confined to the Paper profiles, and every "
+                    + "profile counts its own few-shots");
+        }
+    }
+
+    /**
+     * The native Fabric profile (V3 Phase 0 §E): the thesis, as a prompt.
+     *
+     * <p>What matters here is what is ABSENT. There is no VibeMod API in this
+     * mode — the mod is an ordinary {@code ModInitializer} and the host
+     * intercepts its {@code Event.register} calls in bytecode — so a prompt that
+     * still taught {@code Mod}/{@code VibeContext} would produce mods that do
+     * not compile, and one that still promised {@code ctx.configX} would produce
+     * config knobs no mod could read.
+     */
+    private static void testNativeFabricProfile() {
+        PlatformProfile fabric = PlatformProfiles.byId(PlatformProfiles.FABRIC_ID);
+        check("byId('fabric') now resolves the NATIVE profile",
+                PlatformProfiles.FABRIC_ID.equals(fabric.id())
+                        && fabric.displayName().contains("native"));
+        check("the native profile's entrypoint is ModInitializer",
+                "net.fabricmc.api.ModInitializer".equals(fabric.entrypointName()));
+
+        String prompt = PromptLibrary.systemPrompt(fabric);
+        System.out.println("fabric (native) systemPrompt() length = " + prompt.length() + " chars");
+
+        check("the native prompt says the main class implements ModInitializer",
+                prompt.contains("implements net.fabricmc.api.ModInitializer"));
+        check("the native prompt says there is no fabric.mod.json and no mixins",
+                prompt.contains("no `fabric.mod.json`") || prompt.contains("There is no\n"
+                        + "            `fabric.mod.json`") || prompt.contains("fabric.mod.json"));
+        check("the native prompt promises automatic teardown",
+                prompt.contains("tracked for you"));
+        check("the native prompt bans reflection, threads and sockets",
+                prompt.contains("java.lang.reflect.*") && prompt.contains("Executors")
+                        && prompt.contains("java.net.*"));
+        check("the native prompt bans Event.addPhaseOrdering",
+                prompt.contains("Event.addPhaseOrdering"));
+        // V3 Phase 1 §F: commands, keybinds, HUD and screens are OPEN now, and
+        // the prompt has to say so rather than keep banning them. Registries and
+        // resources are still the ones that are not there.
+        check("the native prompt teaches hot commands",
+                prompt.contains("CommandRegistrationCallback") && prompt.contains("COMMANDS are hot"));
+        check("the native prompt teaches the keybind pool and its honest caveat",
+                prompt.contains("KeyMappingHelper.registerKeyMapping")
+                        && prompt.contains("returns a DIFFERENT")
+                        && prompt.contains("may not be the one you asked"));
+        check("the native prompt teaches the HUD element",
+                prompt.contains("HudElementRegistry.addLast"));
+        check("the native prompt allows Screen subclassing",
+                prompt.contains("net.minecraft.client.gui.screens.Screen"));
+        check("the native prompt teaches the client entrypoint",
+                prompt.contains("net.fabricmc.api.ClientModInitializer")
+                        && prompt.contains("onInitializeClient()"));
+        check("the native prompt carries the render-thread contract",
+                prompt.contains("RENDER THREAD"));
+        check("the native prompt restates the singleplayer shared-JVM race",
+                prompt.contains("share one JVM") && prompt.contains("NEVER read or")
+                        && prompt.contains("write server state from client code"));
+        check("the native prompt still names what is NOT available",
+                prompt.contains("STILL NOT AVAILABLE")
+                        && prompt.contains("ClientCommandRegistrationCallback"));
+
+        // ---- V3 Phase 3 §C: registries, for items and entity types only ----
+        check("the native prompt lifts the registry ban for items and entity types",
+                prompt.contains("REGISTERING REAL CONTENT")
+                        && prompt.contains("Registry.register(BuiltInRegistries.ITEM")
+                        && !prompt.contains("NEVER register content in JAVA"));
+        check("the native prompt teaches 26.x's setId-before-construction rule",
+                prompt.contains("needs `setId(...)` BEFORE the item is constructed"));
+        check("the native prompt says there is no SwordItem any more",
+                prompt.contains("no `SwordItem` class any more")
+                        && prompt.contains(".sword(ToolMaterial.IRON, 4.0F, -2.4F)"));
+        check("the native prompt allows subclassing Item for behaviour",
+                prompt.contains("Subclass `Item` for behaviour"));
+        check("the native prompt states the singleplayer/LAN-host limit and the refusal",
+                prompt.contains("SINGLEPLAYER AND LAN-HOST ONLY")
+                        && prompt.contains("the host REFUSES the"));
+        // V4 Phase 1 reversed this one: blocks are real content now. The block
+        // rules themselves are asserted in testBlockContentPrompt().
+        check("the native prompt no longer refuses blocks",
+                !prompt.contains("not blocks (their state ids are baked into every loaded"));
+        check("the native prompt teaches entity types and their default attributes",
+                prompt.contains("EntityType.Builder.of(MyMob::new, MobCategory.CREATURE)")
+                        && prompt.contains("FabricDefaultAttributeRegistry.register"));
+        check("the native prompt says registered items land in a creative tab",
+                prompt.contains("creative INGREDIENTS tab"));
+
+        // ---- V3 Phase 2 §E: resources ----
+        check("the native prompt lifts the resource ban and teaches the two roots",
+                prompt.contains("RESOURCE FILES")
+                        && prompt.contains("`data/**` and `assets/**`")
+                        && !prompt.contains("resource packs, and `ClientCommandRegistrationCallback`"));
+        check("the native prompt states the canonical namespace rule",
+                prompt.contains("YOUR NAMESPACE IS `vibemod_<name lowercased>`"));
+        check("the native prompt says which data types are live and which wait for a world load",
+                prompt.contains("LIVE IMMEDIATELY, gone again on disable")
+                        && prompt.contains("ONLY ON THE NEXT WORLD LOAD")
+                        && prompt.contains("enchantments, dialogs, damage types"));
+        check("the native prompt teaches the .png.grid texture format",
+                prompt.contains(".png.grid") && prompt.contains("\"palette\"")
+                        && prompt.contains("at most 64x64"));
+        check("the native prompt says assets are inert on a dedicated server",
+                prompt.contains("stored and inert"));
+        check("the native prompt teaches the registry-free custom item",
+                prompt.contains("A \"CUSTOM ITEM\" WITHOUT A REGISTRY")
+                        && prompt.contains("minecraft:item_model"));
+        check("the native prompt allows resource paths in files[]",
+                prompt.contains("or a RESOURCE FILE whose \"path\" starts with"));
+        check("every other profile still accepts .java files ONLY",
+                PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                        .contains("has a \"path\" ending in \".java\"")
+                        && !PromptLibrary.systemPrompt(PlatformProfiles.PAPER_MODERN)
+                                .contains("RESOURCE FILE"));
+
+        // The resource few-shot, and specifically the JSON shapes that were read
+        // off the 26.2 jar rather than recalled — the two-file item model layout
+        // is the one a model trained on 1.20 gets wrong. RubySword carries every
+        // shape RubyCharm used to (V3 Phase 3 §C), plus the registration.
+        check("the resource few-shot ships a recipe, an advancement, a model and a grid texture",
+                prompt.contains("data/vibemod_rubysword/recipe/ruby_sword.json")
+                        && prompt.contains("data/vibemod_rubysword/advancement/ruby_sword.json")
+                        && prompt.contains("assets/vibemod_rubysword/models/item/ruby_sword.json")
+                        && prompt.contains(
+                                "assets/vibemod_rubysword/textures/item/ruby_sword.png.grid"));
+        check("the resource few-shot uses the 26.x two-file item model layout",
+                prompt.contains("assets/vibemod_rubysword/items/ruby_sword.json")
+                        && prompt.contains("minecraft:item/handheld"));
+        check("the few-shot's recipe is the 26.2 shape (verified against vanilla data)",
+                prompt.contains("minecraft:crafting_shaped"));
+        check("the components-on-a-vanilla-item answer survives in the cheat sheet",
+                prompt.contains("minecraft:custom_name") && prompt.contains("minecraft:item_model")
+                        && prompt.contains("minecraft:enchantment_glint_override"));
+        check("the few-shot's advancement uses the real recipe_crafted trigger field",
+                prompt.contains("minecraft:recipe_crafted") && prompt.contains("recipe_id"));
+        check("the few-shot's namespace is the canonical one",
+                prompt.contains("vibemod_rubysword") && !prompt.contains("\"rubysword:"));
+        check("the few-shot's lang key matches the id the item registry derives",
+                prompt.contains("item.vibemod_rubysword.ruby_sword"));
+        check("the few-shot registers its item the way a normal Fabric mod does",
+                prompt.contains("Registry.register(BuiltInRegistries.ITEM, ID")
+                        && prompt.contains("extends Item")
+                        && prompt.contains("InteractionResult use(Level level"));
+        check("the native prompt fits its budget (" + prompt.length() + " <= "
+                        + NATIVE_FABRIC_BUDGET + " chars)",
+                prompt.length() <= NATIVE_FABRIC_BUDGET);
+        check("the native prompt no longer names the era's non-existent KeyBindingHelper",
+                !prompt.contains("KeyBindingHelper"));
+        check("the native prompt carries the Yarn -> Mojang rename table",
+                prompt.contains("`World` is `Level`") && prompt.contains("`PlayerEntity` is `Player`")
+                        && prompt.contains("`Text` is `Component`"));
+        check("the native prompt carries the 26.x Identifier rename",
+                prompt.contains("net.minecraft.resources.Identifier"));
+        check("the native prompt says config knobs do not exist yet",
+                prompt.contains("THIS MODE HAS NO CONFIG KNOBS"));
+
+        // Absences: the whole point of the profile.
+        check("the native prompt does NOT embed the VibeContext api block",
+                !prompt.contains("--- com/gijsm/vibemod/api/VibeContext.java ---"));
+        check("the native prompt never teaches ctx.configInt",
+                !prompt.contains("ctx.configInt") && !prompt.contains("configBool"));
+        check("the native prompt never tells the mod to implement Mod",
+                !prompt.contains("implements Mod {"));
+        check("the native prompt has no Bukkit vocabulary at all",
+                !prompt.contains("org.bukkit") && !prompt.contains("@EventHandler"));
+
+        // The few-shots ARE plain Fabric mods.
+        check("the native few-shot is a plain Fabric mod",
+                prompt.contains("implements ModInitializer")
+                        && prompt.contains("AttackBlockCallback.EVENT.register")
+                        && prompt.contains("ServerTickEvents.END_SERVER_TICK.register"));
+        check("the native few-shots import no VibeMod api",
+                !prompt.contains("import com.gijsm.vibemod.api"));
+        check("the native few-shots ship no config knobs",
+                !prompt.contains("\"config\":[{\"key\""));
+        check("the Phase 1 few-shot implements BOTH entrypoints",
+                prompt.contains("implements ModInitializer, ClientModInitializer"));
+        check("the Phase 1 few-shot registers a command, a keybind and a HUD in one mod",
+                prompt.contains("CommandRegistrationCallback.EVENT.register")
+                        && prompt.contains("KeyMappingHelper.registerKeyMapping")
+                        && prompt.contains("HudElementRegistry.addLast"));
+        check("the Phase 1 few-shot keeps the mapping it was handed back",
+                prompt.contains("toggle.consumeClick()"));
+
+        // V3 Phase 4: found by the live demo. The model wrote a 1.20-era
+        // ingredient object into a smelting recipe, the datapack dropped the
+        // recipe while loading, and NOTHING failed — the mod loaded, reported
+        // success, and simply could not be crafted.
+        check("the native prompt states that an ingredient is a string, not an object",
+                prompt.contains("AN INGREDIENT IS A STRING, NOT AN OBJECT")
+                        && prompt.contains("{\"item\": \"minecraft:redstone\"}"));
+        check("and that it covers the recipe types the few-shot does not show",
+                prompt.contains("smelting/blasting/smoking/campfire/stonecutting"));
+        check("and warns that a bad ingredient fails silently rather than at build time",
+                prompt.contains("does NOT fail your build"));
+        // Phase 3 replaced RubyCharm with RubySword; one sentence still sent the
+        // model looking for an example that is no longer in the prompt.
+        check("the native prompt names an example it actually ships",
+                !prompt.contains("RubyCharm") && prompt.contains("The RubySword example below"));
+
+        if (failures == 0) {
+            System.out.println("PASS: the native fabric profile teaches an ordinary Fabric mod, "
+                    + "with no VibeMod api anywhere in it");
+        }
+    }
+
+    /**
+     * V4 Phase 1: blocks are registerable content now, and the prompt has to
+     * teach them in 26.2's vocabulary rather than the 1.20 one a trained model
+     * reaches for.
+     *
+     * <p>The four dead names are asserted absent from EVERY profile, not just the
+     * native Fabric one. None of them exists in this era, and a model that sees
+     * {@code ItemBlockRenderTypes} anywhere in a prompt will reach for it — which
+     * compiles nowhere and costs a repair round to discover.
+     */
+    private static void testBlockContentPrompt() {
+        String[] deadNames = {"ItemBlockRenderTypes", "BlockRenderLayerMap",
+                "FabricBlockSettings", "AbstractBlock.Settings"};
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            String any = PromptLibrary.systemPrompt(profile);
+            for (String dead : deadNames) {
+                check("the " + profile.id() + " prompt never names the dead 1.20-era `"
+                        + dead + "`", !any.contains(dead));
+            }
+        }
+
+        String prompt = PromptLibrary.systemPrompt(PlatformProfiles.FABRIC);
+
+        // ---- the rules ----
+        check("the native prompt lists blocks as registerable content",
+                prompt.contains("items, blocks and entity types only")
+                        && prompt.contains("You MAY register real items, blocks and entity types"));
+        check("the native prompt still refuses every other registry",
+                prompt.contains("NO OTHER REGISTRY: not block entities, enchantments, biomes"));
+        check("the native prompt puts setId BEFORE construction for blocks too, with the reason",
+                prompt.contains("BlockBehaviour.Properties.of().mapColor(MapColor.COLOR_RED)")
+                        && prompt.contains("`setId(...)` goes BEFORE construction here too")
+                        && prompt.contains("bakes the description id AND the loot-table path"));
+        check("the native prompt teaches the paired BlockItem under the same id",
+                prompt.contains("Registry.register(BuiltInRegistries.BLOCK, id, new Block(")
+                        && prompt.contains("`new BlockItem(block, new Item.Properties()"
+                                + ".useBlockDescriptionPrefix()"));
+        check("the native prompt teaches the state budget in units a model can act on",
+                prompt.contains("BUDGET YOUR BLOCKSTATES") && prompt.contains("about 402 are left")
+                        && prompt.contains("PREFER PLAIN CUBES with no blockstate properties")
+                        && prompt.contains("a fence 32, a door 64, stairs"));
+        check("and says what happens when the budget runs out",
+                prompt.contains("tells you how many states were left"));
+        check("the native prompt demands the blockstates file and says what is lost without it",
+                prompt.contains("`assets/<ns>/blockstates/<name>.json` = `{\"variants\": "
+                                + "{\"\": {\"model\":")
+                        && prompt.contains("WITHOUT IT THE BLOCK IS THE MISSING MODEL"));
+        check("the native prompt says to parent the block model to cube_all, and why",
+                prompt.contains("minecraft:block/cube_all")
+                        && prompt.contains("`\"particle\": \"#all\"` so break particles work"));
+        check("the native prompt says the loot table is what makes a block drop itself",
+                prompt.contains("`data/<ns>/loot_table/blocks/<name>.json` or the block drops "
+                                + "NOTHING")
+                        && prompt.contains("`<ns>:blocks/<path>`"));
+        check("the native prompt names the pickaxe tag",
+                prompt.contains("data/minecraft/tags/block/mineable/pickaxe.json"));
+        // Stated WITHOUT naming the dead classes, on purpose: the four names above
+        // must not appear in a prompt even inside a denial, because a model that
+        // reads one reaches for it.
+        check("the native prompt forbids registering a render layer, and says where it comes from",
+                prompt.contains("NEVER REGISTER A RENDER LAYER")
+                        && prompt.contains("never put a `render_type` key in a")
+                        && prompt.contains("derived from the texture's own alpha"));
+
+        // ---- the few-shot ----
+        check("the block few-shot ships the blockstate, both models and the block texture",
+                prompt.contains("assets/vibemod_rubyblock/blockstates/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/models/block/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/items/ruby_block.json")
+                        && prompt.contains("assets/vibemod_rubyblock/models/item/ruby_block.json")
+                        && prompt.contains(
+                                "assets/vibemod_rubyblock/textures/block/ruby_block.png.grid"));
+        check("the block few-shot ships the loot table and the pickaxe tag",
+                prompt.contains("data/vibemod_rubyblock/loot_table/blocks/ruby_block.json")
+                        && prompt.contains("data/minecraft/tags/block/mineable/pickaxe.json"));
+        check("the block few-shot's lang key is the one the block derives",
+                prompt.contains("block.vibemod_rubyblock.ruby_block"));
+        checkFewShotPlanMatchesFiles(prompt, "--- Example 4 ---", "example 4 (RubyBlock)");
+
+        // The few-shot has to survive the SAME path a real response takes — the
+        // resource-path rules, the pixel-grid parse and the new blockstates check
+        // included. A few-shot the parser would reject is a few-shot teaching the
+        // model to be rejected.
+        try {
+            GeneratedProject block = PromptLibrary.parse(fewShotJson(prompt, "--- Example 4 ---"));
+            check("the block few-shot parses through the normal generated-project path",
+                    "RubyBlock".equals(block.name()) && block.files().size() == 9);
+            check("the block few-shot leads with its Java",
+                    "RubyBlock.java".equals(block.files().get(0).path()));
+        } catch (Exception e) {
+            fail("the block few-shot did not parse: " + e);
+        }
+
+        // ---- the validation, in both directions ----
+        String registersABlock = "Registry.register(\\n    BuiltInRegistries.BLOCK, ID, block);";
+        expectParseFailure("a block registration with no blockstates file",
+                blockProject(registersABlock, false));
+        try {
+            PromptLibrary.parse(blockProject(registersABlock, false));
+        } catch (IllegalArgumentException e) {
+            check("the blockstates diagnostic names the file that registers the block",
+                    e.getMessage().contains("Blocky.java"));
+            check("the blockstates diagnostic says what to add",
+                    e.getMessage().contains("blockstates") && e.getMessage().contains("variants"));
+        }
+        try {
+            PromptLibrary.parse(blockProject(registersABlock, true));
+            check("a block registration WITH its blockstates file parses", true);
+        } catch (Exception e) {
+            fail("a block registration with its blockstates file was rejected: " + e);
+        }
+        try {
+            PromptLibrary.parse(blockProject("BuiltInRegistries.BLOCK.getValue(ID);", false));
+            check("merely LOOKING UP a vanilla block does not demand a blockstates file", true);
+        } catch (Exception e) {
+            fail("a block lookup was mistaken for a block registration: " + e);
+        }
+
+        if (failures == 0) {
+            System.out.println("PASS: the native fabric profile teaches 26.2 blocks - the state "
+                    + "budget, the nine-file shape, and no render layer anywhere");
+        }
+    }
+
+    /** A minimal full-shape response that registers a block, with or without its blockstate. */
+    private static String blockProject(String javaBody, boolean withBlockstate) {
+        String blockstate = withBlockstate
+                ? ",{\"path\":\"assets/vibemod_blocky/blockstates/ruby.json\",\"content\":"
+                        + "\"{\\\"variants\\\": {\\\"\\\": {\\\"model\\\": "
+                        + "\\\"vibemod_blocky:block/ruby\\\"}}}\"}"
+                : "";
+        return "{\"name\":\"Blocky\",\"description\":\"d\",\"mainClass\":\"Blocky\","
+                + "\"files\":[{\"path\":\"Blocky.java\",\"content\":\"" + javaBody + "\"}"
+                + blockstate + "]}";
+    }
+
+    /** The raw assistant JSON of one worked example, exactly as the model sees it. */
+    private static String fewShotJson(String prompt, String marker) {
+        int assistantIdx = prompt.indexOf("Assistant: ", prompt.indexOf(marker));
+        int jsonStart = assistantIdx + "Assistant: ".length();
+        return prompt.substring(jsonStart, prompt.indexOf('\n', jsonStart));
+    }
+
+    /**
+     * A budget print for every profile.
+     *
+     * <p>Not an assertion with a magic number — prompt length is a design
+     * choice, not a bug — but the one number nobody looks at until it is a
+     * problem, and every generation pays for it on every round.
+     */
+    private static void testPromptBudgets() {
+        System.out.println("prompt budgets (chars, ~tokens at 4 chars/token):");
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            String prompt = PromptLibrary.systemPrompt(profile);
+            System.out.printf("  %-14s %7d chars  ~%6d tokens  (%d few-shot%s)%n",
+                    profile.id(), prompt.length(), prompt.length() / 4,
+                    profile.fewShots().size(), profile.fewShots().size() == 1 ? "" : "s");
+            check(profile.id() + " builds a non-trivial prompt", prompt.length() > 2000);
+        }
+
+        // V3 Phase 4 §D. What a host actually SENDS is the profile plus its
+        // "THIS HOST" block, so that is the number the budget has to hold —
+        // printing the profile alone would under-report every real request.
+        String server = PromptLibrary.systemPrompt(
+                PromptFacts.unknown(PlatformProfiles.FABRIC), PlatformProfiles.fabricHostFacts(true));
+        String client = PromptLibrary.systemPrompt(
+                PromptFacts.unknown(PlatformProfiles.FABRIC), PlatformProfiles.fabricHostFacts(false));
+        System.out.printf("  %-14s %7d chars  ~%6d tokens  (as SENT by a dedicated server)%n",
+                "fabric+host", server.length(), server.length() / 4);
+        System.out.printf("  %-14s %7d chars  ~%6d tokens  (as SENT by a client)%n",
+                "fabric+host", client.length(), client.length() / 4);
+        check("the fabric prompt AS SENT still fits its budget ("
+                        + Math.max(server.length(), client.length()) + " <= "
+                        + NATIVE_FABRIC_BUDGET + " chars)",
+                Math.max(server.length(), client.length()) <= NATIVE_FABRIC_BUDGET);
+
+        // The overload has to be free when nobody uses it, or every host that
+        // supplies no facts is paying for a feature it did not ask for.
+        for (PlatformProfile profile : PlatformProfiles.all()) {
+            check(profile.id() + ": a null host-facts block reproduces the prompt byte for byte",
+                    PromptLibrary.systemPrompt(PromptFacts.unknown(profile), null)
+                            .equals(PromptLibrary.systemPrompt(profile)));
+            check(profile.id() + ": a blank host-facts block does too",
+                    PromptLibrary.systemPrompt(PromptFacts.unknown(profile), "   \n ")
+                            .equals(PromptLibrary.systemPrompt(profile)));
+        }
+        check("a host-facts block is announced under its own heading",
+                server.contains("================ THIS HOST ================"));
+        check("the dedicated-server block says the registry is refused HERE",
+                server.contains("DEDICATED SERVER")
+                        && server.contains("Registering items, blocks or entity types is REFUSED"));
+        check("the client block says the whole surface works",
+                client.contains("MINECRAFT CLIENT")
+                        && client.contains("registering items, blocks and entity types is allowed"));
+        check("the two blocks disagree, which is the entire point",
+                !PromptLibrary.systemPrompt(PromptFacts.unknown(PlatformProfiles.FABRIC),
+                        PlatformProfiles.fabricHostFacts(true))
+                        .equals(client));
+        check("host facts land BEFORE the frozen api, so they frame what follows",
+                server.indexOf("THIS HOST") < server.indexOf("FROZEN API"));
+    }
+
+    /**
+     * V3 Phase 4 §D: the two prompts that are built at repair time, rather than
+     * at boot, are the ones nobody ever looks at — and a repair round pays for
+     * them on top of a system prompt that is already near budget.
+     */
+    private static void testRepairPromptBudget() {
+        // A deliberately awful diagnostics blob: 40 errors, each with javac's
+        // full three-line shape. Far past anything a real round produces.
+        StringBuilder diagnostics = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            diagnostics.append("[ERROR] string:///vibemod/foo/Foo.java:").append(i)
+                    .append(" - cannot find symbol\n  symbol:   method notAThing")
+                    .append(i).append("(java.lang.String)\n  location: class ")
+                    .append("com.gijsm.vibemod.api.VibeContext\n");
+        }
+        String bare = PromptLibrary.repairPrompt(diagnostics.toString(), (String) null);
+        String hinted = PromptLibrary.repairPrompt(diagnostics.toString(),
+                "API HINTS\n" + "  VibeContext.command(String, String, ModCommandHandler)\n".repeat(60));
+        System.out.printf("  repair prompt  %7d chars bare, %7d chars with hints%n",
+                bare.length(), hinted.length());
+        check("the repair prompt is bounded without hints (" + bare.length() + " < 20000)",
+                bare.length() < 20000);
+        check("the repair prompt stays bounded with a large hint block ("
+                        + hinted.length() + " < 30000)", hinted.length() < 30000);
+        check("a null hint block reproduces the old repair prompt byte for byte",
+                PromptLibrary.repairPrompt(diagnostics.toString(), (String) null)
+                        .equals(PromptLibrary.repairPrompt(diagnostics.toString(), "  ")));
+        check("the repair prompt carries the diagnostics it was given",
+                bare.contains("notAThing39"));
+        if (failures == 0) {
+            System.out.println("PASS: the repair prompt and its hint block stay bounded");
+        }
+    }
+
+    /**
+     * The {@link SymbolOracle} (V3 Phase 0 §D), on both backends' wordings.
+     *
+     * <p>{@code VibeContext} stands in for a game class here: it is the only
+     * "interesting" owner (§D's list) that exists on this module's test runtime,
+     * and what is under test is the parsing and the fuzzy match, not which jar
+     * the class came from.
+     */
+    private static void testSymbolOracle() {
+        SymbolOracle oracle = SymbolOracle.forLoader(LlmSelfTest.class.getClassLoader());
+
+        // javac's three-line shape.
+        String javac = "[ERROR] string:///vibemod/foo/Foo.java:12 - cannot find symbol\n"
+                + "  symbol:   method configIntt(java.lang.String)\n"
+                + "  location: interface com.gijsm.vibemod.api.VibeContext";
+        String javacHints = oracle.hints(javac);
+        check("oracle: javac 'cannot find symbol' produces a hints block",
+                javacHints.contains("API HINTS"));
+        check("oracle: javac hints name the real method (" + firstLineOf(javacHints) + ")",
+                javacHints.contains("configInt"));
+        check("oracle: javac hints name the owner",
+                javacHints.contains("com.gijsm.vibemod.api.VibeContext"));
+
+        // ECJ names the type by its SIMPLE name; the oracle resolves it from a
+        // fully-qualified mention elsewhere in the same diagnostics.
+        String ecj = "[ERROR] Foo.java:5 - The method configIntt(String) is undefined "
+                + "for the type VibeContext\n"
+                + "[ERROR] Foo.java:2 - The import com.gijsm.vibemod.api.VibeContext is fine";
+        String ecjHints = oracle.hints(ecj);
+        check("oracle: ECJ's 'is undefined for the type' produces a hints block",
+                ecjHints.contains("API HINTS"));
+        check("oracle: ECJ hints name the real method (" + firstLineOf(ecjHints) + ")",
+                ecjHints.contains("configInt"));
+
+        // V3 Phase 4 §C. The shape a SECOND repair round produces: the name is
+        // right, the arguments are not. Verbatim javac wording, from the live
+        // demo's own log (with ServerPlayer.teleportTo swapped for the only
+        // overloaded method on this module's test runtime).
+        String overload = "[ERROR] /vibemod/foo/Foo.java:65 - no suitable method found for "
+                + "repeat(long,long,long,java.lang.Runnable)\n"
+                + "    method com.gijsm.vibemod.api.VibeContext.repeat(long,long,java.lang.Runnable) "
+                + "is not applicable\n"
+                + "      (actual and formal argument lists differ in length)";
+        String overloadHints = oracle.hints(overload);
+        check("oracle: javac's 'is not applicable' produces a hints block",
+                overloadHints.contains("API HINTS"));
+        check("oracle: it does NOT claim the method is missing, because it is not",
+                !overloadHints.contains("has no `repeat`"));
+        check("oracle: it says the name is right and the arguments are not",
+                overloadHints.contains("repeat exists, but NOT with the arguments you passed"));
+        check("oracle: it lists EVERY real overload, shortest first",
+                overloadHints.contains("BukkitTask repeat(long, Runnable)")
+                        && overloadHints.contains("BukkitTask repeat(long, long, Runnable)")
+                        && overloadHints.indexOf("repeat(long, Runnable)")
+                                < overloadHints.indexOf("repeat(long, long, Runnable)"));
+        check("oracle: the overload list is exact-name only, with no fuzzy neighbours",
+                !overloadHints.contains("configInt"));
+
+        // ECJ words the same failure completely differently.
+        String ecjOverload = "[ERROR] Foo.java:65 - The method repeat(long, long, Runnable) in the "
+                + "type VibeContext is not applicable for the arguments (long, long, long, Runnable)\n"
+                + "[ERROR] Foo.java:2 - see com.gijsm.vibemod.api.VibeContext";
+        String ecjOverloadHints = oracle.hints(ecjOverload);
+        check("oracle: ECJ's 'is not applicable for the arguments' produces a hints block",
+                ecjOverloadHints.contains("API HINTS"));
+        check("oracle: and reaches the same verdict as javac's wording",
+                ecjOverloadHints.contains("repeat exists, but NOT with the arguments you passed"));
+
+        // Quiet where it has nothing to say, and never throwing.
+        check("oracle: no hints for an unrelated diagnostic",
+                oracle.hints("[ERROR] Foo.java:3 - ';' expected").isEmpty());
+        check("oracle: no hints for an uninteresting owner (java.util.List)",
+                oracle.hints("cannot find symbol\n  symbol: method sizee()\n"
+                        + "  location: interface java.util.List").isEmpty());
+        check("oracle: empty and null input are safe",
+                oracle.hints("").isEmpty() && oracle.hints(null).isEmpty());
+        check("oracle: a resolver that always fails is safe",
+                new SymbolOracle(name -> null).hints(javac).isEmpty());
+
+        // And the prompt overload actually carries them.
+        String withHints = PromptLibrary.repairPrompt(javac, javacHints);
+        check("repairPrompt(diagnostics, hints) includes the diagnostics",
+                withHints.contains("cannot find symbol"));
+        check("repairPrompt(diagnostics, hints) includes the hints",
+                withHints.contains("API HINTS"));
+        check("repairPrompt(diagnostics, hints) still asks for the corrected project",
+                withHints.contains("\"edits\""));
+        check("repairPrompt(diagnostics, null) is exactly the one-argument form",
+                PromptLibrary.repairPrompt(javac, (String) null).equals(PromptLibrary.repairPrompt(javac))
+                        && PromptLibrary.repairPrompt(javac, "  ")
+                                .equals(PromptLibrary.repairPrompt(javac)));
+
+        if (failures == 0) {
+            System.out.println("PASS: the symbol oracle reads both javac and ECJ diagnostics and "
+                    + "feeds the repair prompt");
+        }
+    }
+
+    private static String firstLineOf(String text) {
+        if (text == null || text.isEmpty()) {
+            return "(empty)";
+        }
+        String[] lines = text.split("\n", -1);
+        return lines.length > 1 ? lines[1] : lines[0];
     }
 
     private static void testParseIconMapping() {

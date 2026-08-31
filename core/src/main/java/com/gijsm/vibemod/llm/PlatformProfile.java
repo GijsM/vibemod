@@ -38,6 +38,17 @@ import java.util.List;
  * @param pluginDescriptor   the exporter's descriptor template — {@code api-version} on Paper,
  *                           {@code fabric.mod.json} / {@code neoforge.mods.toml} on the loaders (§6.3)
  * @param iconInstruction    what a valid {@code "icon"} value is on this platform/era
+ * @param entrypointName     the interface the mod's {@code mainClass} implements — {@code "Mod"}
+ *                           everywhere until V3, {@code net.fabricmc.api.ModInitializer} in the
+ *                           native Fabric profile (V3 Phase 0 §E)
+ * @param configContract     the config-knob rules. A profile-level string because a native V3 mod
+ *                           has no {@code VibeContext} and therefore no {@code ctx.configX} to read
+ *                           knobs with — telling it to read them anyway would produce a mod that
+ *                           cannot compile
+ * @param filesContract      what may appear in {@code files[]}. Profile-level since V3 Phase 2 §E:
+ *                           every profile but the native Fabric one accepts {@code .java} and
+ *                           nothing else, and that one also accepts a {@code data/**}/{@code assets/**}
+ *                           resource tree
  */
 public record PlatformProfile(
         String id,
@@ -49,7 +60,10 @@ public record PlatformProfile(
         String threadingContract,
         List<FewShot> fewShots,
         String pluginDescriptor,
-        String iconInstruction) {
+        String iconInstruction,
+        String entrypointName,
+        String configContract,
+        String filesContract) {
 
     /** One worked example pair shown to the model. */
     public record FewShot(String user, String assistant) {

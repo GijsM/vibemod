@@ -1,0 +1,7 @@
+LlmSelfTest.class
+CompilerSelfTest$ThrowawayClassLoader.class
+com/gijsm/vibemod/llm/CatalogSelfTest.class
+StoreSelfTest$ThrowingRunnable.class
+com/gijsm/vibemod/runtime/ErrorsSelfTest.class
+CompilerSelfTest.class
+StoreSelfTest.class

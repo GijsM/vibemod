@@ -1,5 +1,6 @@
 package com.gijsm.vibemod.runtime;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -18,6 +19,7 @@ import com.gijsm.vibemod.gen.GeneratedProject;
 import com.gijsm.vibemod.platform.CommandBridge;
 import com.gijsm.vibemod.platform.Messenger;
 import com.gijsm.vibemod.platform.ModFailure;
+import com.gijsm.vibemod.platform.Registration;
 import com.gijsm.vibemod.platform.Sender;
 import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.store.ModConfigs;
@@ -48,6 +50,19 @@ public final class ModLifecycle implements ModFailure {
     private final DebugEcho debug;
     private final ModDispatch dispatch;
     private final LinkedHashMap<String, LoadedMod> mods = new LinkedHashMap<>();
+    /** V3 Phase 2 §B: the host's resource channel, or {@link ModContent#NONE}. */
+    private volatile ModContent content = ModContent.NONE;
+    /**
+     * V3 Phase 3 §A: notified when a mod is unloaded — deleted from the store,
+     * not merely disabled.
+     *
+     * <p>A separate hook rather than a branch inside {@link #unload} because the
+     * one thing that cares is a loader-side registry ledger, and {@code core}
+     * must not know what a registry is. The distinction it needs is exactly the
+     * one {@link #unload} already draws: {@link #disable} is reversible and
+     * {@code unload} is not, so only the latter is a tombstone.
+     */
+    private final List<java.util.function.Consumer<String>> unloadListeners = new ArrayList<>();
 
     public ModLifecycle(ModHost host, TickScheduler scheduler, Messenger messenger, Watchdog watchdog,
                         ModConfigs configs, ModErrors errors, DebugEcho debug) {
@@ -68,6 +83,14 @@ public final class ModLifecycle implements ModFailure {
     /** The shared guarded-entry helper, for host bridges that dispatch into mod code. */
     public ModDispatch dispatch() {
         return dispatch;
+    }
+
+    /**
+     * Installs the host's resource channel (V3 Phase 2 §B). Null clears it back
+     * to {@link ModContent#NONE}; a host that has none simply never calls this.
+     */
+    public void setContent(ModContent content) {
+        this.content = content == null ? ModContent.NONE : content;
     }
 
     /** Compile output -> live mod. Replaces (tears down) an existing mod of the same name. Main thread. */
@@ -134,6 +157,14 @@ public final class ModLifecycle implements ModFailure {
         return true;
     }
 
+    /**
+     * Registers a listener for {@link #unload} (V3 Phase 3 §A). Never called
+     * for a plain {@link #disable}, which is the whole point of the hook.
+     */
+    public void onUnload(java.util.function.Consumer<String> listener) {
+        unloadListeners.add(listener);
+    }
+
     /** Disable + forget entirely. */
     public void unload(String name) {
         assertMainThread();
@@ -144,6 +175,14 @@ public final class ModLifecycle implements ModFailure {
         configs.forget(name);
         errors.forget(name);
         debug.forget(name);
+        for (java.util.function.Consumer<String> listener : unloadListeners) {
+            try {
+                listener.accept(name);
+            } catch (Throwable t) {
+                Logger.getLogger(ModLifecycle.class.getName())
+                        .log(Level.WARNING, "An unload listener threw for " + name, t);
+            }
+        }
     }
 
     /** Disable ALL mods. The {@code /vibe panic} path; must be on the main thread. */
@@ -285,6 +324,26 @@ public final class ModLifecycle implements ModFailure {
             throw e;
         }
         lm.handle.enabled = true;
+
+        // V3 Phase 2 §B, and it happens AFTER the entrypoint on purpose: a mod's
+        // own code has to be running before its recipes appear, not the other
+        // way round, and the CONTENT registration then lands last in the
+        // handle's list, which is the order ModHandle.drain() guarantees anyway.
+        //
+        // A content failure degrades the mod rather than failing the load. The
+        // Java half is already live and working; refusing the whole mod because
+        // one recipe file could not be written would be a worse answer than a
+        // journalled error and a mod that runs.
+        try {
+            Registration installed = content.install(lm.handle);
+            if (installed != null) {
+                lm.handle.track(ModHandle.Kind.CONTENT, installed);
+            }
+        } catch (Throwable t) {
+            Logger.getLogger("VibeMod." + lm.displayName)
+                    .log(Level.WARNING, "Could not install resources for " + lm.displayName, t);
+            errors.note(lm.displayName, t, "resources");
+        }
     }
 
     /** Full teardown: onDisable, then revoke everything. Never throws. */

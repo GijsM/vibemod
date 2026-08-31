@@ -1,0 +1,29 @@
+{
+  "schema": 3,
+  "platform": "fabric",
+  "mcVersion": "26.2",
+  "side": "server",
+  "name": "PaletteCanary",
+  "description": "Forces a global blockstate palette crossing and checks the world survived it.",
+  "usage": "",
+  "manual": "",
+  "icon": "STONE",
+  "mainClass": "vibemod.palettecanary.PaletteCanary",
+  "currentVersion": 1,
+  "enabled": true,
+  "creator": "palette-gate",
+  "versions": [
+    {
+      "version": 1,
+      "prompt": "the V4 palette boundary canary",
+      "model": "none",
+      "createdAt": 1787749321955,
+      "changelog": "First palette canary.",
+      "kind": "create",
+      "costUsd": 0.0,
+      "requester": "palette-gate"
+    }
+  ],
+  "config": [],
+  "configValues": {}
+}

@@ -46,3 +46,15 @@ eval-out/
 # --- Same harness, free-tier models. Same reasons; kept in its own directory so
 # a free-model study can never collide with, or be mistaken for, a paid run. ---
 eval-free/
+
+# --- the V3 live demo driver (a real server, a real key, real generations) ---
+fabric/demo/
+
+# --- the V3 stress campaign's one long-running session (scripts/stress-native.sh) ---
+fabric/stress/
+# --- the stress campaign's real-client run (scripts/stress-client.sh) ---
+fabric/stress-client/
+fabric/stress-client-server/
+fabric/stress-worldgen/
+# --- scratch classpath/javap/javac helpers the stress campaign writes ---
+build/

@@ -56,8 +56,7 @@ public final class NeoForgeClientEventBridge extends LoaderClientEventBridge {
         // and under nothing the player is reading.
         modBus.addListener(RegisterGuiLayersEvent.class, event ->
                 event.registerAbove(VanillaGuiLayers.CHAT, HUD_LAYER_ID,
-                        (graphics, delta) ->
-                                renderHuds(graphics, delta.getGameTimeDeltaPartialTick(false))));
+                        this::renderHuds));
 
         modBus.addListener(RegisterKeyMappingsEvent.class, event -> {
             KeyMapping.Category category = KeyMapping.Category.register(

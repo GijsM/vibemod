@@ -78,6 +78,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data conversion, not which API exists, and raising it to signal a minimum supported version
   makes Paper refuse the plugin outright. This has confused people once already.
 
+## [3.0.0] - 2026-08-26
+
+**A generated mod is now a normal Fabric mod.** It `implements
+net.fabricmc.api.ModInitializer`, it calls `ServerTickEvents.END_SERVER_TICK.register`,
+`CommandRegistrationCallback`, `KeyMappingHelper`, `HudElementRegistry` and
+`Registry.register` the way every tutorial on the internet does, it ships `data/**` and
+`assets/**` like a real jar — and it has **zero VibeMod imports anywhere in it**. It still
+hot-loads and still hot-unloads.
+
+Nothing about that is a bigger API. It is a *smaller* one. VibeMod stopped asking the model to
+learn a bespoke wrapper and started letting it write the code it already knows, then intercepting
+the handful of call sites that would otherwise be unrevocable. The Fabric prompt lost 4k
+characters and gained five surfaces.
+
+Major because the loader generated-code contract changed shape. Paper is untouched — same
+plugin, same gate, same behaviour — and the v2 `VibeContext` mod flavor still compiles, still
+loads, and is still what NeoForge uses.
+
+### Added
+
+- **The bytecode surgeon.** Every route from source to live classes runs through
+  `InMemoryCompiler.compile`, so the pass is installed on the compiler rather than on any one
+  code path: generation, repair rounds, `/vibe edit`, rollback and restore-on-boot are all
+  covered by one hook. It walks *instructions* (not the constant pool), enforces an allowlist
+  and a deny table, and rewrites seamed call sites `invokevirtual` → `invokestatic` with the
+  receiver prepended, so the operand stack is unchanged and no frame is recomputed. A class with
+  no seam hit comes back **byte-identical** — asserted, which is what makes the legacy corpus
+  provably unaffected. A policy violation is a javac-shaped diagnostic that reaches the model
+  through the existing self-heal loop.
+- **Loader events.** `Event.register` is seamed into a host-owned fanout standing behind one
+  permanent, process-lived subscription per `Event`. Merge rules copy the v2 bridge exactly
+  (`void` all run, `boolean` AND with no short-circuit, `InteractionResult` first non-`PASS`,
+  `TriState` first non-`DEFAULT`, other references first non-null). `SERVER_STARTING`/
+  `SERVER_STARTED` are replayed for a mod loaded after the fact.
+- **Hot Brigadier commands.** A mod registers `CommandRegistrationCallback` normally. The host
+  invokes it immediately against the live dispatcher, discovers what it added by diffing the
+  root, removes it again on disable, and replays it into the fresh dispatcher on every `/reload`
+  and every datapack reload. Command-name collisions are journalled to the mod, not logged and
+  forgotten.
+- **A real client half.** `ClientModInitializer` is a tracked deferred step on the render
+  thread. Keybinds come from the existing eight-slot pool (`KeyMappingHelper.registerKeyMapping`
+  hands back the *slot's* mapping, so ordinary `consumeClick()` polling just works), HUD elements
+  ride behind the host's single element with the same watchdog and instant-detach-on-throw, and a
+  mod may subclass `Screen` — which the host closes off the player's display when the mod that
+  defined it is unloaded.
+- **Resources.** A mod ships the same `data/**` and `assets/**` tree a real jar would.
+  `data/**` is materialized as a world datapack (staged and renamed, so a half-written pack is
+  never discovered mid-write); `assets/**` joins a runtime client resource pack. One debounced
+  reload per batch, per side. Textures are `.png.grid` files — a JSON palette plus rows — which
+  the host encodes into real RGBA PNG with `Deflater` and `CRC32`, no `java.desktop`.
+  Namespaces are rewritten to `vibemod_<modname>` in paths *and* in ids inside the bodies, so
+  two mods cannot collide however they were told to name themselves.
+- **Real registered content.** `Registry.register` works, for `ITEM` and `ENTITY_TYPE`, in
+  singleplayer and on a LAN host. The unfreeze is a window around the mod's whole
+  `onInitialize()` rather than a step inside the shim, because `Item.<init>` writes to the
+  registry itself (`createIntrusiveHolder`) and therefore runs *before* the register call it is
+  an argument to. Ids are namespaced, data components are bound, the creative Ingredients tab is
+  rebuilt, and a registry ledger records what was registered.
+- **A registry ledger with tombstones.** There is no `MappedRegistry.remove` and there was never
+  going to be one, so `/vibe disable` cannot take an id back. The ledger writes that down —
+  per installation, atomically, surviving a restart — instead of hiding it, and `/vibe info`
+  says so on the card: *stays registered until the world is restarted*.
+- **A symbol oracle.** "cannot find symbol" now goes back to the model with the real member list
+  for the type it guessed at, parsed out of the formatted diagnostics so it works on both the
+  javac and ECJ backends.
+- **A native Fabric prompt profile** (`fabric`; the v2 one survives as `fabric-legacy`). It is
+  smaller than the profile it replaced and teaches five more surfaces, because it teaches almost
+  nothing: the model already knows Fabric. Every signature in its three few-shots was read off
+  the jars with `javap`, and one of them is the exact file the client gate compiles and runs.
+- **A "THIS HOST" prompt block.** The Fabric profile serves a client and a dedicated server, and
+  several of its rules branch on which. The host now says which one it is, so the model does not
+  spend a repair round rediscovering that a registered item is refused here.
+- **`:fabric:surgeonSelfTest`** — a source set of its own, wired into `check`, 57 assertions. It
+  compiles fixtures with the *same* compiler against the *same* classpath the host uses, then
+  defines and **runs** the rewritten class against a recording shim: a rewrite that produced
+  unverifiable bytecode, or pointed at a method that does not exist, fails here rather than
+  passing a constant-pool check.
+- **`scripts/demo-live.sh`** — the end-to-end demo driver. Not a gate: it spends real money and
+  depends on a model's judgement. It boots the dedicated Fabric server, drives `/vibe make` with
+  the DEMO.md prompts over RCON, and asserts generated → self-healed → live → exercised →
+  deleted → no residue.
+
+### Changed
+
+- **`/vibe info` tells the truth about a native mod.** It used to report `listeners: 0
+  tasks: 0` — counters for a kind of registration a native mod does not have — while saying
+  nothing about the ones it does. It now names the entrypoints, counts loader-event
+  subscriptions, lists the commands the command seam installed, and reports resource trees.
+- **The gates grew rather than being replaced**: `smoke-fabric.sh` 37 → 89, `smoke-neoforge.sh`
+  31 → 44, the client gate 36 → 114. That is deliberate, and it paid: Phase 3's worst bug was
+  found by *Phase 2's* assertions failing.
+- **`pause-when-empty-seconds=0`** in both loader smoke gates. Since 1.21.2 an empty server stops
+  ticking after a minute; every tick-counting assertion in those gates had been living on
+  borrowed time and one of them finally noticed.
+- **The smoke gates pick the newest jar, not the lexicographically first one.** After a version
+  bump the old jar is still in `build/libs` and sorts first, so `ls | head -1` would have gated
+  the previous release and said nothing about it.
+- **CI compiles the client-gate source sets** in the required build job. They live in their own
+  source sets that nothing in `build` compiled, and the only task that pulled them in was in the
+  display job, which is `continue-on-error` — so a compile error in 1200 lines of gate code
+  produced a green required build.
+
+### Fixed
+
+- **`/vibe` and every generated command vanished on the first `/reload` on Fabric**, and
+  `ctx.onChat` never fired at all. `VibeModFabric.Boot` declared instance fields that shadowed
+  the statics of the same name; `wire()` assigned the shadows and the process-lived
+  subscriptions read the statics, which stayed null forever. NeoForge's structurally identical
+  `Boot` never declared them and never had the bug. Found by a new `/reload` assertion.
+- **A refused registration poisoned every later datapack reload in the session.**
+  `Item.<init>` appends to `BuiltInRegistries.DATA_COMPONENT_INITIALIZERS` before our refusal
+  fires and nothing removed it, so every subsequent reload failed with `Missing element`. The
+  window now snapshots and rolls back.
+- **A runtime-registered entity crashed the render thread**, twice: once when spawned between
+  the type's registration and the deferred client half, once on teardown while entities were
+  still in the world. Registering a type now installs vanilla's `NoopRenderer` immediately and
+  draining *replaces* the mod's provider rather than removing it. An invisible mob is a bug
+  report; a crashed client is a lost world.
+- **A creative tab that was invalidated but never rebuilt** kept offering a disabled mod's item.
+- **Deleting a pack file out from under a running reload threw.** Mutations arriving during a
+  reload are now held and applied when it completes.
+- **The keybind pool ate the mod's own key presses**: the host's per-tick `consumeClick()` drain
+  ran on leases with no `onPress`, so a mod polling its mapping never saw one.
+
+### Not in this release, on purpose
+
+- **Blocks.** Most of the machinery is public, but `PalettedContainerFactory` takes its global
+  palette bit width from the size of `BLOCK_STATE_REGISTRY` once per world load, and every chunk
+  section in the loaded world is serialized against that. Adding block states mid-session changes
+  the id space under live containers — which does not necessarily throw, and that is exactly what
+  makes it the wrong thing to ship. Refused by name, with the reason.
+- **Registry content on a dedicated server.** A vanilla client joining later negotiates a
+  registry sync without the id and would be kicked, so the host refuses deterministically rather
+  than working until somebody logs in.
+- **Native seams on NeoForge.** The seam table is Fabric-only; the NeoForge policy denies
+  `net/fabricmc/` and a Fabric-API mod there is a compile diagnostic. NeoForge keeps the v2
+  `VibeContext` path and gets the datapack channel, which is loader-neutral and gated end to end.
+
 ## [2.0.0] - 2026-08-25
 
 VibeMod runs on **Fabric** and **NeoForge** as well as Paper, and the Paper floor drops from
@@ -219,5 +357,6 @@ First public release.
 - **Live reload**: `/vibe reload` re-reads config.yml (model, timeouts, watchdog budgets,
   retries, concurrency, error-storm thresholds) without a restart.
 
+[3.0.0]: ../../releases/tag/v3.0.0
 [2.0.0]: ../../releases/tag/v2.0.0
 [1.0.0]: ../../releases/tag/v1.0.0
