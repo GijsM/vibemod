@@ -31,6 +31,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 import com.gijsm.vibemod.platform.PlatformInfo;
+import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.platform.ui.BodyBlock;
 import com.gijsm.vibemod.platform.ui.Button;
 import com.gijsm.vibemod.platform.ui.Input;
@@ -120,14 +121,20 @@ public final class PaperDialogRenderer implements UiRenderer {
 
     private final Plugin plugin;
     private final PlatformInfo platform;
+    private final TickScheduler scheduler;
 
     /**
-     * @param plugin   the owning plugin, for the scheduler hops (show next tick, click to main thread)
-     * @param platform the capability probes; only {@code hasItemGlintOverride()} is consulted here
+     * @param plugin    the owning plugin
+     * @param platform  the capability probes; only {@code hasItemGlintOverride()} is consulted here
+     * @param scheduler the tick-scheduler seam used for the two hops this renderer makes
+     *                  (show next tick, click to main thread). It is the platform-neutral
+     *                  scheduler and not {@code Bukkit.getScheduler()} because the latter
+     *                  throws on Folia, where dialogs are nevertheless available
      */
-    public PaperDialogRenderer(Plugin plugin, PlatformInfo platform) {
+    public PaperDialogRenderer(Plugin plugin, PlatformInfo platform, TickScheduler scheduler) {
         this.plugin = plugin;
         this.platform = platform;
+        this.scheduler = scheduler;
     }
 
     /**
@@ -141,7 +148,7 @@ public final class PaperDialogRenderer implements UiRenderer {
         if (p == null || !p.isOnline()) {
             return;
         }
-        DialogKit.show(plugin, p, build(screen));
+        DialogKit.show(scheduler, p, build(screen));
     }
 
     // ---- assembly ----
@@ -357,9 +364,9 @@ public final class PaperDialogRenderer implements UiRenderer {
     private DialogAction action(UiAction action, Bindings bindings) {
         return switch (action) {
             case UiAction.RunCommand run -> DialogAction.staticAction(ClickEvent.runCommand(run.command()));
-            case UiAction.Submit submit -> DialogKit.mainThreadClick(plugin, LOG,
+            case UiAction.Submit submit -> DialogKit.mainThreadClick(scheduler, LOG,
                     (view, audience) -> invoke(submit.callback(), bindings.read(view), audience));
-            case UiAction.Callback callback -> DialogKit.mainThreadClick(plugin, LOG,
+            case UiAction.Callback callback -> DialogKit.mainThreadClick(scheduler, LOG,
                     (view, audience) -> invoke(callback.callback(), NO_VALUES, audience));
         };
     }

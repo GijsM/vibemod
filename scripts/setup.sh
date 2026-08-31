@@ -13,7 +13,8 @@
 #   - installs the rcon-client npm dependency used by scripts/rcon.sh
 #
 # Usage: scripts/setup.sh            # Paper 1.21.8, the dialog baseline
-#        PAPER_VERSION=1.20.6 scripts/setup.sh   # the supported floor
+#        PAPER_VERSION=1.20   scripts/setup.sh   # the supported floor (logs ~125
+#                                                # harmless Commodore errors, see README)
 #        PAPER_VERSION=26.2   scripts/setup.sh   # the newest line
 set -euo pipefail
 

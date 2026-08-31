@@ -18,7 +18,7 @@ Skeleton sources for every interface named here exist under `platform-api/`, `sd
 | 2 | Generated mods get **full client capabilities** on Fabric/NeoForge v1: HUD, keybinds, client tick, sounds, toasts. Excluded v1: world-render hooks, custom screens, raw input, networking, mixins | User decision; exclusions bound the blast radius (a bad render hook hard-crashes the client) and the prompt surface |
 | 3 | **NeoForge only**, no legacy MinecraftForge | SRG names at runtime would force a remapping pipeline; ecosystem moved on |
 | 4 | Loaders target **MC 26.1+** only | 26.1 is unobfuscated — generated code compiles against Mojang names with zero remapping; ≤1.21.11 Fabric would need an intermediary pipeline |
-| 5 | **Paper floor 1.20.6**; Spigot, ≤1.20.4, Folia unsupported | Market data: <5% share for everything below, each with disproportionate cost |
+| 5 | **Paper floor 1.20** (shipped as 1.20.6, measured lower in §10.6); Spigot and ≤1.19.4 unsupported; Folia was unsupported and now passes the gate, with heavy limits on generated mods (§10.7) | Market data: <5% share for everything below, each with disproportionate cost. The floor below 1.20 is enforced by `api-version: '1.20'`, not by any capability |
 | 6 | **No VibeMod↔VibeMod networking v1** — servers never push generated client code to players | That is remote code execution on player machines; needs consent/signing UX. Client features = singleplayer/LAN-host. Client-local mode on third-party servers is v1.1, config-flagged, chat-only |
 | 7 | **The live game is the compile classpath** — never ship or pin API jars for generated code | The running server validates generated code against exactly itself; compile diagnostics feed the existing self-heal loop |
 | 8 | **Capability probes, not version checks** | Version strings differ per platform/fork; capabilities compose |
@@ -346,7 +346,7 @@ record PlatformProfile(
     String roleLine,              // replaces PromptLibrary:183 "You are an expert … author."
     String apiSourceBlock,        // generated: the flavor's VibeContext + Mod + handler sources (§6.4)
     String importRules,           // allowed import roots + explicit bans
-    String cheatSheet,            // event/command/enum guidance for this era/platform
+    List<PromptRule> rules,       // event/command/enum guidance, probe-predicated (§6.5)
     String threadingContract,     // §8.4 text for loader profiles; main-thread text for paper
     List<FewShot> fewShots,       // (user, assistant) example pairs
     String pluginDescriptor,      // JarExporter: api-version / fabric.mod.json / neoforge.mods.toml template
@@ -354,15 +354,17 @@ record PlatformProfile(
 ```
 
 Selected at boot from `PlatformInfo` (platform + `hasDialogs` is irrelevant here; version
-threshold 1.21.7 splits the two Paper profiles). `ModGenerator` threads the profile through
-`makePrompt`/`editPrompt`/`fixPrompt`/`repairPrompt`.
+threshold 1.21.7 splits the two Paper profiles). `ModGenerator` threads a `PromptFacts`
+— the profile plus the host's probes plus its measured `ApiVocabulary` — through
+`makePrompt`/`editPrompt`/`fixPrompt`/`repairPrompt`. **Superseded in part by §6.5:** the
+1.21.7 threshold no longer decides anything about the API vocabulary.
 
 ### 6.2 The four v1 profiles
 
 | Profile | Import rules | Cheat-sheet highlights | Few-shots |
 |---|---|---|---|
-| paper-modern (1.21.7+) | `java.*`, `org.bukkit.*`, **`net.kyori.adventure.*` now officially allowed** (88+ stored mods already use it); bans: `net.minecraft.*`, `io.papermc.*`, reflection | current PromptLibrary:294-297 enum guidance; 1.21.3+ attribute names (`Attribute.MAX_HEALTH`) | existing EXAMPLE_1/2 unchanged |
-| paper-legacy (1.20.6–1.21.6) | same as paper-modern | **era table**: pre-1.21.3 attribute names (`GENERIC_MAX_HEALTH` family), pre-1.21.3 `Sound`/`Particle`/`Enchantment` enum era, no `setEnchantmentGlintOverride` | existing examples with enum names checked against 1.20.6 |
+| paper-modern (1.21.7+) | `java.*`, `org.bukkit.*`, **`net.kyori.adventure.*` now officially allowed** (88+ stored mods already use it); bans: `net.minecraft.*`, `io.papermc.*`, reflection | **superseded by §6.5** — no hand-written enum guidance; the shared `PromptRules.PAPER` table plus the server's own constant lists | existing EXAMPLE_1/2 unchanged |
+| paper-legacy (1.20–1.21.6) | same as paper-modern | **superseded by §6.5** — the same `PromptRules.PAPER` table. The two Paper profiles now differ only in `displayName` | existing examples with enum names checked against 1.20.6 |
 | fabric (26.1+) | `java.*`, `com.gijsm.vibemod.api.*`, `net.minecraft.*` (read-only use of game types passed into hooks); bans: `net.fabricmc.*` (all registration goes through ctx), mixins, `Screen` subclasses, render events, `java.net.*` | curated ctx hooks table (§4.1) + ClientContext surface + "no registry content (items/blocks)" | HUD-timer mod; keybind-toggle mod; simple gameplay mod (onBlockBreak counter) |
 | neoforge (26.1+) | same as fabric with `net.neoforged.*` banned | identical (same sdk flavor) | same three |
 | *(all)* | | threading contract per platform; `side` guidance ("if you use ctx.client, say side=client/both in meta") | |
@@ -381,6 +383,57 @@ A Gradle task (`generatePromptSources`) in core reads the sdk flavor sources
 `com.gijsm.vibemod.llm.GeneratedApiSources` (string constants) consumed by `PromptLibrary`.
 This kills the hand-duplicated constants at PromptLibrary.java:39-157; `LlmSelfTest`'s
 compile-check of prompt examples keeps guarding drift.
+
+### 6.5 The prompt is assembled from probes, not from a version string
+
+Provenance: [docs/API-VOCABULARY.md](API-VOCABULARY.md), measured from all 21 cached
+`paper-api` jars. This section records what changed because of it.
+
+**The defect.** `PromptLibrary.systemPrompt(profile)` received only a `PlatformProfile`,
+chosen by one version comparison at 1.21.7 — where the *dialog UI* appears. The API
+vocabulary does not change there. Meanwhile `PlatformInfo` probed eight capabilities at
+boot and none reached the prompt, so the prompt contradicted the host's own measurements:
+it forbade `ItemMeta#setEnchantmentGlintOverride` on 8 of the 13 versions that ship it,
+and taught `Attribute.GENERIC_MAX_HEALTH` on the 4 where only the short form compiles.
+There are **three** vocabulary boundaries inside the single `paper-legacy` era — 1.20.5,
+1.21 and 1.21.3 — and a two-era table cannot express three answers. The largest, 1.20.5
+(67 constants removed), had no sentence about it at all.
+
+**The shape now.**
+
+- `ApiVocabulary` is measured at boot. `ReflectiveVocabulary` (core, platform-free,
+  parameterised by a `ClassLoader` and a simple-name→FQCN map) does the reflection;
+  `PaperApiVocabulary` (paper) supplies the Bukkit map. `PlatformInfo.vocabulary()`
+  defaults to `empty()`. Constants and methods are measured **independently** — a type
+  whose method table will not resolve still yields its constants.
+- Era text is a `List<PromptRule>` of `(id, predicate, text, requiresSymbols,
+  forbidsSymbols)`. Both Paper profiles share `PromptRules.PAPER`.
+- **The invariant is structural, not editorial.** `PromptRules.render` drops any rule
+  whose `requiresSymbols` the vocabulary measures absent, or whose `forbidsSymbols` it
+  measures present — so a rule cannot contradict a probe however wrong its predicate is.
+  `UNKNOWN` suppresses nothing, so an unmeasured platform keeps the version-independent
+  text rather than losing the cheat sheet.
+- **Constant lists are injected, not described.** `VocabularyBlock` dumps the server's own
+  `Attribute`, `Enchantment` and `PotionEffectType` constants (≤1.8k chars together).
+  `Material`, `Sound`, `Particle` and `EntityType` are too large; one rule tells the model
+  they are unlisted and to prefer obviously-common names.
+- **Order is invariant-first**: role, frozen api sources, output contract, hard rules, edit
+  shape, then `THIS SERVER`, then the few-shots. This buys nothing today — within one boot
+  the prompt is byte-identical every call — it is hygiene for when there are more variable
+  fragments. No `cache_control` was added; that is B4.
+- `paperProfileIdFor` is demoted to the two questions a version string can answer honestly:
+  the display range, and `hasDialogs`. It holds no vocabulary knowledge.
+
+**Verification.** `./gradlew :core:promptProof` builds the real prompt against each cached
+version's measured vocabulary. Four distinct rule configurations appear inside the old
+single `paper-legacy` era (flipping at 1.20.5, 1.21 and 1.21.3), which is precisely what
+two hand-written sheets could not represent. The same task cross-checks
+`ReflectiveVocabulary` against `ClassFileVocabulary` on 1.21.8: exact agreement on 2,151
+constants across six types, and `NO` for a type that does not exist.
+
+**Not verified here:** no real server was booted for this change, so the runtime path is
+proven only against `paper-api` jars through a `URLClassLoader`, and no first-try
+compile-rate eval was run (B5).
 
 ---
 
@@ -1462,12 +1515,14 @@ Version **2.0.0**, bumped in the four places that carry it (`build.gradle.kts`,
 | job | what it does |
 |---|---|
 | `build` | JDK 25, `./gradlew build` (every module, five self-tests, the fixture corpus) then `./gradlew selfTestEcj`. Uploads the three jars. |
-| `smoke` × 5 | Paper 1.20.6 / 1.21.8 / 26.2, Fabric 26.2, NeoForge 26.2. Each downloads a real server, installs the **uploaded** jar, boots it and drives the whole flow over RCON. `fail-fast: false`. Server downloads cached per entry. |
+| `smoke` × 5 | Paper 1.20.6 / 1.21.8 / 26.2, Fabric 26.2, NeoForge 26.2. Each downloads a real server, installs the **uploaded** jar, boots it and drives the whole flow over RCON. `fail-fast: false`. Server downloads cached per entry. **Superseded by §10.6:** seven jobs now, the five Paper lines run `sweep-paper.sh` so they actually assert, and the JDK is per line. |
 | `client-gates` | `:fabric:runClientGameTest` and `scripts/clientgate-neoforge.sh` under `xvfb-run` + Mesa llvmpipe, `continue-on-error: true`. Builds from source: both run inside their loader's dev environment by construction. |
 
 One JDK — **25** — for every job. 26.x requires it and Paper 1.20.6 and 1.21.8
 both run on it, which is not an assumption: it is what the machine every gate in
-§10.2–§10.4 was developed on has.
+§10.2–§10.4 was developed on has. *(No longer true as of §10.6: the Paper 1.20
+line runs on JDK 21. A Paper line's bundled spark can SIGSEGV the JVM on a JDK
+newer than it ever saw, and the symptom looks like a VibeMod failure.)*
 
 The smoke jobs deliberately consume the artifacts the `build` job uploaded
 rather than rebuilding, because §10.3's whole point is that the installed jar and
@@ -1688,9 +1743,239 @@ and `start.sh` no longer hard-codes a filename that goes stale.
 5. **An icon**, for `fabric.mod.json` and the mod lists that show one.
 6. **Promote `client-gates` to required** once it has a track record.
 
+## 10.6 The version sweep — the Paper floor is 1.20, and the floor is a declaration
+
+Provenance: `scripts/sweep-paper.sh`, run 2026-08-28 against real dedicated servers on branch
+`worktree-version-sweep-paper` (`bcb0b2e`). The full brief is
+[docs/MASTER-PROMPT-reach-and-context.md](MASTER-PROMPT-reach-and-context.md); this section
+records only the reach findings and what was changed because of them. **None of it was re-run
+here** — the doc and CI changes below are the write-down of that sweep, not a fresh measurement.
+
+**Twenty Paper versions work: 1.20 → 26.2.** Compile in-process, hot-load, every command
+answering, disable/enable clean. (Twenty *releases*, not twenty consecutive patch numbers, and
+distinct from the 21 `paper-api` artifacts in the same range — §10.7 reconciles the two counts.) Decision 5's 1.20.6 was four releases too conservative
+about code that had been working lower the whole time. Decision 8 (capability probes, not version
+checks) is why: nothing in the plugin had a version comparison to be wrong about.
+
+**Below 1.20 the plugin never runs.** Paper 1.19.4, 1.19.2, 1.18.2, 1.17.1 and 1.16.5 all refuse
+identically with `org.bukkit.plugin.InvalidPluginException: Unsupported API version 1.20`, read
+straight out of `api-version: '1.20'` in `plugin.yml`. So "the floor" is a **declaration**, and
+the honest statement is that everything below it is *untested*, not *incapable*. Lowering it is
+gated on a Java 17 retarget (see the `Commodore` note below) and is a separate decision.
+
+**Paper 1.20 logs 133 `Commodore` errors and works anyway.** (Written as "~125" until §10.7
+counted them: 133 on JDK 21 and 133 on JDK 25.) With `api-version` below the running
+server, CraftBukkit runs every plugin class through `Commodore`, its legacy-API rewriter. Paper
+1.20 bundles **ASM 9.4**, which throws `Unsupported class file major version 65` on the plugin's
+Java 21 bytecode; CraftBukkit catches each failure and falls back to the original bytes. That is
+harmless **here and only here**: VibeMod needs no rewriting, so the fallback bytes are the wanted
+bytes. It is not a general guarantee — below 1.20 a rewrite would genuinely be required, which is
+precisely why dropping the declaration needs `options.release = 17` first. 1.20.6 already bundles
+ASM 9.7 and is silent; the exact build where the bump landed was not pinned down.
+
+**Forks.** Purpur 26.2 and Leaf 26.2 were *claimed* here to pass the same gate unmodified —
+same profile, same UI, all assertions green — driven through `SMOKE_LABEL`/`SMOKE_SERVER_JAR`.
+That claim had no run behind it when it was written; §10.7 is the first time any fork was actually
+measured, and it holds. Folia 26.2 refused to load at the time of this phase (no `folia-supported`
+in `plugin.yml`), and adding that flag alone converted an honest refusal into a boot-time crash on
+VibeMod's own async compile path, so the flag was left for the *end* of the Folia work — which is
+where it landed. **HEAD now ships `folia-supported: true` and Folia 26.2 passes the full gate; see
+§10.7 for the result and for the limits it puts on generated mods.** Spigot/CraftBukkit cannot work
+as built: no bundled Adventure against 24 `net.kyori.adventure` imports, plus
+`Bukkit.getCommandMap()` and `AsyncChatEvent` being Paper-only.
+
+**What changed in CI.** The smoke matrix gated 1.20.6, 1.21.8 and 26.2, which left the entire
+1.21.9 → 26.1.2 band — where a new Minecraft release lands — never gated. It now runs five Paper
+lines (1.20, 1.20.6, 1.21.8, 26.1.2, 26.2) through `sweep-paper.sh` rather than `smoke-paper.sh`,
+because `smoke-rcon.py` asserts nothing and a gate that prints replies without checking them can
+be green while every reply is wrong. Each Paper line carries its own JDK, because a Paper line's
+bundled spark can SIGSEGV the whole JVM on a too-new JDK, and it presents as "the canned mod never
+went live", which costs a day to diagnose as anything other than a plugin bug. This phase put 1.20
+on **21** and the rest on **25**, on the theory that the hazard covered the whole 1.21 line and
+that the oldest line was safest on the oldest JDK. **Both halves of that were wrong and §10.7
+corrects them: the rule is JDK 25 everywhere except the Paper 1.21 base release.**
+
+## 10.7 The real-server sweep — what the previous phase asserted, measured
+
+Provenance: `scripts/sweep-paper.sh` against real dedicated servers, verdict rows written to
+`paper/run/sweep-results.tsv` (37 rows when this section was written; the file is appended to
+across runs, so `1.20.6`, `1.21.8` and `26.2` each appear twice — once from an earlier gate run
+and once from the sweep — and the JDK-25 and re-run passes carry their own labels: `1.20j21`,
+`1.20j25`, `j25-1.21`, `j25-1.21-retry1`, `j25-1.21-retry2`, `folia26.2-rerun`). `paper/run/` is gitignored, so **this section is the durable
+evidence** — the TSV will not survive a clean checkout. The swept artifact was HEAD `b9fa0c7`
+**plus in-flight uncommitted prompt-caching work**, not HEAD alone; nothing in that work touches
+the boot, compile, dispatch or UI paths these rows exercise, but the artifact was not a clean HEAD
+and saying otherwise would be the same species of claim this section exists to retire.
+
+§10.6 wrote down three things it had not measured: a JDK rule, a worry about the `Commodore`
+errors, and a fork claim. This phase measured all three. Two were wrong.
+
+### The results
+
+Every row below is a real dedicated server of that exact version: booted the shipped jar,
+compiled and hot-loaded a mod in-process, the mod's command answered over RCON, a config knob
+applied live, disable/enable removed and restored the command cleanly.
+
+| Version | JDK 21 | JDK 25 | UI | Profile |
+|---|---|---|---|---|
+| 1.20 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.20.1 | **PASS** | not run | chat | `paper-legacy` |
+| 1.20.2 | **PASS** | not run | chat | `paper-legacy` |
+| 1.20.3 | **NOT RUN** | **NOT RUN** | — | — |
+| 1.20.4 | **PASS** | not run | chat | `paper-legacy` |
+| 1.20.5 | **PASS** | not run | chat | `paper-legacy` |
+| 1.20.6 | **PASS** | not run in this sweep (CI's line since §10.2) | chat | `paper-legacy` |
+| 1.21 | **PASS** | **FAIL** — spark SIGSEGV, 3 for 3 | chat | `paper-legacy` |
+| 1.21.1 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.21.3 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.21.4 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.21.5 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.21.6 | **PASS** | **PASS** | chat | `paper-legacy` |
+| 1.21.7 | **PASS** | **PASS** | **native dialogs** | **`paper-modern`** |
+| 1.21.8 | **PASS** | not run in this sweep (CI's line since §10.2) | native dialogs | `paper-modern` |
+| 1.21.9 | **PASS** | not run | native dialogs | `paper-modern` |
+| 1.21.10 | **PASS** | not run | native dialogs | `paper-modern` |
+| 1.21.11 | **PASS** | not run | native dialogs | `paper-modern` |
+| 26.1.1 | not run | **PASS** | native dialogs | `paper-modern` |
+| 26.1.2 | not run | **PASS** | native dialogs | `paper-modern` |
+| 26.2 | not run | **PASS** | native dialogs | `paper-modern` |
+
+**Paper: 20 of 20 PASS on the current build.** The UI flip is at **1.21.7** — 1.21.6 is the last
+chat / `paper-legacy` server, 1.21.7 the first native-dialogs / `paper-modern` one, which is
+exactly where Decision 8's capability probe says it should be, with no version comparison in the
+plugin to be wrong about.
+
+| Fork | Build | JDK | Verdict | UI | Profile |
+|---|---|---|---|---|---|
+| Purpur 26.2 | 2627 | 25 | **PASS** | native dialogs | `paper-modern` |
+| Leaf 26.2 | 89 | 25 | **PASS** | native dialogs | `paper-modern` |
+| Folia 26.2 | — | 25 | **PASS** | native dialogs | `paper-modern` |
+
+### 21 artifacts, 20 gateable versions — both numbers are right
+
+Paper publishes **21 `paper-api` artifacts** between 1.20 and 26.2, and there are **20 gateable
+server versions**. The docs used to pick one number per document (README/CHANGELOG/§10.6 said
+twenty; `docs/DECISION-spigot.md` said 21) and neither explained the other.
+
+The odd one out is **Paper 1.20.3**: it has a `paper-api` artifact and **no server build**. The
+Fill v3 API 404s it and the legacy v2 API is gone (HTTP 410), so there is nothing to boot. It is
+therefore **NOT RUN**, and must never be listed as passing. That is why `paper/api-jars/` holds
+21 jars and `docs/API-VOCABULARY.md` has 21 columns while this sweep covers 20.
+
+A third gap, unrelated: Paper never published **1.21.2** at all, which is why "twenty" are twenty
+*releases* rather than twenty consecutive patch numbers.
+
+> Unresolved, flagged rather than silently fixed: `docs/API-VOCABULARY.md` (a generated file,
+> "do not hand-edit") reconciles its own 21 differently — it calls **26.1.1** the twenty-first and
+> says it "should not be treated as a supported release" because it only ever got `-alpha` builds.
+> This sweep booted a real 26.1.1 server and it passed, so the artifact without a server is 1.20.3,
+> not 26.1.1. The note lives in the report generator, not in the checked-in Markdown, so fixing it
+> means editing the generator and regenerating — left for whoever owns that file.
+
+### Question 1: is the JDK 25 hazard the 1.21 *line*? No — it is the 1.21 base release alone
+
+§10.6 recorded the trap as "Paper 1.21 cannot be tested on JDK 25 — use JDK 21 for that line", and
+gated 1.20 on JDK 21 with a justification that was circular on its face: *1.20 has never been
+gated on 25 here, so it is not gated on 25 here.*
+
+Measured: **1.20 passes on JDK 25**, and **1.21.1 through 1.21.7 all pass on JDK 25**. Only the
+**1.21 base release** crashes, and it does so deterministically — 3 for 3 across deliberate
+re-runs:
+
+```
+[spark] Starting background profiler...
+# SIGSEGV (0xb) at pc=0x0000000000000000
+# C  [spark-...-libasyncProfiler.so.tmp+0x2dcb4]  VMThread::nativeThreadId(JNIEnv_*, _jobject*)+0x70
+```
+
+No VibeMod frame appears anywhere in the hs_err output, and the server reaches `Done (9.507s)!`
+*before* dying — which is precisely why it masquerades as "the canned mod never went live" and
+reads as a plugin bug. That is the misdiagnosis that costs a day; the signature above is the
+thirty-second version.
+
+JDK 21 was never a floor for 1.20 either: 1.20's own `version.json` declares
+`java_version: 17`.
+
+**The rule is therefore: JDK 25 everywhere, except Paper 1.21 base, which needs JDK 21.**
+`.github/workflows/build.yml` now encodes that — `paper 1.20` moved from 21 to 25 — and its
+comment carries the crash signature instead of a justification that justified itself.
+
+### Question 2: do the 133 `Commodore` errors fail the gate's own assertion? No
+
+Paper 1.20 emits **133** of these while loading the plugin — counted, not estimated, and 133 on
+both JDK 21 and JDK 25, because the count is a property of the server's bundled ASM and not of the
+JDK running it:
+
+```
+[14:49:46 ERROR]: Fatal error trying to convert VibeMod v2.0.0:com/gijsm/vibemod/VibeMod.class
+java.lang.IllegalArgumentException: Unsupported class file major version 65
+	at org.objectweb.asm.ClassReader.<init>(ClassReader.java:199) ~[asm-9.4.jar:9.4]
+```
+
+The open worry was that a wall of errors on a *passing* version might be tripping — or ought to be
+tripping — `sweep-paper.sh`'s `vibemod-exception` assertion, which fails a run when a stack trace
+is attributed to VibeMod. **Measured: 0 lines match, on both JDKs.** The assertion greps for
+`\[VibeMod[^]]*\].*(Exception|Error)`, and CraftBukkit prints the plugin name here as bare text
+(`VibeMod v2.0.0:`) while the only bracketed field on the line holds the timestamp
+(`[14:49:45 ERROR]:`), so the required `[VibeMod…]` prefix never appears. The verdict rows for
+1.20 are honest PASSes, not passes bought by a regex that happens to look away.
+
+(Why the errors are harmless at all is §10.6's finding and unchanged: `api-version: '1.20'` is
+below the running server, CraftBukkit runs every class through `Commodore`, ASM 9.4 cannot read
+Java 21 bytecode, CraftBukkit catches each failure and falls back to the original bytes — which
+are the bytes the plugin wanted, because VibeMod needs no rewriting. That is specific to 1.20 and
+is not a general guarantee about failed rewrites.)
+
+### Question 3: do the forks actually work? Yes — and this is the first time anyone looked
+
+Purpur 26.2 (build 2627), Leaf 26.2 (build 89) and Folia 26.2 all **PASS on JDK 25**, all with
+native dialogs and the `paper-modern` profile. **These are the first fork rows ever recorded.**
+The fork claim had been asserted in four documents on the strength of nobody having tried it.
+
+Purpur and Leaf run **unmodified** — same jar, same profile, same UI, every assertion green. And
+the platform probe behaves as designed: `isRegionised()` returns **false** for Purpur and Leaf and
+**true** for Folia **at the same Minecraft version, 26.2**, so it keys on the platform, not on the
+version. That is Decision 8 doing its job at a fork boundary rather than a version boundary.
+
+### Folia works, and generated mods are substantially restricted there
+
+HEAD ships `folia-supported: true` and a `FoliaTickScheduler`, and Folia 26.2 clears the full
+gate. **VibeMod itself is correct on Folia. The mods it generates are not equally well served,
+and the following limits are part of the support claim — never state the claim without them:**
+
+- **Every mod callback is pinned to the global region.** `ctx.repeat` and `ctx.later` go to the
+  global-region scheduler. Per-region parallelism — most of the reason anyone runs Folia — is
+  forgone.
+- **A global-region task cannot reliably touch the world.** Measured on real Folia: reading a
+  block from a global-region task throws `IllegalStateException`, and `world.getEntities()`
+  **silently returns empty**. The silent one is the worse failure — nothing throws, nothing logs,
+  the mod simply sees no entities. Much of the stored mod corpus does world work from `ctx.repeat`
+  and would misbehave rather than fail loudly.
+- **Event handlers still arrive on region threads** and are deliberately not hopped to the global
+  region.
+- **`/vibe export` jars will not run on Folia.**
+
+### Verification limits — stated plainly, because they are easy to lose
+
+1. **The in-game player phase was skipped on seven servers**: 1.21.7, 26.1.1, 26.1.2, 26.2, and
+   all three forks. mineflayer cannot speak those protocols, and the pre-connect guard correctly
+   detected that and skipped rather than failing. On those seven, "native dialogs" is **the
+   plugin's own boot probe plus RCON assertions, not a real player driving the renderer**.
+2. **The dialog renderer was genuinely player-exercised on 1.21.8–1.21.11** — a bot joined, bare
+   `/vibe` pushed a `show_dialog` packet rather than a chat block. That is the evidence behind the
+   renderer claim; the other seven inherit it by construction, not by measurement.
+3. **1.21.8–1.21.11 were run on JDK 21 only** in this sweep. CI has run 1.21.8 on 25 since §10.2.
+4. **1.20.3 was not run and cannot be** — no server build exists (above).
+5. **The swept artifact was HEAD `b9fa0c7` plus uncommitted in-flight prompt-caching work**, not
+   clean HEAD.
+6. `paper/run/` is gitignored. If a number here is ever doubted, the way to settle it is to re-run
+   `scripts/sweep-paper.sh`, not to look for the logs.
+
 ## 11. Out of scope (v1) — recorded so nobody "helpfully" adds them
 
-Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Folia; Paper <1.20.6;
+Chest/anvil GUIs; legacy Forge; Fabric ≤1.21.11; Spigot; Paper <1.20 (§10.6); per-region
+parallelism for generated mods on Folia — the platform itself is supported and gated (§10.7), but
+every mod callback stays on the global region;
 VibeMod↔VibeMod networking / server-pushed client mods; client-local mode on third-party
 servers (v1.1); world-render hooks, custom screens, raw input, networking, mixins in
 generated code; loader jar export; dynamic top-level client commands; registry content

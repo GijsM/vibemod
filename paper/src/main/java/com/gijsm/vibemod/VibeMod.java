@@ -40,6 +40,8 @@ import com.gijsm.vibemod.paper.PaperMetrics;
 import com.gijsm.vibemod.paper.PaperModHost;
 import com.gijsm.vibemod.paper.PaperPlatformInfo;
 import com.gijsm.vibemod.paper.PaperSender;
+import com.gijsm.vibemod.paper.BukkitTaskScheduler;
+import com.gijsm.vibemod.paper.FoliaTickScheduler;
 import com.gijsm.vibemod.paper.PaperTickScheduler;
 import com.gijsm.vibemod.platform.CompilerProvider;
 import com.gijsm.vibemod.platform.ModFailure;
@@ -84,8 +86,12 @@ import com.gijsm.vibemod.ui.screens.SettingsScreens;
  *       exist, so the JVM must never be asked to link that renderer — a plain
  *       {@code new} in a dead branch is not a guarantee, a {@code Class.forName}
  *       behind a capability probe is.</li>
- *   <li><b>The floor is 1.20.6.</b> Anything newer that this class or its
- *       collaborators touch is capability-gated through
+ *   <li><b>The floor is 1.20</b> (shipped as 1.20.6; the sweep in
+ *       ARCHITECTURE-V2 §10.6 found four more releases already working), and it
+ *       is a declaration rather than a capability — {@code api-version: '1.20'}
+ *       in {@code plugin.yml} is what makes Paper 1.19.4 and below refuse the
+ *       plugin, before this class is ever constructed. Anything newer that this
+ *       class or its collaborators touch is capability-gated through
  *       {@link PaperPlatformInfo}, never version-compared.</li>
  * </ul>
  */
@@ -95,7 +101,7 @@ public final class VibeMod extends JavaPlugin {
     private static final String DIALOG_RENDERER_CLASS = "com.gijsm.vibemod.ui.PaperDialogRenderer";
 
     private PaperPlatformInfo platform;
-    private PaperTickScheduler scheduler;
+    private BukkitTaskScheduler scheduler;
     private PaperMessenger messenger;
     private PaperChatBridge chatBridge;
     private PaperCommandBridge commandBridge;
@@ -127,7 +133,15 @@ public final class VibeMod extends JavaPlugin {
         profile = PlatformProfiles.forPlatform(platform);
         getLogger().info("Platform: " + platform.describe() + " → prompt profile " + profile.displayName());
 
-        scheduler = new PaperTickScheduler(this);
+        // The ONLY place the two schedulers are told apart. Selected by class
+        // probe, never by calling Bukkit.getScheduler() — on Folia that call is
+        // itself the thing that throws, so asking it "are you there?" is the
+        // crash. FoliaTickScheduler names io.papermc.paper.threadedregions
+        // types, so it must not be mentioned on a branch a 1.20.6 server can
+        // reach; instantiating it only under the probe keeps it unloaded there.
+        scheduler = platform.isRegionised()
+                ? new FoliaTickScheduler(this)
+                : new PaperTickScheduler(this);
         messenger = new PaperMessenger(this);
 
         Optional<CompilerProvider> compilerProvider = CompilerProvider.resolve();
@@ -176,7 +190,7 @@ public final class VibeMod extends JavaPlugin {
             }
         };
         ModDispatch dispatch = new ModDispatch(watchdog, failureSink);
-        commandBridge = new PaperCommandBridge(this, platform, dispatch,
+        commandBridge = new PaperCommandBridge(this, platform, dispatch, scheduler,
                 getConfig().getBoolean("commands.allow-top-level", true));
         PaperEventBridge eventBridge = new PaperEventBridge(this, dispatch);
         PaperModHost modHost = new PaperModHost(this, eventBridge, commandBridge, configs, dispatch, scheduler);
@@ -210,7 +224,8 @@ public final class VibeMod extends JavaPlugin {
         settingsScreens = new SettingsScreens(messenger, ui, this::settingsSnapshot, this::applySettings,
                 this::openSettingsModelPicker, this::reloadVibeConfig);
 
-        generator = new ModGenerator(scheduler, profile, client, compiler, store, lifecycle,
+        generator = new ModGenerator(scheduler, com.gijsm.vibemod.llm.PromptFacts.of(platform),
+                client, compiler, store, lifecycle,
                 () -> getConfig().getInt("generation.max-retries", 3),
                 () -> getConfig().getBoolean("openrouter.streaming", true),
                 getConfig().getInt("generation.concurrency", 4));
@@ -225,7 +240,7 @@ public final class VibeMod extends JavaPlugin {
 
         PluginCommand vibe = getCommand("vibe");
         if (vibe != null) {
-            VibeCommand handler = new VibeCommand(router);
+            VibeCommand handler = new VibeCommand(router, scheduler);
             vibe.setExecutor(handler);
             vibe.setTabCompleter(handler);
         }
@@ -250,7 +265,10 @@ public final class VibeMod extends JavaPlugin {
             generator.shutdown();
         }
         if (lifecycle != null) {
-            lifecycle.panic();
+            // shutdown(), not panic(): on Folia onDisable arrives on the Region
+            // shutdown thread, where panic()'s main-thread assertion throws and
+            // the teardown silently does not happen.
+            lifecycle.shutdown();
         }
         if (modErrors != null) {
             modErrors.flush();
@@ -291,8 +309,10 @@ public final class VibeMod extends JavaPlugin {
         try {
             Class<?> cls = Class.forName(DIALOG_RENDERER_CLASS, true, getClass().getClassLoader());
             return (UiRenderer) cls
-                    .getConstructor(org.bukkit.plugin.Plugin.class, com.gijsm.vibemod.platform.PlatformInfo.class)
-                    .newInstance(this, platform);
+                    .getConstructor(org.bukkit.plugin.Plugin.class,
+                            com.gijsm.vibemod.platform.PlatformInfo.class,
+                            com.gijsm.vibemod.platform.TickScheduler.class)
+                    .newInstance(this, platform, scheduler);
         } catch (ReflectiveOperationException | LinkageError e) {
             getLogger().log(Level.WARNING, "Could not load the dialog renderer", e);
             return null;

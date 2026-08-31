@@ -8,9 +8,10 @@ name: Build
 #   build         one job: every module, every self-test, the fixture corpus,
 #                 then the same compile-heavy self-tests again with ECJ forced.
 #                 Fast, hermetic, and the one that must never be red.
-#   smoke         five jobs: a REAL dedicated server per supported platform and
-#                 version, driven over RCON with assertions on every reply.
-#                 Downloads servers; caches them.
+#   smoke         seven jobs: a REAL dedicated server per supported platform and
+#                 version, driven over RCON. The five Paper lines go through
+#                 sweep-paper.sh, which is what actually ASSERTS on the replies
+#                 (see the matrix comment). Downloads servers; caches them.
 #   client-gates  two real game clients under xvfb + llvmpipe. `continue-on-
 #                 error` on purpose - see the job's own comment.
 
@@ -52,6 +53,45 @@ jobs:
           java-version: "25"
 
       - uses: gradle/actions/setup-gradle@v4
+
+      # ---- the B3 symbol gate's input -------------------------------------
+      #
+      # `:core:selfTestPromptSymbols` builds the REAL system prompt for each
+      # supported Paper version and checks every symbol it names against that
+      # version's own paper-api jar. Without the jar cache it SKIPS - loudly,
+      # which is right on a developer's fresh clone and useless here: a gate
+      # that only ever skips in CI is not a gate. So CI fetches the jars.
+      #
+      # ~49MB over 21 jars, hence the cache. The key is the fetch script,
+      # because that script DERIVES the version list from Paper's live
+      # maven-metadata rather than hard-coding it; the restore-keys fallback
+      # means a new Paper release re-uses the existing cache and downloads only
+      # the one new jar (the script skips what it already has).
+      #
+      # continue-on-error, deliberately: repo.papermc.io being down must not
+      # turn the hermetic job red for a reason nobody can act on. The cost is
+      # that the gate can silently degrade to SKIPPED, so the next step makes
+      # that loud - a warning annotation on the run, not a line buried in a log.
+      - name: Cache the paper-api jars
+        uses: actions/cache@v4
+        with:
+          path: paper/api-jars
+          key: paper-api-jars-${{ hashFiles('scripts/fetch-api-jars.sh') }}
+          restore-keys: paper-api-jars-
+
+      - name: Fetch the paper-api jars
+        continue-on-error: true
+        run: scripts/fetch-api-jars.sh
+
+      - name: Is the symbol gate armed?
+        run: |
+          count=$(ls -1 paper/api-jars/paper-api-*.jar 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$count" -lt 20 ]; then
+            echo "::warning title=B3 symbol gate degraded::only $count paper-api jars are"\
+              "present, so :core:selfTestPromptSymbols checks fewer versions than it should"\
+              "(or skips entirely). The prompt's per-version claims went UNVERIFIED in this run."
+          fi
+          echo "$count paper-api jars available to the symbol gate"
 
       # `build` runs the five self-tests (they are plain main() classes wired as
       # JavaExec and hooked into `check`), including StoreSelfTest's corpus
@@ -99,39 +139,101 @@ jobs:
       # Every platform's verdict, every time. A red Fabric gate must not hide
       # the NeoForge result.
       fail-fast: false
+      # The Paper lines run `sweep-paper.sh`, not `smoke-paper.sh`, and that is
+      # the difference between a gate and a transcript. smoke-paper.sh boots the
+      # server, waits for the canned mod to go live and PRINTS the RCON replies;
+      # smoke-rcon.py checks none of them, so a green smoke job is only evidence
+      # that nothing threw - every answer could be wrong. sweep-paper.sh wraps
+      # the same gate and adds the assertions: eight required replies, the
+      # disabled mod must stop answering (counted, anchored - `vibe source`
+      # echoes the mod's own Java), the boot log must reach "VibeMod ready" with
+      # no VibeMod stack trace in it. One PASS/FAIL line per version.
+      #
+      # Which versions, and why these five: 1.20 is the real floor (measured,
+      # §10.6 - the README claimed 1.20.6 for a year); 26.2 is the newest line;
+      # and 26.1.2 exists because without it the whole 1.21.9 -> 26.1.2 band was
+      # ungated, which is exactly where a new Minecraft release lands.
       matrix:
         include:
+          - name: paper 1.20
+            gate: scripts/sweep-paper.sh 1.20
+            jdk: "25"
+            cache-path: paper/run/.paper-cache
+            cache-key: paper-1.20
           - name: paper 1.20.6
-            gate: scripts/smoke-paper.sh 1.20.6
+            gate: scripts/sweep-paper.sh 1.20.6
+            jdk: "25"
             cache-path: paper/run/.paper-cache
             cache-key: paper-1.20.6
           - name: paper 1.21.8
-            gate: scripts/smoke-paper.sh 1.21.8
+            gate: scripts/sweep-paper.sh 1.21.8
+            jdk: "25"
             cache-path: paper/run/.paper-cache
             cache-key: paper-1.21.8
+          - name: paper 26.1.2
+            gate: scripts/sweep-paper.sh 26.1.2
+            jdk: "25"
+            cache-path: paper/run/.paper-cache
+            cache-key: paper-26.1.2
           - name: paper 26.2
-            gate: scripts/smoke-paper.sh 26.2
+            gate: scripts/sweep-paper.sh 26.2
+            jdk: "25"
             cache-path: paper/run/.paper-cache
             cache-key: paper-26.2
           - name: fabric 26.2
             gate: scripts/smoke-fabric.sh
+            jdk: "25"
             cache-path: fabric/smoke-cache
             cache-key: fabric-26.2
           - name: neoforge 26.2
             gate: scripts/smoke-neoforge.sh
+            jdk: "25"
             cache-path: neoforge/smoke-cache
             cache-key: neoforge-26.2
     steps:
       - uses: actions/checkout@v4
 
-      # One JDK for all five. 26.x REQUIRES 25, and Paper 1.20.6 and 1.21.8 both
-      # run on it - which is not an assumption: it is what the local machine
-      # these gates were developed on has, and how §10.2's 1.20.6 gate was run
-      # green in the first place.
+      # ONE JDK PER LINE. Do not "simplify" this back to a single java-version.
+      #
+      # The rule, measured on real dedicated servers (ARCHITECTURE-V2 §10.7):
+      # JDK 25 everywhere, EXCEPT the Paper 1.21 base release, which needs 21.
+      #
+      # Paper 1.21 bundles a spark whose async-profiler native library SIGSEGVs
+      # the whole JVM a few seconds after boot on JDK 25:
+      #
+      #   [spark] Starting background profiler...
+      #   # SIGSEGV (0xb) at pc=0x0000000000000000
+      #   # C  [spark-...-libasyncProfiler.so.tmp+0x2dcb4]
+      #        VMThread::nativeThreadId(JNIEnv_*, _jobject*)+0x70
+      #
+      # There is no VibeMod frame in it, and the server reaches "Done (9.507s)!"
+      # before dying - which is exactly why it masquerades as "the canned mod
+      # never went live" and reads as a VibeMod bug. That misdiagnosis costs a
+      # day. It is deterministic: 3 for 3 across deliberate re-runs.
+      #
+      # It is the 1.21 BASE RELEASE, not the 1.21 line. 1.21.1, 1.21.3, 1.21.4,
+      # 1.21.5, 1.21.6 and 1.21.7 all PASS on 25, and so does 1.20. If paper
+      # 1.21 is ever added to this matrix, it is the one line that gets 21.
+      #
+      # Hence smoke-paper.sh and sweep-paper.sh both honour JAVA_HOME, and hence
+      # this matrix names a JDK per line.
+      #
+      #   paper 1.20     -> 25. Measured PASS on 21 AND 25 in the §10.7 sweep.
+      #                    It ran on 21 here until that sweep, justified by
+      #                    nothing but never having run on 25 - and 1.20's own
+      #                    version.json declares java_version 17, so 21 was
+      #                    never a floor requirement either.
+      #   paper 1.20.6   -> 25. Measured green: it is the JDK §10.2's gate was
+      #   paper 1.21.8   -> 25. developed and run on. (The §10.7 sweep happened
+      #                    to run these two on 21; both JDKs are fine here.)
+      #   paper 26.1.2   -> 25. 26.x REQUIRES 25.
+      #   paper 26.2     -> 25. Same.
+      #   fabric 26.2    -> 25. Same.
+      #   neoforge 26.2  -> 25. Same.
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: ${{ matrix.jdk }}
 
       # Server jars, the Fabric launcher + fabric-api, and NeoForge's installer
       # plus the ~200MB server tree it builds. The smoke scripts already treat
@@ -170,6 +272,28 @@ jobs:
       - name: ${{ matrix.name }} dedicated-server gate
         run: ${{ matrix.gate }}
 
+      # sweep-paper.sh redirects the underlying smoke run into
+      # paper/run/sweep-<label>.gate.log so its own output is one verdict line
+      # per version. That is the right default locally and the wrong one in CI,
+      # where the verdict alone tells you nothing about WHY. So on a red Paper
+      # gate, put the boot tail and the whole RCON transcript in the job log -
+      # the artifact below is for keeping, this is for reading.
+      - name: Why the Paper gate failed
+        if: failure() && startsWith(matrix.name, 'paper')
+        run: |
+          for f in paper/run/sweep-*.gate.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f (last 200 lines)"; tail -200 "$f"; echo "::endgroup::"
+          done
+          for f in paper/run/smoke-*/boot.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f (last 200 lines)"; tail -200 "$f"; echo "::endgroup::"
+          done
+          for f in paper/run/smoke-*/rcon.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; cat "$f"; echo "::endgroup::"
+          done
+
       # The logs are the evidence. On a red gate they are the only evidence.
       - name: Upload the server logs
         if: always()
@@ -182,6 +306,8 @@ jobs:
             paper/run/smoke-*/boot.log
             paper/run/smoke-*/rcon.log
             paper/run/smoke-*/bot.log
+            paper/run/sweep-*.gate.log
+            paper/run/sweep-results.tsv
             fabric/smoke/boot.log
             fabric/smoke/rcon.log
             neoforge/smoke/boot.log

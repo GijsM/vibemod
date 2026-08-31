@@ -146,9 +146,41 @@ public final class ModLifecycle implements ModFailure {
         debug.forget(name);
     }
 
-    /** Disable ALL mods. */
+    /** Disable ALL mods. The {@code /vibe panic} path; must be on the main thread. */
     public void panic() {
         assertMainThread();
+        panicInternal();
+    }
+
+    /**
+     * Disable ALL mods during server shutdown, from whatever thread the platform
+     * chose to call {@code onDisable} on.
+     *
+     * <p>This exists because of a measured Folia failure, not on principle. On
+     * Paper, {@code onDisable} runs on the main server thread and {@link #panic()}
+     * is fine. On Folia it runs on the <em>Region shutdown thread</em>, so
+     * {@link #assertMainThread()} threw and the teardown never happened —
+     * observed on a real Folia 26.2 boot:
+     *
+     * <pre>
+     * java.lang.IllegalStateException: ModLifecycle must only be used from the main server thread
+     *   at ModLifecycle.panic(ModLifecycle.java:151)
+     *   at VibeMod.onDisable(VibeMod.java:268)
+     *   at io.papermc.paper.threadedregions.RegionShutdownThread.run(RegionShutdownThread.java:163)
+     * </pre>
+     *
+     * <p>Hopping is not an option: by the time the shutdown thread is running the
+     * global region thread is gone, so a hop would be silently dropped and the
+     * mods would go down un-torn-down anyway. The assertion is therefore skipped
+     * rather than satisfied. That is sound here and only here — the platform has
+     * stopped ticking, so there is no second thread left to race with, which is
+     * exactly the property {@link #assertMainThread()} exists to guarantee.
+     */
+    public void shutdown() {
+        panicInternal();
+    }
+
+    private void panicInternal() {
         for (LoadedMod lm : List.copyOf(mods.values())) {
             if (lm.handle.enabled && disableInternal(lm)) {
                 Logger.getLogger(ModLifecycle.class.getName()).info("Panic: disabled mod " + lm.displayName);
@@ -196,8 +228,17 @@ public final class ModLifecycle implements ModFailure {
         }
         LoadedMod lm = mods.get(lower(modName));
         if (lm != null) {
-            lm.handle.degraded = true;
-            lm.handle.errorCount++;
+            // Synchronized because this is the one ModFailure entry point that
+            // is NOT confined to the main thread. On Paper every caller is the
+            // main thread and this was safe by construction; on a regionised
+            // server an event handler failing in two regions at once reaches
+            // here on two threads, and `errorCount++` is a read-modify-write.
+            // The count feeds the /vibe errors screen, so a lost increment is
+            // cosmetic — but it is still a data race, and this is cheap.
+            synchronized (lm.handle) {
+                lm.handle.degraded = true;
+                lm.handle.errorCount++;
+            }
         }
         ModErrors.Outcome outcome = errors.record(modName, cause, where);
         if (outcome.firstOfEpisode()) {

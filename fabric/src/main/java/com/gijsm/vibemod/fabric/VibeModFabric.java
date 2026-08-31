@@ -435,7 +435,8 @@ public final class VibeModFabric implements ModInitializer {
             settingsScreens = new SettingsScreens(messenger, ui, this::settingsSnapshot, this::applySettings,
                     this::openSettingsModelPicker, this::reloadConfig);
 
-            generator = new ModGenerator(scheduler, profile, client, compiler, store, lifecycle,
+            generator = new ModGenerator(scheduler, com.gijsm.vibemod.llm.PromptFacts.of(platform),
+                    client, compiler, store, lifecycle,
                     () -> config.getInt("generation.max-retries", 3),
                     () -> config.getBoolean("openrouter.streaming", true),
                     config.getInt("generation.concurrency", 4));

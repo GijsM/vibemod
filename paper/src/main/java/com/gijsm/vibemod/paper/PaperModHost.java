@@ -44,10 +44,10 @@ public final class PaperModHost implements ModHost {
     private final CommandBridge commands;
     private final ModConfigs configs;
     private final ModDispatch dispatch;
-    private final PaperTickScheduler scheduler;
+    private final BukkitTaskScheduler scheduler;
 
     public PaperModHost(Plugin plugin, EventBridge events, CommandBridge commands, ModConfigs configs,
-                        ModDispatch dispatch, PaperTickScheduler scheduler) {
+                        ModDispatch dispatch, BukkitTaskScheduler scheduler) {
         this.plugin = plugin;
         this.events = events;
         this.commands = commands;
@@ -148,8 +148,7 @@ public final class PaperModHost implements ModHost {
         @Override
         public BukkitTask repeat(long delayTicks, long periodTicks, Runnable task) {
             assertMainThread();
-            PaperTickScheduler.PaperTaskHandle t =
-                    scheduler.repeat(delayTicks, periodTicks, wrapTask(task));
+            BukkitTaskHandle t = scheduler.repeat(delayTicks, periodTicks, wrapTask(task));
             handle.track(ModHandle.Kind.TASK, t);
             return t.task();
         }
@@ -157,7 +156,7 @@ public final class PaperModHost implements ModHost {
         @Override
         public BukkitTask later(long delayTicks, Runnable task) {
             assertMainThread();
-            PaperTickScheduler.PaperTaskHandle t = scheduler.later(delayTicks, wrapTask(task));
+            BukkitTaskHandle t = scheduler.later(delayTicks, wrapTask(task));
             handle.track(ModHandle.Kind.TASK, t);
             return t.task();
         }

@@ -175,6 +175,13 @@ public final class JarExporter {
         sb.append("name: ").append(name).append('\n');
         sb.append("version: ").append(mod.currentVersion()).append(".0\n");
         sb.append("main: ").append(wrapperFqcn).append('\n');
+        // INVARIANT: api-version governs legacy data conversion (materials, the
+        // Commodore rewriter), not which API exists. A value ABOVE the running
+        // server makes Paper refuse the plugin outright with
+        // "InvalidPluginException: Unsupported API version <value>", so it must
+        // never be raised to signal a minimum supported version — doing so only
+        // stops older servers from loading an export that would have worked.
+        // The value comes from the PlatformProfile; see ARCHITECTURE-V2 §10.6.
         sb.append("api-version: '").append(apiVersion).append("'\n");
         sb.append("description: ").append(yamlQuote(mod.description())).append('\n');
         sb.append("author: ").append(yamlQuote(mod.creator())).append('\n');

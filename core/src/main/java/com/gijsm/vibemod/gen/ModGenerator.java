@@ -18,6 +18,7 @@ import com.gijsm.vibemod.compile.CompileResult;
 import com.gijsm.vibemod.compile.InMemoryCompiler;
 import com.gijsm.vibemod.llm.OpenRouterClient;
 import com.gijsm.vibemod.llm.PlatformProfile;
+import com.gijsm.vibemod.llm.PromptFacts;
 import com.gijsm.vibemod.llm.PromptLibrary;
 import com.gijsm.vibemod.platform.TickScheduler;
 import com.gijsm.vibemod.runtime.ModLifecycle;
@@ -36,10 +37,12 @@ import com.gijsm.vibemod.store.ModStore;
  * carrying the mod's config schema and current values.
  *
  * <p>v2 change (ARCHITECTURE-V2 §1.1, §6.1): no Bukkit. Thread hops go through
- * a {@link TickScheduler}, and the {@link PlatformProfile} the host resolved at
- * boot is threaded into every system prompt this generator sends, so the same
- * engine generates 1.21.8-era and 1.20.6-era code without knowing how they
- * differ.
+ * a {@link TickScheduler}, and the {@link PromptFacts} the host resolved at boot
+ * — its {@link PlatformProfile} plus the API vocabulary it measured off its own
+ * classpath — are threaded into every system prompt this generator sends, so the
+ * same engine generates 1.20-era and 26.2-era code without knowing how they
+ * differ. It used to receive only the profile, which is why the prompt could
+ * contradict probes the host had already made.
  */
 public final class ModGenerator {
 
@@ -85,7 +88,7 @@ public final class ModGenerator {
     private static final Logger LOG = Logger.getLogger(ModGenerator.class.getName());
 
     private final TickScheduler scheduler;
-    private final PlatformProfile profile;
+    private final PromptFacts facts;
     private final OpenRouterClient client;
     private final InMemoryCompiler compiler;
     private final ModStore store;
@@ -99,7 +102,7 @@ public final class ModGenerator {
             new java.util.concurrent.atomic.AtomicInteger();
 
     /** {@code concurrency} is the number of generations that may run at once (pool sized at construction — a config reload does not resize it). */
-    public ModGenerator(TickScheduler scheduler, PlatformProfile profile, OpenRouterClient client,
+    public ModGenerator(TickScheduler scheduler, PromptFacts facts, OpenRouterClient client,
                         InMemoryCompiler compiler, ModStore store, ModLifecycle lifecycle,
                         IntSupplier maxRetries,
                         java.util.function.BooleanSupplier streamingEnabled, int concurrency) {
@@ -110,7 +113,7 @@ public final class ModGenerator {
             return t;
         });
         this.scheduler = scheduler;
-        this.profile = profile;
+        this.facts = facts;
         this.client = client;
         this.compiler = compiler;
         this.store = store;
@@ -275,9 +278,9 @@ public final class ModGenerator {
             String response;
             try {
                 OpenRouterClient.Completion completion = streamingEnabled.getAsBoolean()
-                        ? client.completeStreaming(PromptLibrary.systemPrompt(profile), messages,
+                        ? client.completeStreaming(PromptLibrary.systemPrompt(facts), messages,
                                 new StreamProgressAdapter(l)).get(600, TimeUnit.SECONDS)
-                        : client.complete(PromptLibrary.systemPrompt(profile), messages)
+                        : client.complete(PromptLibrary.systemPrompt(facts), messages)
                                 .get(300, TimeUnit.SECONDS);
                 response = completion.content();
                 costUsd += completion.costUsd();
@@ -321,6 +324,21 @@ public final class ModGenerator {
             }
             String name = forcedName != null ? forcedName : project.name();
 
+            // The free repair round (ARCHITECTURE-V2 §B2). Runs on every path
+            // that compiles generated source — create, edit, fix and every
+            // self-heal round — because a repaired constant that is only fixed
+            // on the first attempt reappears the moment the model resends the
+            // file. `project` is REPLACED, so the repaired sources are what gets
+            // compiled AND what gets stored: the corpus is the regression suite,
+            // and persisting code the server cannot build would poison it.
+            SymbolRepair.Report symbols = SymbolRepair.repair(project, facts.vocabulary());
+            SymbolRepair.log(symbols);
+            if (symbols.changed()) {
+                project = SymbolRepair.applyTo(project, symbols);
+                l.detail("Fixed " + symbols.rewrites().size() + " API name(s) from the server's own "
+                        + "vocabulary: " + describeRewrites(symbols));
+            }
+
             l.phase("Compiling");
             Map<String, String> sources = toFqcnSources(project);
             CompileResult compiled = compiler.compile(sources);
@@ -333,8 +351,9 @@ public final class ModGenerator {
                 l.detail("javac errors, asking the model to fix them…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
                 messages.add(new OpenRouterClient.ChatMessage("user",
-                        PromptLibrary.repairPrompt(compiled.diagnostics())));
-                current = project; // repairs now apply against this round's sources
+                        PromptLibrary.repairPrompt(compiled.diagnostics(),
+                                symbols.notesFor(compiled.diagnostics()))));
+                current = project; // repairs now apply against this round's REPAIRED sources
                 continue;
             }
 
@@ -363,7 +382,10 @@ public final class ModGenerator {
                 l.detail("Mod crashed on enable, asking the model to fix it…");
                 messages.add(new OpenRouterClient.ChatMessage("assistant", response));
                 messages.add(new OpenRouterClient.ChatMessage("user", PromptLibrary.repairPrompt(
-                        "The project compiled but threw on enable: " + stackTop(enableFail))));
+                        "The project compiled but threw on enable: " + stackTop(enableFail),
+                        // It compiled, so no unresolved-symbol suspicion survives:
+                        // only the repairs actually applied are worth restating.
+                        symbols.notesFor(null))));
                 current = project;
             }
         }
@@ -555,6 +577,22 @@ public final class ModGenerator {
     private static String deriveChangelog(String kind, String prompt) {
         String line = prompt == null ? "" : prompt.replace('\n', ' ').trim();
         return line.length() <= 100 ? line : line.substring(0, 97) + "…";
+    }
+
+    /** The first few local symbol repairs, short enough for a progress line. */
+    private static String describeRewrites(SymbolRepair.Report report) {
+        List<String> shown = new ArrayList<>();
+        for (SymbolRepair.Rewrite r : report.rewrites()) {
+            String one = r.type() + "." + r.from() + " → " + r.to();
+            if (!shown.contains(one)) {
+                shown.add(one);
+            }
+            if (shown.size() == 3) {
+                break;
+            }
+        }
+        int more = report.rewrites().size() - shown.size();
+        return String.join(", ", shown) + (more > 0 ? " (+" + more + " more)" : "");
     }
 
     private static String firstLineOf(String s) {

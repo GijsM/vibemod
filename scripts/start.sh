@@ -6,7 +6,7 @@
 # finish booting (log line + RCON port up) before returning.
 #
 # Usage: scripts/start.sh                        # newest paper-*.jar in server/
-#        PAPER_VERSION=1.20.6 scripts/start.sh   # pick a specific line
+#        PAPER_VERSION=1.20   scripts/start.sh   # pick a specific line (1.20 is the floor)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

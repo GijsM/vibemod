@@ -18,7 +18,7 @@ import com.gijsm.vibemod.platform.TickScheduler;
  * that is a frozen v3 signature the whole stored corpus compiles against, so the
  * host cannot hide it behind {@link TaskHandle}. Core only ever sees the handle.
  */
-public final class PaperTickScheduler implements TickScheduler {
+public final class PaperTickScheduler implements BukkitTaskScheduler {
 
     private final Plugin plugin;
 
@@ -74,7 +74,7 @@ public final class PaperTickScheduler implements TickScheduler {
     }
 
     /** A {@link BukkitTask} as a revocable {@link TaskHandle}. */
-    public static final class PaperTaskHandle implements TaskHandle {
+    public static final class PaperTaskHandle implements BukkitTaskHandle {
 
         private final BukkitTask task;
 
@@ -83,6 +83,7 @@ public final class PaperTickScheduler implements TickScheduler {
         }
 
         /** The Bukkit task, for the sdk's frozen {@code BukkitTask}-returning signatures. */
+        @Override
         public BukkitTask task() {
             return task;
         }

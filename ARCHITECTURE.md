@@ -51,7 +51,10 @@ Three rules hold this together, and each one is load-bearing rather than tidy:
 2. **Capabilities are probed, never version-compared.** Whether the server has the dialog API,
    a system compiler, a client, a native command map, an item-glint override — every one is a
    question asked at runtime through `PlatformInfo`, which is why the Paper floor could drop from
-   1.21.8 to 1.20.6 without a single `if (version >= …)`.
+   1.21.8 to 1.20 without a single `if (version >= …)`. The drop shipped as "1.20.6" and the
+   later version sweep found the code had been working four releases lower the whole time —
+   which is the rule paying off, not an exception to it. What actually stops the plugin below
+   1.20 is the `api-version: '1.20'` declaration in `plugin.yml`, not a capability.
 3. **A host owns every subscription.** Generated mods never register with the platform directly;
    the host dispatches and revokes on their behalf. On Fabric that is not a preference — Fabric
    events cannot be unregistered at all, so anything else would leak a listener per load.

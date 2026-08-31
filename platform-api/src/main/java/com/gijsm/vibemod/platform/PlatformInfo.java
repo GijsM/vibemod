@@ -54,6 +54,28 @@ public interface PlatformInfo {
     }
 
     /**
+     * True when this server ticks the world in more than one ordering domain —
+     * Folia's regionised threading, and any fork that adopts it.
+     *
+     * <p>This is the probe that decides which scheduler runs generated mods and
+     * which threading contract the prompt states, so it is worth being exact
+     * about what it does <em>not</em> mean. It is not "does this server have the
+     * regionised scheduler API": {@code Bukkit.getGlobalRegionScheduler()} and
+     * the whole {@code io.papermc.paper.threadedregions.scheduler} package ship
+     * in ordinary {@code paper-api} and answer perfectly well on a single-threaded
+     * Paper, where they simply delegate to the main thread. Verified with
+     * {@code javap} against {@code paper-api:1.21.8}. A host must therefore
+     * probe for a regionised <em>implementation</em>, not for the API surface.
+     *
+     * <p>False is the safe default and the honest one for every non-regionised
+     * platform: one main thread, one ordering domain, callbacks that may touch
+     * anything.
+     */
+    default boolean isRegionised() {
+        return false;
+    }
+
+    /**
      * The highest {@code --release} generated code may target on this host.
      *
      * <p>Not the same question as "what can this JVM run". A server's bytecode
@@ -68,6 +90,31 @@ public interface PlatformInfo {
      */
     default int maxTargetRelease() {
         return Runtime.version().feature();
+    }
+
+    /**
+     * What this host's API actually declares, measured off its own classpath at
+     * boot.
+     *
+     * <p>This is the probe that retires an error class rather than an error. The
+     * capability booleans above answer questions someone thought to ask; a
+     * vocabulary answers the ones nobody did, which is how the prompt came to
+     * teach {@code Attribute.GENERIC_MAX_HEALTH} on four versions where only the
+     * short form compiles (docs/API-VOCABULARY.md). The prompt builder consumes
+     * it instead of asserting era prose, and the pre-compile repair pass will
+     * consume the same object.
+     *
+     * <p>Building one walks a few thousand reflected members, so a host builds
+     * it ONCE at boot and returns the cached instance — never per generation.
+     *
+     * <p>The default is {@link ApiVocabulary#empty()}: a host that has not
+     * implemented this measured nothing, and every query answers
+     * {@code UNKNOWN}. That degrades correctly — capability-predicated prompt
+     * text drops out and a repair pass changes nothing — whereas a partial guess
+     * would report {@code NO} for types it simply never looked at.
+     */
+    default ApiVocabulary vocabulary() {
+        return ApiVocabulary.empty();
     }
 
     /**

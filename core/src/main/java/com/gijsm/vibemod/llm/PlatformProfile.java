@@ -13,13 +13,26 @@ import java.util.List;
  * boot from {@link com.gijsm.vibemod.platform.PlatformInfo}, and everything
  * else in {@link PromptLibrary} stays one fixed text shared by every platform.
  *
+ * <p><b>What changed with the capability rework.</b> The era-specific half used
+ * to be a {@code cheatSheet} string per profile, and a profile was picked by one
+ * version comparison. It is now a {@link PromptRule} table evaluated against the
+ * running server's own {@link com.gijsm.vibemod.platform.ApiVocabulary}, so the
+ * two Paper profiles share one table and differ only in {@link #displayName()} —
+ * the one piece of text with no probe behind it. Everything a jar can settle is
+ * settled by asking the jar.
+ *
  * @param id                 {@code "paper-modern"}, {@code "paper-legacy"}, {@code "fabric"}, {@code "neoforge"}
- * @param displayName        human label for logs and UI, e.g. {@code "Paper 1.21.7+"}
- * @param roleLine           the prompt's opening "You are an expert … author." sentence
+ * @param displayName        human label for logs, UI and the prompt's own "this server is"
+ *                           line, e.g. {@code "Paper 1.21.7+"}. The only version text left in
+ *                           the prompt that is derived from a version string rather than a probe
+ * @param roleLine           the prompt's opening "You are an expert … author." sentence.
+ *                           Deliberately free of any version number so that two profiles of the
+ *                           same platform share it verbatim
  * @param apiSourceBlock     the flavor's verbatim sdk sources, already framed with
  *                           {@code --- path ---} headers (§6.4)
  * @param importRules        allowed import roots and explicit bans
- * @param cheatSheet         era/platform guidance: which enum and attribute names actually exist
+ * @param rules              era/platform guidance as {@code (predicate, text)} pairs, evaluated
+ *                           against the running server rather than asserted from a version
  * @param threadingContract  which thread mod callbacks run on, and what that forbids
  * @param fewShots           worked (user, assistant) example pairs
  * @param pluginDescriptor   the exporter's descriptor template — {@code api-version} on Paper,
@@ -32,7 +45,7 @@ public record PlatformProfile(
         String roleLine,
         String apiSourceBlock,
         String importRules,
-        String cheatSheet,
+        List<PromptRule> rules,
         String threadingContract,
         List<FewShot> fewShots,
         String pluginDescriptor,
@@ -44,5 +57,6 @@ public record PlatformProfile(
 
     public PlatformProfile {
         fewShots = List.copyOf(fewShots);
+        rules = List.copyOf(rules);
     }
 }

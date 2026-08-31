@@ -235,10 +235,163 @@ tasks.register("selfTestEcj") {
     dependsOn("selfTestCompilerEcj", "selfTestStoreEcj")
 }
 
+// ---------------------------------------------------------------------------
+// Offline API-vocabulary tools (docs/API-VOCABULARY.md)
+//
+// These read paper-api jars as BYTES from `paper/api-jars/` (populated by
+// scripts/fetch-api-jars.sh) to measure what each supported Paper version's API
+// actually contains. They do not load a single Bukkit class and they are not
+// wired into `check`: without the jar cache there is nothing to measure, and a
+// 49MB download is not something a build should do behind your back.
+// ---------------------------------------------------------------------------
+
+val apiJarsDir: String = (findProperty("vibemod.apiJars") as String?)
+    ?: rootProject.layout.projectDirectory.dir("paper/api-jars").asFile.absolutePath
+
+/** `./gradlew :core:apiVocabulary -Pvocab="<jar> [type ...]"` */
+tasks.register<JavaExec>("apiVocabulary") {
+    group = "verification"
+    description = "Prints the measured API vocabulary of one paper-api jar."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.ClassFileVocabulary"
+    val spec = (findProperty("vocab") as String?) ?: "$apiJarsDir/paper-api-1.21.8.jar"
+    args(spec.split(" ").filter { it.isNotEmpty() })
+}
+
+/** `./gradlew :core:apiVocabularyReport` — the whole cache, as the measured report. */
+tasks.register<JavaExec>("apiVocabularyReport") {
+    group = "verification"
+    description = "Measures every cached paper-api jar and checks the prompt's claims."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.VocabularyReport"
+    // arg[1] is the prompt source dir: the report re-extracts every constant the
+    // prompt names straight out of it, so the audit cannot drift from the prompt.
+    args(apiJarsDir,
+        layout.projectDirectory.dir("src/main/java/com/gijsm/vibemod/llm").asFile.absolutePath)
+}
+
+/**
+ * `./gradlew :core:promptProof [-Pversions="1.20 1.21.3 26.2"]` — builds the
+ * real system prompt against each cached version's measured vocabulary and
+ * prints the lines that differ. The proof that the capability rework produces
+ * different, correct guidance per version rather than two hand-written eras.
+ */
+tasks.register<JavaExec>("promptProof") {
+    group = "verification"
+    description = "Builds the system prompt per Paper version and shows what changes."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "symbols.PromptVocabularyProof"
+    args(apiJarsDir, (findProperty("versions") as String?) ?: "")
+}
+
+/**
+ * The vocabulary contract + the measured facts the prompt asserts. Skips the
+ * jar-backed half when the cache is absent, so it is safe in `selfTest`.
+ */
+registerSelfTest("selfTestVocabulary", "symbols.VocabularySelfTest") {
+    systemProperty("vibemod.apiJars", apiJarsDir)
+}
+
+/**
+ * The B3 gate: builds the REAL system prompt for every cached Paper version and
+ * checks every symbol it names, every symbol it forbids, the injected constant
+ * lists and which era rules fired, against that version's own paper-api jar.
+ *
+ * Like the vocabulary self-test it SKIPS loudly without the jar cache, so a
+ * fresh clone stays green — and unlike it, CI fetches the cache first
+ * (.github/workflows/build.yml), because a gate that only ever skips is not one.
+ *
+ *   ./gradlew :core:selfTestPromptSymbols -Pinventory=true   # every reference
+ */
+registerSelfTest("selfTestPromptSymbols", "symbols.PromptSymbolGate") {
+    args(apiJarsDir, (findProperty("inventory") as String?) ?: "false")
+}
+
+/**
+ * The B2 gate: SymbolRepair, the offline pre-compile pass. Measured
+ * vocabularies from the jar cache wherever possible (it skips those checks
+ * loudly without it), plus a sweep of the whole stored corpus reporting what
+ * the pass would rewrite there — which must be nothing, since the corpus
+ * already compiles.
+ */
+registerSelfTest("selfTestSymbolRepair", "com.gijsm.vibemod.gen.SymbolRepairSelfTest") {
+    systemProperty("vibemod.apiJars", apiJarsDir)
+    systemProperty("vibemod.mods.dir", modsDir)
+    systemProperty("vibemod.fixture.mods.dir", fixtureModsDir)
+}
+
+/**
+ * Re-derives the legacy<->vanilla rename table from the jar cache and prints it
+ * in the form SymbolRepair embeds. The table is measured, never typed:
+ * constants are paired on the vanilla registry key their <clinit> loads.
+ *
+ *   ./gradlew :core:deriveRenames
+ */
+tasks.register<JavaExec>("deriveRenames") {
+    group = "verification"
+    description = "Derives the API constant rename table from the cached paper-api jars."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "repair.RenameDerivation"
+    args(apiJarsDir)
+}
+
+/**
+ * The B4 gate: the prompt-caching wire shape. Offline, no key, no network —
+ * it reads the JSON body the client builds. See PromptCacheSelfTest for why
+ * this exists separately from the measurements in OpenRouterClient's javadoc.
+ */
+registerSelfTest("selfTestPromptCache", "com.gijsm.vibemod.llm.PromptCacheSelfTest")
+
 tasks.register("selfTest") {
     group = "verification"
     description = "Runs core's self-tests."
-    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog", "selfTestErrors")
+    dependsOn("selfTestCompiler", "selfTestLlm", "selfTestStore", "selfTestCatalog",
+        "selfTestErrors", "selfTestVocabulary", "selfTestPromptSymbols", "selfTestSymbolRepair",
+        "selfTestPromptCache")
 }
 
 tasks.named("check") { dependsOn("selfTest") }
+
+// ---------------------------------------------------------------------------
+// The B5 eval: first-try compile rate, scored per condition and per version
+// (docs/MASTER-PROMPT-reach-and-context.md, Objective B5).
+//
+// Deliberately NOT wired into `check` or `selfTest`: it spends real money on
+// the OpenRouter API. It is resumable and content-addressed, so a re-run never
+// re-pays for a generation it already has, and it refuses to start a call once
+// `-Pvibemod.eval.budgetUsd` is reached.
+//
+//   gradlew :core:evalCompileRate -Pvibemod.eval.dryRun=true
+//   gradlew :core:evalCompileRate -Pvibemod.eval.pilot=3
+//   gradlew :core:evalCompileRate -Pvibemod.eval.n=12 -Pvibemod.eval.budgetUsd=3
+// ---------------------------------------------------------------------------
+tasks.register<JavaExec>("evalCompileRate") {
+    group = "verification"
+    description = "Scores first-try compile rate per prompt condition and Paper version."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "eval.CompileRateEval"
+    // Optional JVM override for the eval only; the BUILD stays on Java 21.
+    //
+    // Needed because paper-api 26.x ships class files at major version 69
+    // (Java 25) while 1.21.x ships major 65 (Java 21). A JDK 21 javac cannot
+    // read the 26.x jars at all -- it reports "cannot access org.bukkit.Material"
+    // for every generated source -- so scoring any 26.x cell on Java 21 measures
+    // the toolchain, not the prompt. Point this at a Java 25 JDK to score them:
+    //   -Pvibemod.eval.jdk=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+    (findProperty("vibemod.eval.jdk") as String?)?.let { jdkHome ->
+        setExecutable("$jdkHome/bin/java")
+    }
+    systemProperty("vibemod.eval.root", rootProject.layout.projectDirectory.asFile.absolutePath)
+    systemProperty("vibemod.apiJars", apiJarsDir)
+    systemProperty("vibemod.mods.dir", modsDir)
+    // Forward every -Pvibemod.eval.* straight through, so the harness owns its
+    // own option set and this block never needs editing to add one. The API key
+    // is deliberately NOT forwardable this way: the harness reads it from the
+    // environment or config.yml, and a -P value would land in the Gradle
+    // daemon's command line where `ps` can see it.
+    for ((key, value) in project.properties) {
+        if (key.startsWith("vibemod.eval.") && key != "vibemod.eval.apiKey" && value != null) {
+            systemProperty(key, value.toString())
+        }
+    }
+}

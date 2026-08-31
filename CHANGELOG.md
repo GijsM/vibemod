@@ -5,6 +5,79 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The Paper floor is 1.20, not 1.20.6.** No code changed; the claim did. A version sweep across
+  real dedicated servers found VibeMod fully functional on **twenty Paper versions, 1.20 through
+  26.2** — compile in-process, hot-load, every command answering, disable/enable clean. 2.0.0
+  shipped the floor as 1.20.6 and was four releases too conservative about its own code. The 2.0.0
+  entry below is left as written: it is the record of what was claimed and tested then, not a claim
+  about today.
+- **Twenty and twenty-one are both right, and the docs now say why.** Paper publishes **21
+  `paper-api` artifacts** between 1.20 and 26.2 (hence 21 jars in `paper/api-jars/` and 21 columns
+  in `docs/API-VOCABULARY.md`) but only **20 gateable server versions**. Paper **1.20.3** has an
+  API artifact and **no server build** — Fill v3 404s it, the legacy v2 API is gone (HTTP 410) —
+  so it was **NOT RUN** and is never listed as passing. (1.21.2 was never published at all, so the
+  twenty are twenty releases, not twenty consecutive patch numbers.)
+- **What stops Paper below 1.20 is a declaration, not a capability.** 1.19.4, 1.19.2, 1.18.2,
+  1.17.1 and 1.16.5 all refuse identically with
+  `InvalidPluginException: Unsupported API version 1.20`, read straight out of
+  `api-version: '1.20'` in `plugin.yml`, before any VibeMod code runs. Lowering it is a real
+  project rather than a one-line edit — below 1.20, Bukkit's `Commodore` would have to rewrite
+  legacy calls for real, which needs a Java 17 retarget — and it is not done.
+- **Purpur 26.2 (build 2627) and Leaf 26.2 (build 89) are verified working, unmodified.** Same
+  jar, same profile, same UI, all assertions green, driven through the same gate via
+  `SMOKE_LABEL`/`SMOKE_SERVER_JAR`. These are the first fork runs ever recorded; the claim had been
+  asserted in four documents with no evidence behind it. The `isRegionised()` probe returns false
+  for both and true for Folia **at the same Minecraft version, 26.2**, so it keys on the platform
+  rather than the version. Spigot/CraftBukkit still cannot work as built (no bundled Adventure;
+  `getCommandMap()` and `AsyncChatEvent` are Paper-only) and is not claimed.
+- **Folia 26.2 passes the full gate, with severe limits on generated mods.** HEAD ships
+  `folia-supported: true` and a `FoliaTickScheduler`; earlier entries in this file saying Folia
+  "refuses to load" describe the old state. VibeMod itself is correct on Folia. Generated mods are
+  substantially restricted, and the restriction travels with the claim every time it is made:
+  every mod callback is pinned to the **global region** (per-region parallelism, most of the point
+  of Folia, is forgone); a global-region task cannot reliably touch the world — reading a block
+  throws `IllegalStateException` and `world.getEntities()` **silently returns empty**, which is the
+  worse failure, and much of the stored corpus does world work from `ctx.repeat`; event handlers
+  still arrive on region threads and are deliberately not hopped; and `/vibe export` jars will not
+  run on Folia.
+- **The CI smoke matrix gates five Paper lines instead of three**, and gates them with
+  `scripts/sweep-paper.sh` rather than `scripts/smoke-paper.sh`. `paper 1.20` (the real floor) and
+  `paper 26.1.2` are new: the whole 1.21.9 → 26.1.2 band, which is where a new Minecraft release
+  lands, had never been gated at all. The sweep wrapper is what makes the Paper gates *assert* —
+  `smoke-rcon.py` prints replies and checks none of them, so the old gates could go green with
+  every answer wrong. Each Paper line names the JDK it runs on, because one Paper *release* — the
+  1.21 base, not the whole 1.21 line — cannot be tested on JDK 25: its bundled spark
+  async-profiler SIGSEGVs the JVM at address 0x0 seconds after the server reports `Done`.
+- **The CI JDK rule is now the measured one: JDK 25 everywhere, except Paper 1.21 base, which
+  needs 21.** `paper 1.20` moves from JDK 21 to **25**. Its old justification was circular ("1.20
+  has never been gated on 25 here, so it is not gated on 25 here") and is now falsified: 1.20
+  passes on 25, and 1.20's `version.json` declares `java_version: 17`, so 21 was never a floor
+  requirement either. 1.21.1 through 1.21.7 also pass on 25; only the 1.21 base crashes, and it
+  does so deterministically (3 for 3 across deliberate re-runs). Paper 1.21 is not in the matrix;
+  if it is ever added it goes on 21, and the workflow comment carries the crash signature so the
+  next person recognises it in seconds.
+
+### Documented
+
+- **The 133 `Commodore` errors on Paper 1.20**, in the README's Paper section — counted, not
+  estimated, and 133 on JDK 21 and JDK 25 alike. Paper 1.20 bundles ASM 9.4, which cannot read the
+  plugin's Java 21 bytecode (`Unsupported class file major version 65`, thrown out of
+  `asm-9.4.jar`); CraftBukkit catches each failure, falls back to the original bytes, and the
+  plugin works. Harmless **on 1.20 specifically, because no rewrite was actually needed** — not a
+  general guarantee that a failed `Commodore` pass is safe.
+- **That the 133 errors do not trip the sweep's `vibemod-exception` assertion** — 0 matching lines,
+  measured on both JDKs, where previously this was an unverified worry. CraftBukkit prints the
+  plugin name as bare text (`Fatal error trying to convert VibeMod v2.0.0:`) and the only bracketed
+  field on the line is the timestamp (`[14:49:45 ERROR]:`), so the assertion's required
+  `[VibeMod…]` prefix never appears.
+- **The `api-version` invariant**, as a comment at every site that declares it: it governs legacy
+  data conversion, not which API exists, and raising it to signal a minimum supported version
+  makes Paper refuse the plugin outright. This has confused people once already.
+
 ## [2.0.0] - 2026-08-25
 
 VibeMod runs on **Fabric** and **NeoForge** as well as Paper, and the Paper floor drops from

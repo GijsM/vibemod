@@ -4,7 +4,7 @@
 # Boots a throwaway Paper server of <mc-version> with the freshly built
 # VibeMod.jar and a pre-seeded canned mod, then drives it over RCON and asserts
 # on the results. The Phase C acceptance gate (ARCHITECTURE-V2 §9) in one
-# command, for any version between the 1.20.6 floor and the newest supported
+# command, for any version between the 1.20 floor and the newest supported
 # line.
 #
 # The canned mod exists so the gate needs no LLM and no API key: VibeMod's
@@ -19,30 +19,48 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?usage: smoke-paper.sh <mc-version> [--force-chat]}"
 FORCE_CHAT="${2:-}"
-RUN="$ROOT/paper/run/smoke-$VERSION"
+# SMOKE_LABEL names the run directory, so a Paper fork tested at the same
+# Minecraft version does not overwrite the Paper run it is being compared with.
+# VERSION stays the MINECRAFT version either way - the mineflayer bot needs it.
+LABEL="${SMOKE_LABEL:-$VERSION}"
+RUN="$ROOT/paper/run/smoke-$LABEL"
 JAR="$ROOT/paper/build/libs/VibeMod.jar"
 RCON_PORT=25585
 RCON_PASSWORD="vibemod-smoke"
 BOOT_TIMEOUT=420
 
 if [[ ! -f "$JAR" ]]; then
-  echo "!! $JAR missing - run ./gradlew :paper:jar first" >&2
+  # shadowJar, not jar: since the shadow plugin arrived `jar` builds a thin,
+  # bStats-less artifact that is NOT the shipped VibeMod.jar this gate needs.
+  echo "!! $JAR missing - run ./gradlew :paper:shadowJar first" >&2
   exit 1
 fi
 
-# ---------------------------------------------------------------- paper jar
+# ---------------------------------------------------------------- server jar
+# SMOKE_SERVER_JAR points the gate at an already-downloaded jar instead of
+# asking Fill for a Paper build, which is what lets the same canary protocol run
+# against a Paper FORK (Purpur, Folia, ...). Everything downstream is Bukkit API,
+# so nothing else in this script needs to know the difference.
 CACHE="$ROOT/paper/run/.paper-cache"
 mkdir -p "$CACHE"
-PAPER_JAR="$CACHE/paper-$VERSION.jar"
-if [[ ! -f "$PAPER_JAR" ]]; then
-  echo "== downloading Paper $VERSION"
-  URL="$(curl -fsSL "https://fill.papermc.io/v3/projects/paper/versions/$VERSION/builds/latest" \
-    -H 'User-Agent: vibemod-smoke/1.0' \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["downloads"]["server:default"]["url"])')"
-  curl -fsSL "$URL" -o "$PAPER_JAR.part"
-  mv "$PAPER_JAR.part" "$PAPER_JAR"
+if [[ -n "${SMOKE_SERVER_JAR:-}" ]]; then
+  PAPER_JAR="$SMOKE_SERVER_JAR"
+  if [[ ! -f "$PAPER_JAR" ]]; then
+    echo "!! SMOKE_SERVER_JAR=$PAPER_JAR does not exist" >&2
+    exit 1
+  fi
+else
+  PAPER_JAR="$CACHE/paper-$VERSION.jar"
+  if [[ ! -f "$PAPER_JAR" ]]; then
+    echo "== downloading Paper $VERSION"
+    URL="$(curl -fsSL "https://fill.papermc.io/v3/projects/paper/versions/$VERSION/builds/latest" \
+      -H 'User-Agent: vibemod-smoke/1.0' \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["downloads"]["server:default"]["url"])')"
+    curl -fsSL "$URL" -o "$PAPER_JAR.part"
+    mv "$PAPER_JAR.part" "$PAPER_JAR"
+  fi
 fi
-echo "== paper jar: $PAPER_JAR"
+echo "== server jar: $PAPER_JAR"
 
 # ---------------------------------------------------------------- run dir
 rm -rf "$RUN"
@@ -173,7 +191,12 @@ cd "$RUN"
 # Class-load logging goes to its own file so the gate can prove the dialog API
 # classes are never even LOADED on a server that has no dialog API, without
 # drowning the server log.
-java -Xms1G -Xmx2G "-Xlog:class+load=info:file=$RUN/classload.log" \
+# JAVA_HOME wins when set, so one machine can gate an old Paper line on the JDK
+# that line actually supports. Without it every run inherits whatever `java` is
+# on PATH, and a server that simply cannot start on that JDK looks like a
+# VibeMod failure - Paper 1.21 is the case in point: its bundled spark ships an
+# async-profiler native library that SIGSEGVs the moment it profiles a JDK 25.
+"${JAVA_HOME:+$JAVA_HOME/bin/}java" -Xms1G -Xmx2G "-Xlog:class+load=info:file=$RUN/classload.log" \
   -jar "$PAPER_JAR" --nogui > "$LOG" 2>&1 < /dev/null &
 SERVER_PID=$!
 
@@ -247,10 +270,17 @@ echo "== driving over RCON"
 # When mineflayer is installed and it speaks this protocol, join as a headless
 # player and drive the real chat renderer: click a browser row, flip a toggle,
 # type into a captured input.
+# The guard is an EXACT membership test, not `minecraft-data($VERSION)`. That
+# call resolves loosely: asked for 1.21.7 it hands back the data for 1.21, and
+# asked for 26.1.2 it hands back 26.1 - truthy both times, so the old check said
+# "the bot speaks this" and the bot then died mid-handshake against a protocol
+# it had never seen ("This server is version 1.21.7, you are using version
+# 1.21"). Membership in supportedVersions.pc is the question actually being
+# asked, and it is the one that distinguishes 1.21.8 (present) from 1.21.7 (not).
 BOT_SUPPORTS_VERSION=0
 if [[ -d "$ROOT/scripts/node_modules/mineflayer" ]] \
   && (cd "$ROOT/scripts" \
-      && node -e "if (!require('minecraft-data')('$VERSION')) process.exit(1)" 2>/dev/null); then
+      && node -e "process.exit(require('minecraft-data').supportedVersions.pc.includes('$VERSION') ? 0 : 1)" 2>/dev/null); then
   BOT_SUPPORTS_VERSION=1
 fi
 
@@ -263,8 +293,20 @@ if [[ "$BOT_SUPPORTS_VERSION" == "1" ]]; then
   if grep -q 'UI: native dialogs' "$LOG"; then
     BOT_MODE="--dialogs"
   fi
-  if node "$ROOT/scripts/smoke-bot.js" "$VERSION" 127.0.0.1 25565 $BOT_MODE | tee "$RUN/bot.log"; then
+  # 2>&1, so the transcript holds the failure too: mineflayer reports an
+  # unsupported protocol by THROWING, which went to stderr and left the bot.log
+  # the error message points at completely empty.
+  if node "$ROOT/scripts/smoke-bot.js" "$VERSION" 127.0.0.1 25565 $BOT_MODE 2>&1 | tee "$RUN/bot.log"; then
     echo "== bot phase passed"
+  elif grep -qE "is not supported\. Latest supported version|please specify the correct version" "$RUN/bot.log"; then
+    # The guard above asked minecraft-data and got a yes, but mineflayer's
+    # protocol loader has its own, shorter list and rejects the server's ping
+    # version. 26.1 is the case in point: minecraft-data ships a 26.1 entry, so
+    # every version check that can be made BEFORE connecting says "supported",
+    # while mineflayer still throws "Latest supported version is 1.21.11". The
+    # only reliable signal is the throw itself, so it counts as the same skip
+    # the guard would have taken - not as a VibeMod failure.
+    echo "== skipping the player phase (mineflayer cannot speak $VERSION after all)"
   else
     echo "!! bot phase FAILED (transcript: $RUN/bot.log)" >&2
     BOT_FAILED=1
